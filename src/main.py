@@ -154,13 +154,7 @@ def summarize_run_time_by_sor_range(
     )
 
 
-def main():
-    # Use pathlib for cross-platform path handling
-    log_path = Path("./samples/log-reset-01.csv").resolve()
-    # log_path = Path("./samples/log-reset-02.csv").resolve()
-    # log_path = Path("C:/Games/Utility/ICScriptHub/log-reset.csv").resolve()
-    # log_path = Path("./samples/log-reset-extraversion-2025-08-05.csv").resolve()
-
+def calculate_fort(log_path):
     # Check if file exists before reading
     if not log_path.exists():
         print(f"Error: CSV file not found at {log_path}")
@@ -333,6 +327,15 @@ def main():
         print("Error: The CSV file is empty.")
     except Exception as e:
         print(f"Error processing CSV file: {e}")
+
+
+def main():
+    # Use pathlib for cross-platform path handling
+    log_path = Path("./samples/log-reset-01.csv").resolve()
+    # log_path = Path("./samples/log-reset-02.csv").resolve()
+    # log_path = Path("C:/Games/Utility/ICScriptHub/log-reset.csv").resolve()
+    # log_path = Path("./samples/log-reset-extraversion-2025-08-05.csv").resolve()
+    calculate_fort(log_path)
 
 
 def regression_analysis(df_range, input_data_fort):
