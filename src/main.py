@@ -154,6 +154,65 @@ def summarize_run_time_by_sor_range(
     )
 
 
+def regression_analysis(df_range, input_data_fort):
+    # Generate sequence from 1 to input_data_fort
+    sor_sequence = np.arange(1, input_data_fort + 1)
+
+    # Linear regression
+    X_linear = sm.add_constant(df_range["sor#"])
+    linear_model = sm.OLS(df_range["adjusted_run_time"], X_linear).fit()
+    linear_model_output = linear_model.predict(sm.add_constant(sor_sequence))
+
+    # Quadratic regression
+    df_range["sor#_squared"] = df_range["sor#"] ** 2
+    X_quadratic = sm.add_constant(df_range[["sor#", "sor#_squared"]])
+    quadratic_model = sm.OLS(df_range["adjusted_run_time"], X_quadratic).fit()
+    quadratic_model_output = quadratic_model.predict(
+        sm.add_constant(np.column_stack((sor_sequence, sor_sequence**2)))
+    )
+
+    # Create a new DataFrame with the required columns
+    result_df = (
+        pd.DataFrame(
+            {
+                "sor#": sor_sequence,
+                "linear_model_output": linear_model_output,
+                "quadratic_model_output": quadratic_model_output,
+            }
+        )
+        .sort_values(by="sor#")
+        .reset_index(drop=True)
+    )
+
+    # Diagnostics
+    diagnostics = {
+        "linear": {
+            "R-squared": linear_model.rsquared,
+            "Adj. R-squared": linear_model.rsquared_adj,
+            "F-statistic": linear_model.fvalue,
+            "p-value": linear_model.f_pvalue,
+            "Coefficients": linear_model.params,
+            "Standard Errors": linear_model.bse,
+            "Confidence Intervals": linear_model.conf_int(),
+            "Residuals": linear_model.resid,
+            "Summary": linear_model.summary(),
+        },
+        "quadratic": {
+            "R-squared": quadratic_model.rsquared,
+            "Adj. R-squared": quadratic_model.rsquared_adj,
+            "F-statistic": quadratic_model.fvalue,
+            "p-value": quadratic_model.f_pvalue,
+            "Coefficients": quadratic_model.params,
+            "Standard Errors": quadratic_model.bse,
+            "Confidence Intervals": quadratic_model.conf_int(),
+            "Residuals": quadratic_model.resid,
+            "Summary": quadratic_model.summary(),
+        },
+    }
+
+    return result_df, diagnostics
+
+
 def calculate_fort(log_path):
     # Check if file exists before reading
     if not log_path.exists():
@@ -336,65 +395,6 @@ def main():
     # log_path = Path("C:/Games/Utility/ICScriptHub/log-reset.csv").resolve()
     # log_path = Path("./samples/log-reset-extraversion-2025-08-05.csv").resolve()
     calculate_fort(log_path)
-
-
-def regression_analysis(df_range, input_data_fort):
-    # Generate sequence from 1 to input_data_fort
-    sor_sequence = np.arange(1, input_data_fort + 1)
-
-    # Linear regression
-    X_linear = sm.add_constant(df_range["sor#"])
-    linear_model = sm.OLS(df_range["adjusted_run_time"], X_linear).fit()
-    linear_model_output = linear_model.predict(sm.add_constant(sor_sequence))
-
-    # Quadratic regression
-    df_range["sor#_squared"] = df_range["sor#"] ** 2
-    X_quadratic = sm.add_constant(df_range[["sor#", "sor#_squared"]])
-    quadratic_model = sm.OLS(df_range["adjusted_run_time"], X_quadratic).fit()
-    quadratic_model_output = quadratic_model.predict(
-        sm.add_constant(np.column_stack((sor_sequence, sor_sequence**2)))
-    )
-
-    # Create a new DataFrame with the required columns
-    result_df = (
-        pd.DataFrame(
-            {
-                "sor#": sor_sequence,
-                "linear_model_output": linear_model_output,
-                "quadratic_model_output": quadratic_model_output,
-            }
-        )
-        .sort_values(by="sor#")
-        .reset_index(drop=True)
-    )
-
-    # Diagnostics
-    diagnostics = {
-        "linear": {
-            "R-squared": linear_model.rsquared,
-            "Adj. R-squared": linear_model.rsquared_adj,
-            "F-statistic": linear_model.fvalue,
-            "p-value": linear_model.f_pvalue,
-            "Coefficients": linear_model.params,
-            "Standard Errors": linear_model.bse,
-            "Confidence Intervals": linear_model.conf_int(),
-            "Residuals": linear_model.resid,
-            "Summary": linear_model.summary(),
-        },
-        "quadratic": {
-            "R-squared": quadratic_model.rsquared,
-            "Adj. R-squared": quadratic_model.rsquared_adj,
-            "F-statistic": quadratic_model.fvalue,
-            "p-value": quadratic_model.f_pvalue,
-            "Coefficients": quadratic_model.params,
-            "Standard Errors": quadratic_model.bse,
-            "Confidence Intervals": quadratic_model.conf_int(),
-            "Residuals": quadratic_model.resid,
-            "Summary": quadratic_model.summary(),
-        },
-    }
-
-    return result_df, diagnostics
 
 
 if __name__ == "__main__":
