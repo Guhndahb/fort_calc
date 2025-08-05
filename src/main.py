@@ -5,6 +5,7 @@ FORT Calculator
 
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
@@ -172,8 +173,8 @@ def main():
 
         start_line = 0
         end_line = None
-        zscore_min = -100.5
-        zscore_max = 100
+        zscore_min = -1.5
+        zscore_max = 3
         input_data_fort = 100
         ignore_mrt = True
 
@@ -256,6 +257,43 @@ def main():
 
         print(f"Minimum cost per run at fort (linear): sor# {sor_min_cost_lin}")
         print(f"Minimum cost per run at fort (quadratic): sor# {sor_min_cost_quad}")
+
+        # Plotting
+        # Create a scatter plot
+        plt.style.use("dark_background")
+        plt.figure(figsize=(10, 6))
+        plt.scatter(
+            df_range["sor#"],
+            df_range["adjusted_run_time"],
+            color="cyan",
+            label="Data Points",
+        )
+
+        # Overlay linear and quadratic models
+        plt.plot(
+            df_results["sor#"],
+            df_results["linear_model_output"],
+            color="yellow",
+            label="Linear Model",
+        )
+        plt.plot(
+            df_results["sor#"],
+            df_results["quadratic_model_output"],
+            color="magenta",
+            label="Quadratic Model",
+        )
+
+        # Add labels and legend
+        plt.xlabel("Sequential Online Run #")
+        plt.ylabel("Adjusted Run Time")
+        plt.title("Scatterplot with Linear and Quadratic Models")
+        plt.legend()
+
+        # Save the plot as an SVG file
+        plt.savefig("scatterplot.svg", format="svg")
+        plt.close()
+
+        print("Scatterplot with models saved as 'scatterplot.svg'.")
 
     except FileNotFoundError:
         print(f"Error: The file {log_path} was not found.")
