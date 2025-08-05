@@ -3,6 +3,7 @@
 FORT Calculator
 """
 
+import logging
 from enum import Enum, auto
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -14,10 +15,38 @@ import statsmodels.api as sm
 
 from csv_processor import CSVRangeProcessor
 
+# Configure logging for debugging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
 
 class DeltaMode(Enum):
     PREVIOUS_CHUNK = auto()  # delta vs. the immediately-preceding chunk
     FIRST_CHUNK = auto()  # delta vs. the very first chunk
+
+
+class FilterResult:
+    """Container for filter operation results and diagnostics."""
+
+    def __init__(self):
+        self.original_rows = 0
+        self.filtered_rows = 0
+        self.excluded_ranges = 0
+        self.invalid_ranges = []
+        self.warnings = []
+        self.skipped_reason = None
+
+    def add_warning(self, message: str):
+        """Add a warning message."""
+        self.warnings.append(message)
+        logger.warning(message)
+
+    def log_invalid_range(self, start: str, end: str, reason: str):
+        """Log an invalid timestamp range."""
+        self.invalid_ranges.append((start, end, reason))
+        logger.warning(f"Invalid timestamp range skipped: {start}-{end} - {reason}")
 
 
 def clean_ignore(df: pd.DataFrame, input_data_fort: int) -> pd.DataFrame:
@@ -130,55 +159,143 @@ def filter_timestamp_ranges(
     df: pd.DataFrame,
     exclude_timestamp_ranges: Optional[List[Tuple[str, str]]] = None,
     timestamp_column: str = "timestamp",
+    verbose: bool = False,
 ) -> pd.DataFrame:
     """
-    Filter out rows that fall within specified timestamp ranges.
+    Filter out rows that fall within specified timestamp ranges with comprehensive debugging.
 
-    Optimized single-mask approach for better performance with multiple ranges.
+    Enhanced version with logging for invalid ranges and observability features.
 
     Args:
         df: Input DataFrame
         exclude_timestamp_ranges: List of (start, end) timestamp tuples as strings in YYYYMMDDHHMMSS format
         timestamp_column: Name of the timestamp column to filter on
+        verbose: Enable detailed logging for debugging
 
     Returns:
         DataFrame with rows outside the specified timestamp ranges
     """
+    result = FilterResult()
+    result.original_rows = len(df)
+
+    # Early return for empty DataFrame
+    if df.empty:
+        result.add_warning("Empty DataFrame provided - no filtering performed")
+        if verbose:
+            logger.info(f"Filter result: {result.__dict__}")
+        return df
+
+    # Early return for empty ranges
     if not exclude_timestamp_ranges:
         return df
 
-    # Ensure timestamp column exists and is datetime
+    # Check if timestamp column exists
     if timestamp_column not in df.columns:
+        result.add_warning(
+            f"Timestamp column '{timestamp_column}' not found - no filtering performed"
+        )
+        if verbose:
+            logger.info(f"Filter result: {result.__dict__}")
         return df
 
-    # Convert timestamp column to datetime if not already
-    if not pd.api.types.is_datetime64_any_dtype(df[timestamp_column]):
-        try:
-            df = df.copy()
-            df[timestamp_column] = pd.to_datetime(df[timestamp_column], errors="coerce")
-        except (ValueError, TypeError):
-            return df
+    # Process timestamp column - now expects datetime format
+    df_work = df.copy()
 
-    # Build single exclusion mask
-    exclude_mask = pd.Series([False] * len(df), index=df.index)
+    # Add diagnostic logging for timestamp column
+    if verbose:
+        logger.info(f"Timestamp column dtype: {df_work[timestamp_column].dtype}")
+        logger.info(
+            f"First few timestamp values: {df_work[timestamp_column].iloc[:3].tolist()}"
+        )
+        logger.info(f"Sample exclude ranges: {exclude_timestamp_ranges}")
 
+    # Verify timestamp column is properly parsed as datetime
+    if not pd.api.types.is_datetime64_any_dtype(df_work[timestamp_column]):
+        result.add_warning(
+            f"Timestamp column '{timestamp_column}' is not in datetime format - skipping filtering"
+        )
+        if verbose:
+            logger.info(f"Filter result: {result.__dict__}")
+        return df
+
+    # Process valid timestamp ranges
+    valid_ranges = []
     for start_str, end_str in exclude_timestamp_ranges:
         try:
             start_ts = pd.to_datetime(start_str, format="%Y%m%d%H%M%S")
             end_ts = pd.to_datetime(end_str, format="%Y%m%d%H%M%S")
 
-            # Add this range to the exclusion mask
-            range_mask = (df[timestamp_column] >= start_ts) & (
-                df[timestamp_column] <= end_ts
-            )
-            exclude_mask |= range_mask
+            if verbose:
+                logger.info(
+                    f"Processing range: {start_str} -> {start_ts}, {end_str} -> {end_ts}"
+                )
 
-        except (ValueError, TypeError):
-            # Skip invalid timestamp formats
+            if start_ts > end_ts:
+                result.log_invalid_range(start_str, end_str, "start > end")
+                continue
+
+            valid_ranges.append((start_ts, end_ts))
+
+        except (ValueError, TypeError) as e:
+            result.log_invalid_range(start_str, end_str, str(e))
             continue
 
-    # Return rows NOT in any excluded range
-    return df[~exclude_mask]
+    # Early return if no valid ranges
+    if not valid_ranges:
+        result.add_warning("No valid timestamp ranges found - no filtering performed")
+        if verbose:
+            logger.info(
+                f"DataFrame timestamp column sample: {df_work[timestamp_column].iloc[:5]}"
+            )
+            logger.info(
+                f"Parsed timestamps sample: {df_work[timestamp_column].iloc[:5].dt.strftime('%Y%m%d%H%M%S')}"
+            )
+        return df
+
+    # Build exclusion mask for valid ranges
+    exclude_mask = pd.Series([False] * len(df_work), index=df_work.index)
+
+    if verbose:
+        logger.info(f"Valid ranges to exclude: {valid_ranges}")
+        logger.info(
+            f"Timestamp range in data: {df_work[timestamp_column].min()} to {df_work[timestamp_column].max()}"
+        )
+
+    for start_ts, end_ts in valid_ranges:
+        range_mask = (df_work[timestamp_column] >= start_ts) & (
+            df_work[timestamp_column] <= end_ts
+        )
+        if verbose:
+            matched_count = range_mask.sum()
+            logger.info(
+                f"Range {start_ts} to {end_ts}: {matched_count} rows would be excluded"
+            )
+            if matched_count > 0:
+                logger.info(
+                    f"Sample excluded timestamps: {df_work[range_mask][timestamp_column].iloc[:3].tolist()}"
+                )
+        exclude_mask |= range_mask
+
+    # Apply filtering
+    filtered_df = df_work[~exclude_mask]
+    result.filtered_rows = len(filtered_df)
+    result.excluded_ranges = exclude_mask.sum()
+
+    # Log summary
+    if verbose or result.warnings:
+        logger.info(
+            f"Timestamp filtering completed: "
+            f"{result.original_rows} → {result.filtered_rows} rows "
+            f"({result.excluded_ranges} rows excluded)"
+        )
+
+        if result.invalid_ranges:
+            logger.info(f"Invalid ranges skipped: {len(result.invalid_ranges)}")
+
+        if result.warnings:
+            logger.info(f"Warnings: {len(result.warnings)}")
+
+    return filtered_df
 
 
 def filter_by_adjusted_run_time_zscore(
@@ -319,6 +436,7 @@ def calculate_fort(
     ignore_mrt=True,
     delta_mode=DeltaMode.PREVIOUS_CHUNK,
     exclude_timestamp_ranges=None,
+    verbose_filtering=False,
 ):
     # Check if file exists before reading
     if not log_path.exists():
@@ -359,6 +477,7 @@ def calculate_fort(
                 .pipe(
                     filter_timestamp_ranges,
                     exclude_timestamp_ranges=exclude_timestamp_ranges,
+                    verbose=verbose_filtering,
                 )
             )
 
@@ -380,6 +499,13 @@ def calculate_fort(
             df_summary = summarize_run_time_by_sor_range(
                 df_range, input_data_fort, delta_mode
             )
+
+            # Validate that all rows have valid run_time_mean values (not NaN)
+            if df_summary["run_time_mean"].isna().any():
+                invalid_rows = df_summary[df_summary["run_time_mean"].isna()]
+                raise ValueError(
+                    f"Insufficient input data: Found {len(invalid_rows)} summary rows with no mean run time values. "
+                )
 
             # Get offline_cost from the last row of df_output
             offline_cost = df_summary.iloc[-1]["run_time_delta"]
@@ -504,6 +630,7 @@ def main():
     input_data_fort = 100
     ignore_mrt = True
     delta_mode = DeltaMode.PREVIOUS_CHUNK
+    exclude_timestamp_ranges = [("20250801124409", "20250805165454")]
     # Use pathlib for cross-platform path handling
     # log_path = Path("./samples/log-reset-01.csv").resolve()
     # log_path = Path("./samples/log-reset-02.csv").resolve()
@@ -522,7 +649,8 @@ def main():
         input_data_fort=input_data_fort,
         ignore_mrt=ignore_mrt,
         delta_mode=delta_mode,
-        exclude_timestamp_ranges=[(20250801124534, 20250805152637)],
+        exclude_timestamp_ranges=exclude_timestamp_ranges,
+        verbose_filtering=True,
     )
 
 
