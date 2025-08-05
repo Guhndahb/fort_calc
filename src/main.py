@@ -5,6 +5,7 @@ FORT Calculator
 
 from enum import Enum, auto
 from pathlib import Path
+from typing import List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -52,6 +53,61 @@ def compute_adjusted_run_time(df, ignore_mrt):
     return df
 
 
+def filter_timestamp_ranges(
+    df: pd.DataFrame,
+    exclude_timestamp_ranges: Optional[List[Tuple[str, str]]] = None,
+    timestamp_column: str = "timestamp",
+) -> pd.DataFrame:
+    """
+    Filter out rows that fall within specified timestamp ranges.
+
+    Optimized single-mask approach for better performance with multiple ranges.
+
+    Args:
+        df: Input DataFrame
+        exclude_timestamp_ranges: List of (start, end) timestamp tuples as strings in YYYYMMDDHHMMSS format
+        timestamp_column: Name of the timestamp column to filter on
+
+    Returns:
+        DataFrame with rows outside the specified timestamp ranges
+    """
+    if not exclude_timestamp_ranges:
+        return df
+
+    # Ensure timestamp column exists and is datetime
+    if timestamp_column not in df.columns:
+        return df
+
+    # Convert timestamp column to datetime if not already
+    if not pd.api.types.is_datetime64_any_dtype(df[timestamp_column]):
+        try:
+            df = df.copy()
+            df[timestamp_column] = pd.to_datetime(df[timestamp_column], errors="coerce")
+        except (ValueError, TypeError):
+            return df
+
+    # Build single exclusion mask
+    exclude_mask = pd.Series([False] * len(df), index=df.index)
+
+    for start_str, end_str in exclude_timestamp_ranges:
+        try:
+            start_ts = pd.to_datetime(start_str, format="%Y%m%d%H%M%S")
+            end_ts = pd.to_datetime(end_str, format="%Y%m%d%H%M%S")
+
+            # Add this range to the exclusion mask
+            range_mask = (df[timestamp_column] >= start_ts) & (
+                df[timestamp_column] <= end_ts
+            )
+            exclude_mask |= range_mask
+
+        except (ValueError, TypeError):
+            # Skip invalid timestamp formats
+            continue
+
+    # Return rows NOT in any excluded range
+    return df[~exclude_mask]
+
+
 def filter_by_adjusted_run_time_zscore(
     df: pd.DataFrame, zscore_min: float, zscore_max: float, input_data_fort: int
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -78,7 +134,7 @@ def filter_by_adjusted_run_time_zscore(
 def summarize_run_time_by_sor_range(
     df_range: pd.DataFrame,
     input_data_fort: int,
-    delta_mode: DeltaMode = DeltaMode.FIRST_CHUNK,
+    delta_mode: DeltaMode = DeltaMode.PREVIOUS_CHUNK,
 ) -> pd.DataFrame:
     ranges = []
     chunk_size = (input_data_fort - 1) // 4
@@ -189,6 +245,7 @@ def calculate_fort(
     input_data_fort=100,
     ignore_mrt=True,
     delta_mode=DeltaMode.PREVIOUS_CHUNK,
+    exclude_timestamp_ranges=None,
 ):
     # Check if file exists before reading
     if not log_path.exists():
@@ -221,6 +278,10 @@ def calculate_fort(
                 df_range.pipe(clean_ignore, input_data_fort=input_data_fort)
                 .pipe(fill_first_note_if_empty)
                 .pipe(compute_adjusted_run_time, ignore_mrt=ignore_mrt)
+                .pipe(
+                    filter_timestamp_ranges,
+                    exclude_timestamp_ranges=exclude_timestamp_ranges,
+                )
             )
 
             df_range, df_excluded = filter_by_adjusted_run_time_zscore(
@@ -383,6 +444,7 @@ def main():
         input_data_fort=input_data_fort,
         ignore_mrt=ignore_mrt,
         delta_mode=delta_mode,
+        exclude_timestamp_ranges=[(20250801124534, 20250805152637)],
     )
 
 
