@@ -157,6 +157,9 @@ def summarize_run_time_by_sor_range(
 def main():
     # Use pathlib for cross-platform path handling
     log_path = Path("./samples/log-reset-01.csv").resolve()
+    # log_path = Path("./samples/log-reset-02.csv").resolve()
+    # log_path = Path("C:/Games/Utility/ICScriptHub/log-reset.csv").resolve()
+    # log_path = Path("./samples/log-reset-extraversion-2025-08-05.csv").resolve()
 
     # Check if file exists before reading
     if not log_path.exists():
@@ -226,8 +229,9 @@ def main():
         print(df_summary)
 
         # Enhanced regression analysis using statsmodels
-        df_results, regression_diagnostics = enhanced_regression_analysis(
-            df_range, input_data_fort
+        df_results, regression_diagnostics = regression_analysis(
+            df_range,
+            input_data_fort - 1,  # we do not want to include offline run
         )
 
         # Add cumulative sum columns
@@ -265,6 +269,7 @@ def main():
         plt.scatter(
             df_range["sor#"],
             df_range["adjusted_run_time"],
+            s=20,  # Adjusted size to half the original
             color="cyan",
             label="Data Points",
         )
@@ -281,6 +286,33 @@ def main():
             df_results["quadratic_model_output"],
             color="magenta",
             label="Quadratic Model",
+        )
+
+        # Plot cost per run at fort for linear and quadratic models
+        plt.plot(
+            df_results["sor#"],
+            df_results["cost_per_run_at_fort_lin"],
+            color="green",
+            linestyle="--",
+            label="Cost/Run @ FORT (Linear)",
+        )
+        plt.plot(
+            df_results["sor#"],
+            df_results["cost_per_run_at_fort_quad"],
+            color="blue",
+            linestyle="--",
+            label="Cost/Run @ FORT (Quadratic)",
+        )
+
+        # Add vertical lines for minimum cost points
+        plt.axvline(
+            x=sor_min_cost_lin, color="green", linestyle="--", label="Min Cost (Linear)"
+        )
+        plt.axvline(
+            x=sor_min_cost_quad,
+            color="blue",
+            linestyle="--",
+            label="Min Cost (Quadratic)",
         )
 
         # Add labels and legend
@@ -303,7 +335,7 @@ def main():
         print(f"Error processing CSV file: {e}")
 
 
-def enhanced_regression_analysis(df_range, input_data_fort):
+def regression_analysis(df_range, input_data_fort):
     # Generate sequence from 1 to input_data_fort
     sor_sequence = np.arange(1, input_data_fort + 1)
 
