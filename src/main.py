@@ -3,12 +3,18 @@
 FORT Calculator
 """
 
+from enum import Enum, auto
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
+
+
+class DeltaMode(Enum):
+    PREVIOUS_CHUNK = auto()  # delta vs. the immediately-preceding chunk
+    FIRST_CHUNK = auto()  # delta vs. the very first chunk
 
 
 def read_csv_range(
@@ -79,18 +85,6 @@ def compute_adjusted_run_time(df, ignore_mrt):
     return df
 
 
-# def validate_sor_column(df: pd.DataFrame, max_sor: int) -> None:
-#     if not pd.api.types.is_integer_dtype(df["sor#"]):
-#         if not df["sor#"].dropna().apply(lambda x: isinstance(x, int)).all():
-#             raise ValueError("Column 'sor#' contains non-integer values.")
-
-#     if (df["sor#"] < 1).any():
-#         raise ValueError("Column 'sor#' contains values less than 1.")
-
-#     if (df["sor#"] > max_sor).any():
-#         raise ValueError(f"Column 'sor#' contains values greater than {max_sor}.")
-
-
 def filter_by_adjusted_run_time_zscore(
     df: pd.DataFrame, zscore_min: float, zscore_max: float, input_data_fort: int
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -115,7 +109,9 @@ def filter_by_adjusted_run_time_zscore(
 
 # Recalculate output assuming df_range and input_data_fort are still in memory
 def summarize_run_time_by_sor_range(
-    df_range: pd.DataFrame, input_data_fort: int
+    df_range: pd.DataFrame,
+    input_data_fort: int,
+    delta_mode: DeltaMode = DeltaMode.FIRST_CHUNK,
 ) -> pd.DataFrame:
     ranges = []
     chunk_size = (input_data_fort - 1) // 4
@@ -143,8 +139,11 @@ def summarize_run_time_by_sor_range(
         if i == 0:
             delta = np.nan
         else:
-            # delta = mean_runtime - output_rows[-1][2]
-            delta = mean_runtime - output_rows[0][2]
+            if delta_mode is DeltaMode.PREVIOUS_CHUNK:
+                baseline = output_rows[-1][2]  # previous chunk
+            else:  # DeltaMode.FIRST_CHUNK
+                baseline = output_rows[0][2]  # first chunk
+            delta = mean_runtime - baseline
 
         output_rows.append([start, end, mean_runtime, delta])
 
@@ -213,7 +212,7 @@ def regression_analysis(df_range, input_data_fort):
     return result_df, diagnostics
 
 
-def calculate_fort(log_path):
+def calculate_fort(log_path, delta_mode):
     # Check if file exists before reading
     if not log_path.exists():
         print(f"Error: CSV file not found at {log_path}")
@@ -257,8 +256,6 @@ def calculate_fort(log_path):
             .pipe(compute_adjusted_run_time, ignore_mrt=ignore_mrt)
         )
 
-        # validate_sor_column(df_range, input_data_fort)
-
         df_range, df_excluded = filter_by_adjusted_run_time_zscore(
             df_range, zscore_min, zscore_max, input_data_fort
         )
@@ -274,7 +271,9 @@ def calculate_fort(log_path):
                 f"Too few rows remaining after filtering (found {len(df_range)}, need at least 5)"
             )
 
-        df_summary = summarize_run_time_by_sor_range(df_range, input_data_fort)
+        df_summary = summarize_run_time_by_sor_range(
+            df_range, input_data_fort, delta_mode
+        )
 
         # Get offline_cost from the last row of df_output
         offline_cost = df_summary.iloc[-1]["run_time_delta"]
@@ -389,12 +388,13 @@ def calculate_fort(log_path):
 
 
 def main():
+    delta_mode = DeltaMode.PREVIOUS_CHUNK
     # Use pathlib for cross-platform path handling
     log_path = Path("./samples/log-reset-01.csv").resolve()
     # log_path = Path("./samples/log-reset-02.csv").resolve()
     # log_path = Path("C:/Games/Utility/ICScriptHub/log-reset.csv").resolve()
     # log_path = Path("./samples/log-reset-extraversion-2025-08-05.csv").resolve()
-    calculate_fort(log_path)
+    calculate_fort(log_path, delta_mode)
 
 
 if __name__ == "__main__":
