@@ -1,0 +1,17 @@
+[tool.ruff]
+# Black-compatible line length
+line-length = 88
+indent-width = 4
+target-version = "py38"
+
+[tool.ruff.lint]
+# Enable common linting rules
+select = ["E4", "E7", "E9", "F", "I"]  # Including isort rules
+ignore = []
+
+[tool.ruff.format]
+# Use double quotes (Black-compatible)
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
