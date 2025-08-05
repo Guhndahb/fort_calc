@@ -19,41 +19,6 @@ class DeltaMode(Enum):
     FIRST_CHUNK = auto()  # delta vs. the very first chunk
 
 
-def read_csv_range(
-    file_path: Path, start_line: int, end_line: int = None
-) -> pd.DataFrame:
-    """
-    Read a specific range of lines from a CSV file.
-
-    Args:
-        file_path (Path): Path to the CSV file
-        start_line (int): Starting line number (1-indexed, including header)
-        end_line (int, optional): Ending line number (1-indexed). If None, reads to end
-
-    Returns:
-        pd.DataFrame: DataFrame containing the specified range of rows
-    """
-    try:
-        # Read the CSV file with specified range
-        df = pd.read_csv(
-            file_path,
-            skiprows=range(1, start_line),
-            nrows=end_line - start_line if end_line else None,
-        )
-
-        return df
-
-    except FileNotFoundError:
-        print(f"Error: The file {file_path} was not found.")
-        return pd.DataFrame()  # Return an empty DataFrame on error
-    except pd.errors.EmptyDataError:
-        print("Error: The CSV file is empty.")
-        return pd.DataFrame()
-    except Exception as e:
-        print(f"Error reading CSV range: {e}")
-        return pd.DataFrame()
-
-
 def clean_ignore(df: pd.DataFrame, input_data_fort: int) -> pd.DataFrame:
     return (
         df.assign(
