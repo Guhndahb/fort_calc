@@ -49,19 +49,42 @@ class FilterResult:
         logger.warning(f"Invalid timestamp range skipped: {start}-{end} - {reason}")
 
 
-def clean_ignore(df: pd.DataFrame, input_data_fort: int) -> pd.DataFrame:
-    return (
-        df.assign(
-            ignore=lambda d: d["ignore"].astype(str).str.strip().str.upper().eq("TRUE"),
-            sor_valid=lambda d: pd.to_numeric(
-                d["sor#"], errors="coerce"
-            ),  # convert safely
-        )
-        .dropna(subset=["runticks", "sor_valid"])
-        .loc[lambda d: ~d["ignore"]]
-        .loc[lambda d: (d["sor_valid"] >= 1) & (d["sor_valid"] <= input_data_fort)]
-        .drop(columns=["sor_valid"])  # clean up helper column
-    )
+def clean_ignore(
+    df: pd.DataFrame, input_data_fort: int, verbose: bool = False
+) -> pd.DataFrame:
+    result = FilterResult()
+    result.original_rows = len(df)
+
+    if df.empty:
+        result.add_warning("Empty DataFrame provided - no filtering performed")
+        if verbose:
+            logger.info(f"Filter result: {result.__dict__}")
+        return df
+
+    df = df.assign(
+        ignore=lambda d: d["ignore"].astype(str).str.strip().str.upper().eq("TRUE"),
+        sor_valid=lambda d: pd.to_numeric(d["sor#"], errors="coerce"),
+    ).dropna(subset=["runticks", "sor_valid"])
+
+    if verbose:
+        logger.info(f"Initial rows: {len(df)}")
+
+    df = df.loc[lambda d: ~d["ignore"]]
+    df = df.loc[lambda d: (d["sor_valid"] >= 1) & (d["sor_valid"] <= input_data_fort)]
+
+    result.filtered_rows = len(df)
+    result.excluded_ranges = result.original_rows - result.filtered_rows
+
+    if verbose:
+        logger.info(f"Filtered rows: {result.filtered_rows}")
+        logger.info(f"Excluded rows: {result.excluded_ranges}")
+
+    df = df.drop(columns=["sor_valid"])
+
+    if verbose or result.warnings:
+        logger.info(f"Clean ignore result: {result.__dict__}")
+
+    return df
 
 
 def fill_first_note_if_empty(df: pd.DataFrame) -> pd.DataFrame:
