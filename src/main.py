@@ -53,6 +53,79 @@ def compute_adjusted_run_time(df, ignore_mrt):
     return df
 
 
+def convert_timestamp_column_to_datetime(
+    df: pd.DataFrame,
+    timestamp_column: str = "timestamp",
+    timestamp_format: str = "%Y%m%d%H%M%S",
+    verbose: bool = False,
+) -> pd.DataFrame:
+    """
+    Convert timestamp column to datetime format consistently regardless of filtering.
+
+    This ensures consistent data type handling by always converting the timestamp
+    column to datetime format, regardless of whether filtering is applied or not.
+
+    Args:
+        df: Input DataFrame
+        timestamp_column: Name of the timestamp column to convert
+        verbose: Enable detailed logging for debugging
+
+    Returns:
+        DataFrame with timestamp column converted to datetime
+    """
+    df_work = df.copy()
+
+    if timestamp_column not in df_work.columns:
+        logger.warning(
+            f"Timestamp column '{timestamp_column}' not found - skipping conversion"
+        )
+        return df_work
+
+    if verbose:
+        logger.info(f"Converting timestamp column '{timestamp_column}' to datetime")
+        logger.info(f"Original dtype: {df_work[timestamp_column].dtype}")
+        logger.info(f"Sample values: {df_work[timestamp_column].iloc[:3].tolist()}")
+
+    # Convert timestamp column to datetime
+    try:
+        if not pd.api.types.is_datetime64_any_dtype(df_work[timestamp_column]):
+            # Handle both string and integer timestamps
+            if df_work[timestamp_column].dtype in ["int64", "float64"]:
+                df_work[timestamp_column] = pd.to_datetime(
+                    df_work[timestamp_column].astype(str),
+                    format=timestamp_format,
+                    errors="coerce",
+                )
+            else:
+                df_work[timestamp_column] = pd.to_datetime(
+                    df_work[timestamp_column], format=timestamp_format, errors="coerce"
+                )
+
+        # Check for parsing failures
+        invalid_timestamps = df_work[timestamp_column].isna().sum()
+        if invalid_timestamps > 0:
+            logger.warning(
+                f"Found {invalid_timestamps} invalid timestamps in column '{timestamp_column}'"
+            )
+            if verbose:
+                logger.info(f"Invalid timestamps found: {invalid_timestamps}")
+
+        if verbose:
+            logger.info(f"Converted dtype: {df_work[timestamp_column].dtype}")
+            logger.info(
+                f"Sample converted values: {df_work[timestamp_column].iloc[:3].tolist()}"
+            )
+
+    except Exception as e:
+        logger.error(
+            f"Failed to convert timestamp column '{timestamp_column}' to datetime: {str(e)}"
+        )
+        # Return original dataframe if conversion fails
+        return df
+
+    return df_work
+
+
 def filter_timestamp_ranges(
     df: pd.DataFrame,
     exclude_timestamp_ranges: Optional[List[Tuple[str, str]]] = None,
@@ -278,6 +351,11 @@ def calculate_fort(
                 df_range.pipe(clean_ignore, input_data_fort=input_data_fort)
                 .pipe(fill_first_note_if_empty)
                 .pipe(compute_adjusted_run_time, ignore_mrt=ignore_mrt)
+                .pipe(
+                    convert_timestamp_column_to_datetime,
+                    timestamp_column="timestamp",
+                    verbose=verbose_filtering,
+                )
                 .pipe(
                     filter_timestamp_ranges,
                     exclude_timestamp_ranges=exclude_timestamp_ranges,
