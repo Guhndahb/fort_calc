@@ -30,88 +30,174 @@ class DeltaMode(Enum):
 class FilterResult:
     """Container for filter operation results and diagnostics."""
 
-    def __init__(self):
-        self.original_rows = 0
-        self.filtered_rows = 0
-        self.excluded_ranges = 0
-        self.invalid_ranges = []
-        self.warnings = []
-        self.skipped_reason = None
+    def __init__(self, label: Optional[str] = None):
+        # Identification
+        self.label = label
 
+        # Row counters
+        self.original_rows: int = 0
+        self.filtered_rows: int = 0
+        # Keep existing field for backwards compatibility with timestamp filter
+        self.excluded_ranges: int = 0
+        # New: specifically for row-level filters
+        self.excluded_rows: int = 0
+
+        # Diagnostics
+        self.invalid_ranges: list[tuple[str, str, str]] = []
+        self.warnings: list[str] = []
+        self.events: list[str] = []
+        self.metrics: dict[str, int | float | str] = {}
+        self.skipped_reason: Optional[str] = None
+
+        # Timing
+        self.started_at: Optional[float] = None
+        self.finished_at: Optional[float] = None
+        self.elapsed_ms: Optional[float] = None
+
+    # Timing helpers
+    def start(self):
+        import time
+
+        self.started_at = time.perf_counter()
+
+    def stop(self):
+        import time
+
+        self.finished_at = time.perf_counter()
+        if self.started_at is not None:
+            self.elapsed_ms = (self.finished_at - self.started_at) * 1000.0
+
+    # Logging helpers
     def add_warning(self, message: str):
         """Add a warning message."""
         self.warnings.append(message)
         logger.warning(message)
+
+    def add_event(self, message: str):
+        """Add an info-level event message."""
+        self.events.append(message)
+        logger.info(message)
+
+    def add_metric(self, name: str, value):
+        """Attach a named metric."""
+        self.metrics[name] = value
 
     def log_invalid_range(self, start: str, end: str, reason: str):
         """Log an invalid timestamp range."""
         self.invalid_ranges.append((start, end, reason))
         logger.warning(f"Invalid timestamp range skipped: {start}-{end} - {reason}")
 
+    def set_skipped(self, reason: str):
+        """Mark the step as skipped with a reason."""
+        self.skipped_reason = reason
+        self.add_warning(f"Step skipped: {reason}")
+
+    def summarize(self) -> str:
+        """Produce a concise summary string for diagnostics."""
+        lbl = f"{self.label} " if self.label else ""
+        parts = [f"{lbl}result: {self.original_rows} → {self.filtered_rows}"]
+        if self.excluded_rows:
+            parts.append(f"excluded_rows={self.excluded_rows}")
+        if self.excluded_ranges:
+            parts.append(f"excluded_ranges={self.excluded_ranges}")
+        if self.invalid_ranges:
+            parts.append(f"invalid_ranges={len(self.invalid_ranges)}")
+        if self.skipped_reason:
+            parts.append(f"skipped={self.skipped_reason}")
+        if self.elapsed_ms is not None:
+            parts.append(f"elapsed_ms={self.elapsed_ms:.1f}")
+        if self.metrics:
+            parts.append(f"metrics={self.metrics}")
+        return " | ".join(parts)
+
 
 def clean_ignore(
     df: pd.DataFrame, input_data_fort: int, verbose: bool = False
 ) -> pd.DataFrame:
-    result = FilterResult()
+    """
+    Filter out rows marked as ignore and rows with out-of-bounds or invalid sor#.
+    Uses FilterResult for standardized diagnostics while returning a DataFrame
+    to preserve pandas piping.
+    """
+    result = FilterResult(label="clean_ignore")
+    result.start()
     result.original_rows = len(df)
 
     if df.empty:
-        result.add_warning("Empty DataFrame provided - no filtering performed")
+        result.set_skipped("empty dataframe")
+        result.stop()
         if verbose:
-            logger.info(f"Filter result: {result.__dict__}")
+            logger.info(result.summarize())
         return df
 
-    df = df.assign(
-        ignore=lambda d: d["ignore"].astype(str).str.strip().str.upper().eq("TRUE"),
-        sor_valid=lambda d: pd.to_numeric(d["sor#"], errors="coerce"),
-    ).dropna(subset=["runticks", "sor_valid"])
+    # Assign helper columns and drop impossible rows early
+    df_work = df.assign(
+        ignore=lambda d: d["ignore"].astype(str).str.strip().str.upper().eq("TRUE")
+        if "ignore" in d.columns
+        else False,
+        sor_valid=lambda d: pd.to_numeric(d["sor#"], errors="coerce")
+        if "sor#" in d.columns
+        else pd.Series([pd.NA] * len(d), index=d.index),
+    ).dropna(subset=["runticks", "sor_valid"], how="any")
+
+    # Metrics prior to boolean filtering
+    rows_after_dropna = len(df_work)
+    result.add_metric("rows_after_dropna", rows_after_dropna)
+    result.add_metric("input_data_fort", input_data_fort)
+
+    # Warn if required columns were missing
+    if "ignore" not in df.columns:
+        result.add_warning("Column 'ignore' not found - assuming all rows not ignored")
+    if "sor#" not in df.columns:
+        result.add_warning("Column 'sor#' not found - sor bounds cannot be validated")
+
+    # Apply filtering masks
+    mask_not_ignored = ~df_work["ignore"]
+    mask_sor_bounds = (df_work["sor_valid"] >= 1) & (
+        df_work["sor_valid"] <= input_data_fort
+    )
+    df_work = df_work.loc[mask_not_ignored & mask_sor_bounds]
+
+    result.filtered_rows = len(df_work)
+    result.excluded_rows = result.original_rows - result.filtered_rows
+
+    # Drop helper column to keep schema tidy
+    if "sor_valid" in df_work.columns:
+        df_work = df_work.drop(columns=["sor_valid"])
+
+    result.stop()
 
     if verbose:
-        logger.info(f"Initial rows: {len(df)}")
+        logger.info(result.summarize())
 
-    df = df.loc[lambda d: ~d["ignore"]]
-    df = df.loc[lambda d: (d["sor_valid"] >= 1) & (d["sor_valid"] <= input_data_fort)]
-
-    result.filtered_rows = len(df)
-    result.excluded_ranges = result.original_rows - result.filtered_rows
-
-    if verbose:
-        logger.info(f"Filtered rows: {result.filtered_rows}")
-        logger.info(f"Excluded rows: {result.excluded_ranges}")
-
-    df = df.drop(columns=["sor_valid"])
-
-    if verbose or result.warnings:
-        logger.info(f"Clean ignore result: {result.__dict__}")
-
-    return df
+    return df_work
 
 
 def fill_first_note_if_empty(df: pd.DataFrame, verbose: bool = False) -> pd.DataFrame:
     """
     Ensure the first row's 'notes' column contains a value.
-    Adopts the FilterResult diagnostics pattern while maintaining DataFrame return for piping.
-
-    Behavior:
-    - No copy unless we actually need to mutate (to avoid unnecessary .copy()).
-    - If DataFrame is empty, warn and return as-is.
-    - If 'notes' column is missing, warn and return as-is.
-    - If first note is empty/NaN, set to "<DATA START>" and optionally log via verbose.
+    Uses FilterResult diagnostics while preserving DataFrame return for piping.
+    Avoids copying; mutates in place only when needed.
     """
-    result = FilterResult()
+    result = FilterResult(label="fill_first_note_if_empty")
+    result.start()
     result.original_rows = len(df)
 
     # Early returns without copying when no work is needed
     if df.empty:
-        result.add_warning("Empty DataFrame provided - no notes to fill")
+        result.set_skipped("empty dataframe - no notes to fill")
+        result.filtered_rows = len(df)
+        result.stop()
         if verbose:
-            logger.info(f"Fill-first-note result: {result.__dict__}")
+            logger.info(result.summarize())
         return df
 
     if "notes" not in df.columns:
-        result.add_warning("Column 'notes' not found - skipping fill")
+        result.set_skipped("column 'notes' not found - skipping fill")
+        result.filtered_rows = len(df)
+        result.stop()
         if verbose:
-            logger.info(f"Fill-first-note result: {result.__dict__}")
+            logger.info(result.summarize())
         return df
 
     # Determine if first note is empty
@@ -120,35 +206,91 @@ def fill_first_note_if_empty(df: pd.DataFrame, verbose: bool = False) -> pd.Data
     is_empty = pd.isna(first_val) or (
         isinstance(first_val, str) and first_val.strip() == ""
     )
+    result.add_metric("first_note_was_empty", int(bool(is_empty)))
 
     if not is_empty:
         # Nothing to change; keep original reference
         result.filtered_rows = len(df)
+        result.stop()
         if verbose:
-            logger.info("First note already present - no changes made")
-            logger.info(f"Fill-first-note result: {result.__dict__}")
+            result.add_event("First note already present - no changes made")
+            logger.info(result.summarize())
         return df
 
-    # We need to mutate; create a shallow copy now to avoid altering upstream df unexpectedly
-    df_work = df.copy()
-    df_work.at[first_idx, "notes"] = "<DATA START>"
-
-    result.filtered_rows = len(df_work)
+    # Mutate in place only when needed
+    df.at[first_idx, "notes"] = "<DATA START>"
+    result.filtered_rows = len(df)
+    result.stop()
     if verbose:
-        logger.info("Filled first empty note with '<DATA START>'")
-        logger.info(f"Fill-first-note result: {result.__dict__}")
+        result.add_event("Filled first empty note with '<DATA START>'")
+        logger.info(result.summarize())
 
-    return df_work
+    return df
 
 
-def compute_adjusted_run_time(df, ignore_mrt):
+def compute_adjusted_run_time(
+    df: pd.DataFrame, ignore_mrt: bool, verbose: bool = False
+) -> pd.DataFrame:
+    """
+    Compute adjusted_run_time with diagnostics via FilterResult.
+    Preserves DataFrame -> DataFrame contract for pandas piping.
+    NOTE: Avoids df.copy() to respect in-place performance preference.
+
+    Behavior:
+    - If ignore_mrt is True: adjusted_run_time = runticks / 1000.0
+    - Else: adjusted_run_time = (runticks - resetticks) / 1000.0 with resetticks coerced to numeric and NaN→0
+    - Emits warnings/metrics for NaN/negative adjusted values and missing columns.
+    """
+    result = FilterResult(label="compute_adjusted_run_time")
+    result.start()
+    result.original_rows = len(df)
+
+    # Validate required columns
+    required = ["runticks"] + ([] if ignore_mrt else ["resetticks"])
+    missing_cols = [c for c in required if c not in df.columns]
+    if missing_cols:
+        result.set_skipped(f"missing required columns: {missing_cols}")
+        result.filtered_rows = len(df)
+        result.stop()
+        if verbose:
+            logger.info(result.summarize())
+        return df  # return original if we cannot compute safely
+
+    # Ensure runticks numeric (in-place)
+    df["runticks"] = pd.to_numeric(df["runticks"], errors="coerce")
+
     if ignore_mrt:
         # No need to touch resetticks at all
         df["adjusted_run_time"] = df["runticks"] / 1000.0
     else:
-        # Clean resetticks only if we're going to use it
+        # Clean resetticks only if we're going to use it (in-place)
         df["resetticks"] = pd.to_numeric(df["resetticks"], errors="coerce").fillna(0)
         df["adjusted_run_time"] = (df["runticks"] - df["resetticks"]) / 1000.0
+
+    # Diagnostics on results
+    nan_count = df["adjusted_run_time"].isna().sum()
+    neg_count = (df["adjusted_run_time"] < 0).sum()
+
+    if nan_count > 0:
+        result.add_warning(
+            f"{nan_count} NaN adjusted_run_time values after computation"
+        )
+    if neg_count > 0:
+        result.add_warning(
+            f"{neg_count} negative adjusted_run_time values after computation"
+        )
+
+    # Track metrics
+    result.add_metric("ignore_mrt", ignore_mrt)
+    result.add_metric("nan_adjusted_values", int(nan_count))
+    result.add_metric("negative_adjusted_values", int(neg_count))
+
+    result.filtered_rows = len(df)
+    result.stop()
+
+    if verbose:
+        logger.info(result.summarize())
+
     return df
 
 
@@ -160,69 +302,74 @@ def convert_timestamp_column_to_datetime(
 ) -> pd.DataFrame:
     """
     Convert timestamp column to datetime format consistently regardless of filtering.
-
-    This ensures consistent data type handling by always converting the timestamp
-    column to datetime format, regardless of whether filtering is applied or not.
-
-    Args:
-        df: Input DataFrame
-        timestamp_column: Name of the timestamp column to convert
-        verbose: Enable detailed logging for debugging
-
-    Returns:
-        DataFrame with timestamp column converted to datetime
+    Uses FilterResult diagnostics and avoids unnecessary copying by mutating in place.
     """
-    df_work = df.copy()
+    result = FilterResult(label="convert_timestamp_column_to_datetime")
+    result.start()
+    result.original_rows = len(df)
 
-    if timestamp_column not in df_work.columns:
-        logger.warning(
-            f"Timestamp column '{timestamp_column}' not found - skipping conversion"
+    if timestamp_column not in df.columns:
+        result.set_skipped(
+            f"timestamp column '{timestamp_column}' not found - skipping conversion"
         )
-        return df_work
+        result.filtered_rows = len(df)
+        result.stop()
+        if verbose:
+            logger.info(result.summarize())
+        return df
 
     if verbose:
         logger.info(f"Converting timestamp column '{timestamp_column}' to datetime")
-        logger.info(f"Original dtype: {df_work[timestamp_column].dtype}")
-        logger.info(f"Sample values: {df_work[timestamp_column].iloc[:3].tolist()}")
+        logger.info(f"Original dtype: {df[timestamp_column].dtype}")
+        logger.info(f"Sample values: {df[timestamp_column].iloc[:3].tolist()}")
 
-    # Convert timestamp column to datetime
+    # Convert timestamp column to datetime (in place)
     try:
-        if not pd.api.types.is_datetime64_any_dtype(df_work[timestamp_column]):
+        if not pd.api.types.is_datetime64_any_dtype(df[timestamp_column]):
             # Handle both string and integer timestamps
-            if df_work[timestamp_column].dtype in ["int64", "float64"]:
-                df_work[timestamp_column] = pd.to_datetime(
-                    df_work[timestamp_column].astype(str),
+            if df[timestamp_column].dtype in ["int64", "float64"]:
+                df[timestamp_column] = pd.to_datetime(
+                    df[timestamp_column].astype(str),
                     format=timestamp_format,
                     errors="coerce",
                 )
             else:
-                df_work[timestamp_column] = pd.to_datetime(
-                    df_work[timestamp_column], format=timestamp_format, errors="coerce"
+                df[timestamp_column] = pd.to_datetime(
+                    df[timestamp_column], format=timestamp_format, errors="coerce"
                 )
 
         # Check for parsing failures
-        invalid_timestamps = df_work[timestamp_column].isna().sum()
+        invalid_timestamps = int(df[timestamp_column].isna().sum())
         if invalid_timestamps > 0:
-            logger.warning(
+            result.add_warning(
                 f"Found {invalid_timestamps} invalid timestamps in column '{timestamp_column}'"
             )
-            if verbose:
-                logger.info(f"Invalid timestamps found: {invalid_timestamps}")
+        result.add_metric("invalid_timestamps", invalid_timestamps)
+        result.add_metric("converted_dtype", str(df[timestamp_column].dtype))
 
         if verbose:
-            logger.info(f"Converted dtype: {df_work[timestamp_column].dtype}")
+            logger.info(f"Converted dtype: {df[timestamp_column].dtype}")
             logger.info(
-                f"Sample converted values: {df_work[timestamp_column].iloc[:3].tolist()}"
+                f"Sample converted values: {df[timestamp_column].iloc[:3].tolist()}"
             )
 
     except Exception as e:
-        logger.error(
-            f"Failed to convert timestamp column '{timestamp_column}' to datetime: {str(e)}"
-        )
-        # Return original dataframe if conversion fails
+        result.set_skipped(f"conversion failed: {str(e)}")
+        result.filtered_rows = len(df)
+        result.stop()
+        if verbose:
+            logger.error(
+                f"Failed to convert timestamp column '{timestamp_column}' to datetime: {str(e)}"
+            )
+            logger.info(result.summarize())
         return df
 
-    return df_work
+    result.filtered_rows = len(df)
+    result.stop()
+    if verbose:
+        logger.info(result.summarize())
+
+    return df
 
 
 def filter_timestamp_ranges(
