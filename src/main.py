@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 
+from csv_processor import CSVRangeProcessor
+
 
 class DeltaMode(Enum):
     PREVIOUS_CHUNK = auto()  # delta vs. the immediately-preceding chunk
@@ -212,7 +214,17 @@ def regression_analysis(df_range, input_data_fort):
     return result_df, diagnostics
 
 
-def calculate_fort(log_path, delta_mode):
+def calculate_fort(
+    log_path,
+    start_line=None,
+    end_line=None,
+    include_header=True,
+    zscore_min=-1.5,
+    zscore_max=3,
+    input_data_fort=100,
+    ignore_mrt=True,
+    delta_mode=DeltaMode.PREVIOUS_CHUNK,
+):
     # Check if file exists before reading
     if not log_path.exists():
         print(f"Error: CSV file not found at {log_path}")
@@ -220,164 +232,160 @@ def calculate_fort(log_path, delta_mode):
 
     try:
         # Read the CSV file once
-        df_full = pd.read_csv(log_path)
+        # df_range = pd.read_csv(log_path)
 
-        # Get total lines directly from the DataFrame
-        total_lines = len(df_full)
-        print(f"Total lines in CSV: {total_lines}")
+        with CSVRangeProcessor(log_path) as processor:
+            processor.print_range_info(start_line, end_line)
 
-        start_line = 0
-        end_line = None
-        zscore_min = -1.5
-        zscore_max = 3
-        input_data_fort = 100
-        ignore_mrt = True
-
-        if start_line > total_lines:
-            raise ValueError(
-                f"Start line {start_line} exceeds total lines {total_lines}"
+            # Read the range
+            df_range = processor.read_range(
+                start_line=start_line, end_line=end_line, include_header=include_header
             )
 
-        df_range = read_csv_range(log_path, start_line, end_line)
+            # Remove redundant read_csv_range call since we already have df_range
+            # from the CSVRangeProcessor above
 
-        if df_range.empty:
-            raise ValueError("No data found in the specified range")
+            if df_range.empty:
+                raise ValueError("No data found in the specified range")
 
-        print(f"\nSuccessfully loaded lines {start_line} to {total_lines}:")
-        print(f"Number of rows loaded: {len(df_range)}")
-        print("\nFirst few rows of the range:")
-        print(df_range.head())
-        print("\nLast few rows of the range:")
-        print(df_range.tail())
+            print(
+                f"\nSuccessfully loaded lines {start_line if start_line else 'START'} to {end_line if end_line else 'END'}:"
+            )
+            print(f"Number of rows loaded: {len(df_range)}")
+            print("\nLoaded range:")
+            print(df_range)
 
-        df_range = (
-            df_range.pipe(clean_ignore, input_data_fort=input_data_fort)
-            .pipe(fill_first_note_if_empty)
-            .pipe(compute_adjusted_run_time, ignore_mrt=ignore_mrt)
-        )
-
-        df_range, df_excluded = filter_by_adjusted_run_time_zscore(
-            df_range, zscore_min, zscore_max, input_data_fort
-        )
-
-        print("\nIncluded range:")
-        print(df_range)
-
-        print("\nExcluded range:")
-        print(df_excluded)
-
-        if len(df_range) < 5:
-            raise ValueError(
-                f"Too few rows remaining after filtering (found {len(df_range)}, need at least 5)"
+            df_range = (
+                df_range.pipe(clean_ignore, input_data_fort=input_data_fort)
+                .pipe(fill_first_note_if_empty)
+                .pipe(compute_adjusted_run_time, ignore_mrt=ignore_mrt)
             )
 
-        df_summary = summarize_run_time_by_sor_range(
-            df_range, input_data_fort, delta_mode
-        )
+            df_range, df_excluded = filter_by_adjusted_run_time_zscore(
+                df_range, zscore_min, zscore_max, input_data_fort
+            )
 
-        # Get offline_cost from the last row of df_output
-        offline_cost = df_summary.iloc[-1]["run_time_delta"]
-        print("Run Time Summary by sor# Range (Updated):")
-        print(df_summary)
+            print("\nIncluded range:")
+            print(df_range)
 
-        # Enhanced regression analysis using statsmodels
-        df_results, regression_diagnostics = regression_analysis(
-            df_range,
-            input_data_fort - 1,  # we do not want to include offline run
-        )
+            print("\nExcluded range:")
+            print(df_excluded)
 
-        # Add cumulative sum columns
-        df_results["sum_lin"] = df_results["linear_model_output"].cumsum()
-        df_results["sum_quad"] = df_results["quadratic_model_output"].cumsum()
+            if len(df_range) < 5:
+                raise ValueError(
+                    f"Too few rows remaining after filtering (found {len(df_range)}, need at least 5)"
+                )
 
-        # Add cost per run columns
-        df_results["cost_per_run_at_fort_lin"] = (
-            df_results["sum_lin"] + offline_cost
-        ) / df_results["sor#"]
-        df_results["cost_per_run_at_fort_quad"] = (
-            df_results["sum_quad"] + offline_cost
-        ) / df_results["sor#"]
+            df_summary = summarize_run_time_by_sor_range(
+                df_range, input_data_fort, delta_mode
+            )
 
-        print(df_results)
+            # Get offline_cost from the last row of df_output
+            offline_cost = df_summary.iloc[-1]["run_time_delta"]
+            print("Run Time Summary by sor# Range (Updated):")
+            print(df_summary)
 
-        # Calculate the sor# with the lowest cost per run
-        sor_min_cost_lin = df_results.loc[
-            df_results["cost_per_run_at_fort_lin"].idxmin(), "sor#"
-        ]
-        sor_min_cost_quad = df_results.loc[
-            df_results["cost_per_run_at_fort_quad"].idxmin(), "sor#"
-        ]
+            # Enhanced regression analysis using statsmodels
+            df_results, regression_diagnostics = regression_analysis(
+                df_range,
+                input_data_fort - 1,  # we do not want to include offline run
+            )
 
-        print(regression_diagnostics["linear"]["Summary"])
-        print(regression_diagnostics["quadratic"]["Summary"])
+            # Add cumulative sum columns
+            df_results["sum_lin"] = df_results["linear_model_output"].cumsum()
+            df_results["sum_quad"] = df_results["quadratic_model_output"].cumsum()
 
-        print(f"Minimum cost per run at fort (linear): sor# {sor_min_cost_lin}")
-        print(f"Minimum cost per run at fort (quadratic): sor# {sor_min_cost_quad}")
+            # Add cost per run columns
+            df_results["cost_per_run_at_fort_lin"] = (
+                df_results["sum_lin"] + offline_cost
+            ) / df_results["sor#"]
+            df_results["cost_per_run_at_fort_quad"] = (
+                df_results["sum_quad"] + offline_cost
+            ) / df_results["sor#"]
 
-        # Plotting
-        # Create a scatter plot
-        plt.style.use("dark_background")
-        plt.figure(figsize=(10, 6))
-        plt.scatter(
-            df_range["sor#"],
-            df_range["adjusted_run_time"],
-            s=20,  # Adjusted size to half the original
-            color="cyan",
-            label="Data Points",
-        )
+            print(df_results)
 
-        # Overlay linear and quadratic models
-        plt.plot(
-            df_results["sor#"],
-            df_results["linear_model_output"],
-            color="yellow",
-            label="Linear Model",
-        )
-        plt.plot(
-            df_results["sor#"],
-            df_results["quadratic_model_output"],
-            color="magenta",
-            label="Quadratic Model",
-        )
+            # Calculate the sor# with the lowest cost per run
+            sor_min_cost_lin = df_results.loc[
+                df_results["cost_per_run_at_fort_lin"].idxmin(), "sor#"
+            ]
+            sor_min_cost_quad = df_results.loc[
+                df_results["cost_per_run_at_fort_quad"].idxmin(), "sor#"
+            ]
 
-        # Plot cost per run at fort for linear and quadratic models
-        plt.plot(
-            df_results["sor#"],
-            df_results["cost_per_run_at_fort_lin"],
-            color="green",
-            linestyle="--",
-            label="Cost/Run @ FORT (Linear)",
-        )
-        plt.plot(
-            df_results["sor#"],
-            df_results["cost_per_run_at_fort_quad"],
-            color="blue",
-            linestyle="--",
-            label="Cost/Run @ FORT (Quadratic)",
-        )
+            print(regression_diagnostics["linear"]["Summary"])
+            print(regression_diagnostics["quadratic"]["Summary"])
 
-        # Add vertical lines for minimum cost points
-        plt.axvline(
-            x=sor_min_cost_lin, color="green", linestyle="--", label="Min Cost (Linear)"
-        )
-        plt.axvline(
-            x=sor_min_cost_quad,
-            color="blue",
-            linestyle="--",
-            label="Min Cost (Quadratic)",
-        )
+            print(f"Minimum cost per run at fort (linear): sor# {sor_min_cost_lin}")
+            print(f"Minimum cost per run at fort (quadratic): sor# {sor_min_cost_quad}")
 
-        # Add labels and legend
-        plt.xlabel("Sequential Online Run #")
-        plt.ylabel("Adjusted Run Time")
-        plt.title("Scatterplot with Linear and Quadratic Models")
-        plt.legend()
+            # Plotting
+            # Create a scatter plot
+            plt.style.use("dark_background")
+            plt.figure(figsize=(10, 6))
+            plt.scatter(
+                df_range["sor#"],
+                df_range["adjusted_run_time"],
+                s=20,  # Adjusted size to half the original
+                color="cyan",
+                label="Data Points",
+            )
 
-        # Save the plot as an SVG file
-        plt.savefig("scatterplot.svg", format="svg")
-        plt.close()
+            # Overlay linear and quadratic models
+            plt.plot(
+                df_results["sor#"],
+                df_results["linear_model_output"],
+                color="yellow",
+                label="Linear Model",
+            )
+            plt.plot(
+                df_results["sor#"],
+                df_results["quadratic_model_output"],
+                color="magenta",
+                label="Quadratic Model",
+            )
 
-        print("Scatterplot with models saved as 'scatterplot.svg'.")
+            # Plot cost per run at fort for linear and quadratic models
+            plt.plot(
+                df_results["sor#"],
+                df_results["cost_per_run_at_fort_lin"],
+                color="green",
+                linestyle="--",
+                label="Cost/Run @ FORT (Linear)",
+            )
+            plt.plot(
+                df_results["sor#"],
+                df_results["cost_per_run_at_fort_quad"],
+                color="blue",
+                linestyle="--",
+                label="Cost/Run @ FORT (Quadratic)",
+            )
+
+            # Add vertical lines for minimum cost points
+            plt.axvline(
+                x=sor_min_cost_lin,
+                color="green",
+                linestyle="--",
+                label="Min Cost (Linear)",
+            )
+            plt.axvline(
+                x=sor_min_cost_quad,
+                color="blue",
+                linestyle="--",
+                label="Min Cost (Quadratic)",
+            )
+
+            # Add labels and legend
+            plt.xlabel("Sequential Online Run #")
+            plt.ylabel("Adjusted Run Time")
+            plt.title("Scatterplot with Linear and Quadratic Models")
+            plt.legend()
+
+            # Save the plot as an SVG file
+            plt.savefig("scatterplot.svg", format="svg")
+            plt.close()
+
+            print("Scatterplot with models saved as 'scatterplot.svg'.")
 
     except FileNotFoundError:
         print(f"Error: The file {log_path} was not found.")
@@ -388,13 +396,32 @@ def calculate_fort(log_path, delta_mode):
 
 
 def main():
+    start_line = None
+    end_line = None
+    zscore_min = -1.5
+    zscore_max = 3
+    input_data_fort = 100
+    ignore_mrt = True
     delta_mode = DeltaMode.PREVIOUS_CHUNK
     # Use pathlib for cross-platform path handling
-    log_path = Path("./samples/log-reset-01.csv").resolve()
+    # log_path = Path("./samples/log-reset-01.csv").resolve()
     # log_path = Path("./samples/log-reset-02.csv").resolve()
-    # log_path = Path("C:/Games/Utility/ICScriptHub/log-reset.csv").resolve()
+
+    log_path = Path("C:/Games/Utility/ICScriptHub/log-reset.csv").resolve()
+    start_line = 4883
+
     # log_path = Path("./samples/log-reset-extraversion-2025-08-05.csv").resolve()
-    calculate_fort(log_path, delta_mode)
+    calculate_fort(
+        log_path=log_path,
+        start_line=start_line,
+        end_line=end_line,
+        include_header=True,
+        zscore_min=zscore_min,
+        zscore_max=zscore_max,
+        input_data_fort=input_data_fort,
+        ignore_mrt=ignore_mrt,
+        delta_mode=delta_mode,
+    )
 
 
 if __name__ == "__main__":
