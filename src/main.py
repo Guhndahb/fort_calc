@@ -242,9 +242,6 @@ def calculate_fort(
                 start_line=start_line, end_line=end_line, include_header=include_header
             )
 
-            # Remove redundant read_csv_range call since we already have df_range
-            # from the CSVRangeProcessor above
-
             if df_range.empty:
                 raise ValueError("No data found in the specified range")
 
