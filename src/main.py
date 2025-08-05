@@ -87,11 +87,58 @@ def clean_ignore(
     return df
 
 
-def fill_first_note_if_empty(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    if pd.isna(df.iloc[0]["notes"]) or df.iloc[0]["notes"] == "":
-        df.at[df.index[0], "notes"] = "<DATA START>"
-    return df
+def fill_first_note_if_empty(df: pd.DataFrame, verbose: bool = False) -> pd.DataFrame:
+    """
+    Ensure the first row's 'notes' column contains a value.
+    Adopts the FilterResult diagnostics pattern while maintaining DataFrame return for piping.
+
+    Behavior:
+    - No copy unless we actually need to mutate (to avoid unnecessary .copy()).
+    - If DataFrame is empty, warn and return as-is.
+    - If 'notes' column is missing, warn and return as-is.
+    - If first note is empty/NaN, set to "<DATA START>" and optionally log via verbose.
+    """
+    result = FilterResult()
+    result.original_rows = len(df)
+
+    # Early returns without copying when no work is needed
+    if df.empty:
+        result.add_warning("Empty DataFrame provided - no notes to fill")
+        if verbose:
+            logger.info(f"Fill-first-note result: {result.__dict__}")
+        return df
+
+    if "notes" not in df.columns:
+        result.add_warning("Column 'notes' not found - skipping fill")
+        if verbose:
+            logger.info(f"Fill-first-note result: {result.__dict__}")
+        return df
+
+    # Determine if first note is empty
+    first_idx = df.index[0]
+    first_val = df.at[first_idx, "notes"] if first_idx in df.index else None
+    is_empty = pd.isna(first_val) or (
+        isinstance(first_val, str) and first_val.strip() == ""
+    )
+
+    if not is_empty:
+        # Nothing to change; keep original reference
+        result.filtered_rows = len(df)
+        if verbose:
+            logger.info("First note already present - no changes made")
+            logger.info(f"Fill-first-note result: {result.__dict__}")
+        return df
+
+    # We need to mutate; create a shallow copy now to avoid altering upstream df unexpectedly
+    df_work = df.copy()
+    df_work.at[first_idx, "notes"] = "<DATA START>"
+
+    result.filtered_rows = len(df_work)
+    if verbose:
+        logger.info("Filled first empty note with '<DATA START>'")
+        logger.info(f"Fill-first-note result: {result.__dict__}")
+
+    return df_work
 
 
 def compute_adjusted_run_time(df, ignore_mrt):
@@ -489,8 +536,11 @@ def calculate_fort(
             print(df_range)
 
             df_range = (
-                df_range.pipe(clean_ignore, input_data_fort=input_data_fort)
-                .pipe(fill_first_note_if_empty)
+                df_range.pipe(
+                    clean_ignore,
+                    input_data_fort=input_data_fort,
+                    verbose=verbose_filtering,
+                )
                 .pipe(compute_adjusted_run_time, ignore_mrt=ignore_mrt)
                 .pipe(
                     convert_timestamp_column_to_datetime,
@@ -502,6 +552,7 @@ def calculate_fort(
                     exclude_timestamp_ranges=exclude_timestamp_ranges,
                     verbose=verbose_filtering,
                 )
+                .pipe(fill_first_note_if_empty, verbose=verbose_filtering)
             )
 
             df_range, df_excluded = filter_by_adjusted_run_time_zscore(
