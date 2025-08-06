@@ -2553,11 +2553,29 @@ def main() -> None:
     """
     CLI entry point. Parses arguments, builds parameter objects, then orchestrates.
     With no CLI args, defaults from get_default_params() are used.
-    """
-    parser = _build_cli_parser()
-    args = parser.parse_args()
 
-    if getattr(args, "print_defaults", False):
+    Behavior change:
+    - --print-defaults now works without requiring --log-path (or any other args).
+    - -h/--help remains available without other args.
+    - All other operations still require --log-path (as defined in the parser).
+    """
+    # First, build a parser that DOES NOT enforce required arguments when only asking for help/defaults.
+    parser = _build_cli_parser()
+
+    import sys
+
+    # Lightweight pre-scan to detect if the invocation is ONLY for help or print-defaults.
+    # If argv contains --print-defaults (and not -h/--help), we will execute that path
+    # before parse_args() enforces required options like --log-path.
+    argv = sys.argv[1:]
+
+    # If user asked for help, let argparse handle it normally (it doesn't require other args).
+    if any(x in ("-h", "--help") for x in argv):
+        parser.parse_args(argv)  # triggers help and exit
+        return
+
+    # If user requested --print-defaults, honor it without requiring --log-path.
+    if "--print-defaults" in argv:
         import json
 
         d_load, d_trans, d_plot = get_default_params()
@@ -2593,6 +2611,8 @@ def main() -> None:
         )
         return
 
+    # Regular flow: parse args (this will require --log-path) and run pipeline.
+    args = parser.parse_args(argv)
     params_load, params_transform, params_plot = _args_to_params(args)
     _orchestrate(params_load, params_transform, params_plot)
 
