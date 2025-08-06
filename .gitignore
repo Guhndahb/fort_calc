@@ -137,6 +137,7 @@ samples/
 
 # Plots
 *.svg
+*.png
 
 # Manifests
 manifest*.json
