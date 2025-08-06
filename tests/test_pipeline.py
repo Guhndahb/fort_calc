@@ -94,10 +94,11 @@ def test_transform_pipeline_filters_and_returns_contract():
 
 def test_summarize_and_model_contract():
     # Build a DataFrame with numeric adjusted_run_time and sor#
+    # Contract change: require at least one row where sor# == input_data_fort
     df = pd.DataFrame(
         {
-            "sor#": [1, 2, 3, 4, 5, 6, 7],
-            "adjusted_run_time": [1.0, 1.1, 1.2, 1.05, 1.0, 0.95, 0.9],
+            "sor#": [1, 2, 3, 4, 5, 6, 7, 8],
+            "adjusted_run_time": [1.0, 1.1, 1.2, 1.05, 1.0, 0.95, 0.9, 0.88],
         }
     )
 
@@ -179,10 +180,11 @@ def test_render_outputs_writes_svg(tmp_path: Path):
 
 def test_regression_analysis_does_not_mutate_df_range_columns():
     # Prepare input DataFrame
+    # Contract change: include a row with sor# == input_data_fort
     df = pd.DataFrame(
         {
-            "sor#": [1, 2, 3, 4, 5, 6, 7],
-            "adjusted_run_time": [1.0, 1.1, 1.2, 1.05, 1.0, 0.95, 0.9],
+            "sor#": [1, 2, 3, 4, 5, 6, 7, 8],
+            "adjusted_run_time": [1.0, 1.1, 1.2, 1.05, 1.0, 0.95, 0.9, 0.88],
         }
     )
     # Capture original columns (order and set)

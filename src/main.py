@@ -637,6 +637,12 @@ def summarize_run_time_by_sor_range(
     """
     Summarize adjusted_run_time by SOR ranges using vectorized binning.
 
+    Contract precondition:
+    - Upstream summarize_and_model enforces that the input contains at least one row
+      with sor# == input_data_fort so the final degenerate 'fort' row mean is computed
+      from actual data (not inferred). If the dataset does not include the fort row,
+      summarize_and_model will raise before calling this function.
+
     Behavior:
     - Partition the inclusive range [1..input_data_fort-1] into 4 contiguous bins
       as evenly as possible, preserving the original chunking logic.
@@ -1086,6 +1092,11 @@ def summarize_and_model(
     """
     Produce summary table, regression outputs, and cost metrics.
 
+    Contract:
+    - Input data MUST contain at least one row where sor# == input_data_fort. This ensures the
+      degenerate final 'fort' row has a valid (non-NaN) run_time_mean computed from actual data.
+    - Any NaN in run_time_mean anywhere in the summary is an error.
+
     Definitions:
     - offline_cost: The estimated extra time game restarts (usually offline stacks) take
       versus an online stack. Computed as the run_time_delta of the final degenerate 'fort'
@@ -1095,6 +1106,16 @@ def summarize_and_model(
     - The final "offline" row created by summarize_run_time_by_sor_range has start == end == input_data_fort
       and must have a valid (non-NaN) run_time_mean. Any NaN in run_time_mean anywhere is an error.
     """
+    # Enforce program contract: there must be at least one row with sor# == input_data_fort
+    # so that the degenerate 'fort' row mean is computed from actual data.
+    if not (
+        pd.to_numeric(df_range["sor#"], errors="coerce") == params.input_data_fort
+    ).any():
+        raise ValueError(
+            f"Input data must contain at least one row where sor# == input_data_fort "
+            f"({params.input_data_fort}); none found."
+        )
+
     df_summary = summarize_run_time_by_sor_range(
         df_range, params.input_data_fort, params.delta_mode
     )
