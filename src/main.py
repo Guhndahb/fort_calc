@@ -2022,20 +2022,187 @@ def assemble_text_report(
     """
     Create a concise, readable report. Keeps current information content but in one place.
     """
+    # 1) Prepare base sections (input head, filtered head)
     parts: list[str] = []
     parts.append("\n\n")
     parts.append(f"Input data (head):\n{input_df.head()}")
     parts.append("\n\n")
     parts.append(f"Filtered data (head):\n{transformed.df_range.head()}")
     parts.append("\n\n")
-    parts.append(table_text)
-    parts.append(
-        "FORT for minimum cost/run:\n"
-        f"  (OLS linear): {summary.sor_min_cost_lin}\n"
-        f"  (OLS quadratic): {summary.sor_min_cost_quad}\n"
-        f"  (WLS linear): {summary.sor_min_cost_lin_wls}\n"
-        f"  (WLS quadratic): {summary.sor_min_cost_quad_wls}\n"
+
+    # 2) Trim the selected-model tail from the model comparison table
+    #    The original builder appends: "", "Selected model (by policy): …", ""
+    #    We remove the final two trailing lines if present.
+    tbl_lines = table_text.splitlines()
+
+    def _trim_selected_tail(lines: list[str]) -> list[str]:
+        if not lines:
+            return lines
+        # Remove trailing empty lines first
+        while lines and lines[-1].strip() == "":
+            lines.pop()
+        # If last line starts with Selected model..., drop it
+        if lines and lines[-1].lstrip().startswith("Selected model (by policy):"):
+            lines.pop()
+        # Remove any trailing blank again to keep consistent spacing
+        while lines and lines[-1].strip() == "":
+            lines.pop()
+        # Add exactly one terminating blank line to separate from next section
+        lines.append("")
+        return lines
+
+    trimmed_table_text = "\n".join(_trim_selected_tail(tbl_lines))
+    parts.append(trimmed_table_text)
+
+    # 3) Build a local ranking mirroring build_model_comparison policy
+    #    Tie-breakers: BIC asc, AIC asc, RMSE asc, Adj R² desc, complexity_rank asc, label asc.
+    from typing import NamedTuple
+    from typing import Optional as _Optional
+
+    def _safe_get(d: dict, *keys, default=None):
+        cur = d
+        for k in keys:
+            if not isinstance(cur, dict) or k not in cur:
+                return default
+            cur = cur[k]
+        return cur
+
+    class ModelRow(NamedTuple):
+        label: str
+        rmse: _Optional[float]
+        adj_r2: _Optional[float]
+        aic: _Optional[float]
+        bic: _Optional[float]
+        complexity_rank: int
+        sor_value: _Optional[int]
+
+    def _complexity_rank_for(label: str) -> int:
+        is_linear = "Linear" in label and "Quadratic" not in label
+        is_quadratic = "Quadratic" in label
+        is_wls = "WLS" in label
+        form_rank = 0 if is_linear else (1 if is_quadratic else 2)
+        est_rank = 1 if is_wls else 0
+        return form_rank * 10 + est_rank
+
+    diag = summary.regression_diagnostics
+
+    # Rows spec holds canonical labels and value sources; display labels will be normalized below
+    rows_spec = [
+        ("OLS Linear", ("linear", "ols"), summary.sor_min_cost_lin),
+        ("OLS Quadratic", ("quadratic", "ols"), summary.sor_min_cost_quad),
+        ("WLS Linear (empirical)", ("linear", "wls"), summary.sor_min_cost_lin_wls),
+        (
+            "WLS Quadratic (empirical)",
+            ("quadratic", "wls"),
+            summary.sor_min_cost_quad_wls,
+        ),
+    ]
+
+    # Label normalization to short forms per requirement
+    def _normalize_label(lbl: str) -> str:
+        mapping = {
+            "OLS Linear": "OLS linear",
+            "OLS Quadratic": "OLS quadratic",
+            "WLS Linear (empirical)": "WLS linear",
+            "WLS Quadratic (empirical)": "WLS quadratic",
+        }
+        return mapping.get(lbl, lbl)
+
+    raw_rows: list[ModelRow] = []
+    for label, path, sor_val in rows_spec:
+        node = _safe_get(diag, *path, default={}) or {}
+        rmse = _safe_get(diag, path[0], path[1], "RMSE", default=None)
+        adj_r2 = _safe_get(node, "Adj. R-squared", default=None)
+        aic = _safe_get(node, "aic", default=None)
+        bic = _safe_get(node, "bic", default=None)
+        raw_rows.append(
+            ModelRow(
+                label=label,
+                rmse=float(rmse) if rmse is not None else None,
+                adj_r2=float(adj_r2) if adj_r2 is not None else None,
+                aic=float(aic) if aic is not None else None,
+                bic=float(bic) if bic is not None else None,
+                complexity_rank=_complexity_rank_for(label),
+                sor_value=int(sor_val) if sor_val is not None else None,
+            )
+        )
+
+    def _pos_inf_if_none(x: _Optional[float]) -> float:
+        return float("inf") if x is None or not np.isfinite(x) else float(x)
+
+    def _neg_inf_if_none(x: _Optional[float]) -> float:
+        if x is None:
+            return float("-inf")
+        try:
+            xv = float(x)
+            return xv if np.isfinite(xv) else float("-inf")
+        except Exception:
+            return float("-inf")
+
+    ranked = sorted(
+        raw_rows,
+        key=lambda r: (
+            _pos_inf_if_none(r.bic),
+            _pos_inf_if_none(r.aic),
+            _pos_inf_if_none(r.rmse),
+            -_neg_inf_if_none(r.adj_r2),
+            r.complexity_rank,
+            r.label,
+        ),
     )
+
+    # 4) Render only the four FORT lines in ranked order with dynamic right-edge alignment.
+    # Implementation per specification:
+    # - Two leading spaces before '('
+    # - Normalize labels (no "(empirical)")
+    # - Compute max label len and fixed right-edge column using max_value_width=3
+    # - Ensure at least one space after colon
+    MAX_VALUE_WIDTH = 3
+
+    def _value_str(val: _Optional[int]) -> str:
+        # Treat '-' as width 1 for missing values
+        return "-" if val is None else str(int(val))
+
+    # Prepare label/value pairs
+    pairs: list[tuple[str, str]] = []
+    labels: list[str] = []
+    for row in ranked:
+        disp_label = _normalize_label(row.label)
+        val_str = _value_str(row.sor_value)
+        pairs.append((disp_label, val_str))
+        labels.append(disp_label)
+
+    # Compute max label length across the four rows
+    max_label_len = max((len(lbl) for lbl in labels), default=0)
+
+    # Precompute common lengths
+    len_prefix_fixed = len("  (")  # two spaces + '('
+    len_close_paren = len(")")  # 1
+    len_colon_space = len(": ")  # 2
+
+    # Determine fixed right-edge column (conceptually)
+    right_edge_col = (
+        len_prefix_fixed
+        + max_label_len
+        + len_close_paren
+        + len_colon_space
+        + MAX_VALUE_WIDTH
+    )
+
+    parts.append("FORTs for lowest cost/run (models ordered by fit quality)")
+
+    # Render each line with spaces so the value's right-most character lands at right_edge_col
+    for disp_label, val_str in pairs:
+        label_len = len(disp_label)
+        value_width = len(val_str)  # "-" => 1, numbers in [1..3]
+        current_prefix_len = (
+            len_prefix_fixed + label_len + len_close_paren + len_colon_space
+        )
+        spaces_needed = right_edge_col - (current_prefix_len + value_width)
+        if spaces_needed < 1:
+            spaces_needed = 1  # ensure at least one space after the colon
+        parts.append(f"  ({disp_label}):{' ' * spaces_needed}{val_str}")
+
     return "\n".join(parts)
 
 
