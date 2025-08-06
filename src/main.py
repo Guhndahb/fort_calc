@@ -14,7 +14,7 @@ global state mutation. Logging kept for internal diagnostics but functions are p
 
 import logging
 from dataclasses import dataclass
-from enum import Enum, auto
+from enum import Enum, IntFlag, auto
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -809,6 +809,72 @@ class LoadSliceParams:
     include_header: bool = True
 
 
+class PlotLayer(IntFlag):
+    # Data
+    DATA_SCATTER = 1 << 0
+
+    # OLS predictions
+    OLS_PRED_LINEAR = 1 << 1
+    OLS_PRED_QUAD = 1 << 2
+
+    # OLS cost-per-run curves
+    OLS_COST_LINEAR = 1 << 3
+    OLS_COST_QUAD = 1 << 4
+
+    # OLS min-cost markers
+    OLS_MIN_LINEAR = 1 << 5
+    OLS_MIN_QUAD = 1 << 6
+
+    # WLS predictions
+    WLS_PRED_LINEAR = 1 << 7
+    WLS_PRED_QUAD = 1 << 8
+
+    # WLS cost-per-run curves
+    WLS_COST_LINEAR = 1 << 9
+    WLS_COST_QUAD = 1 << 10
+
+    # WLS min-cost markers
+    WLS_MIN_LINEAR = 1 << 11
+    WLS_MIN_QUAD = 1 << 12
+
+    # Legend visibility
+    LEGEND = 1 << 13
+
+    # Presets
+    NONE = 0
+    ALL_DATA = DATA_SCATTER
+    ALL_OLS = (
+        OLS_PRED_LINEAR
+        | OLS_PRED_QUAD
+        | OLS_COST_LINEAR
+        | OLS_COST_QUAD
+        | OLS_MIN_LINEAR
+        | OLS_MIN_QUAD
+    )
+    ALL_WLS = (
+        WLS_PRED_LINEAR
+        | WLS_PRED_QUAD
+        | WLS_COST_LINEAR
+        | WLS_COST_QUAD
+        | WLS_MIN_LINEAR
+        | WLS_MIN_QUAD
+    )
+    ALL_PREDICTION = OLS_PRED_LINEAR | OLS_PRED_QUAD | WLS_PRED_LINEAR | WLS_PRED_QUAD
+    ALL_COST = OLS_COST_LINEAR | OLS_COST_QUAD | WLS_COST_LINEAR | WLS_COST_QUAD
+    MIN_MARKERS_ONLY = OLS_MIN_LINEAR | OLS_MIN_QUAD | WLS_MIN_LINEAR | WLS_MIN_QUAD
+    DEFAULT = (
+        DATA_SCATTER
+        | OLS_PRED_LINEAR
+        | OLS_PRED_QUAD
+        | OLS_COST_LINEAR
+        | OLS_COST_QUAD
+        | OLS_MIN_LINEAR
+        | OLS_MIN_QUAD
+        | LEGEND
+    )
+    EVERYTHING = DEFAULT | ALL_WLS
+
+
 @dataclass
 class TransformParams:
     zscore_min: float
@@ -820,8 +886,8 @@ class TransformParams:
     verbose_filtering: bool = False
     # Fail fast if any timestamps fail to parse (simple and strict by default)
     fail_on_any_invalid_timestamps: bool = True
-    # Control WLS overlay rendering and computations in outputs
-    include_wls_overlay: bool = False
+    # Plot layer configuration via flags
+    plot_layers: PlotLayer = PlotLayer.DEFAULT
 
 
 @dataclass
@@ -1276,51 +1342,52 @@ def render_outputs(
     df_range: pd.DataFrame,
     summary: SummaryModelOutputs,
     output_svg: str = "plot.svg",
-    include_wls_overlay: Optional[bool] = None,
+    plot_layers: Optional[PlotLayer] = None,
 ) -> str:
     """
     Pure renderer: builds the plot and returns the output path.
     No prints; deterministic given inputs.
 
-    include_wls_overlay:
-      - If None, attempt to infer from presence of WLS cols/mins and default to False.
-      - If True, overlay WLS predictions and cost curves and min-cost markers.
+    plot_layers:
+      - Bitflag (PlotLayer) selecting which visual elements to draw.
+      - If None, defaults to PlotLayer.DEFAULT.
     """
-    # Infer overlay flag from data if not provided
-    if include_wls_overlay is None:
-        include_wls_overlay = False
-        if (
-            "linear_model_output_wls" in summary.df_results.columns
-            or "cost_per_run_at_fort_lin_wls" in summary.df_results.columns
-        ):
-            include_wls_overlay = False  # default remains False unless caller opts in
+    if plot_layers is None:
+        plot_layers = PlotLayer.DEFAULT
 
     plt.style.use("dark_background")
     plt.figure(figsize=(10, 6))
-    plt.scatter(
-        df_range["sor#"],
-        df_range["adjusted_run_time"],
-        s=20,
-        color="cyan",
-        label="Data Points",
-    )
 
-    # Overlay OLS model predictions
-    plt.plot(
-        summary.df_results["sor#"],
-        summary.df_results["linear_model_output"],
-        color="yellow",
-        label="Linear Model (OLS)",
-    )
-    plt.plot(
-        summary.df_results["sor#"],
-        summary.df_results["quadratic_model_output"],
-        color="magenta",
-        label="Quadratic Model (OLS)",
-    )
+    # Data points
+    if plot_layers & PlotLayer.DATA_SCATTER:
+        plt.scatter(
+            df_range["sor#"],
+            df_range["adjusted_run_time"],
+            s=20,
+            color="cyan",
+            label="Data Points",
+        )
 
-    # If requested, overlay WLS predictions if present
-    if include_wls_overlay and "linear_model_output_wls" in summary.df_results.columns:
+    # OLS predictions
+    if plot_layers & PlotLayer.OLS_PRED_LINEAR:
+        plt.plot(
+            summary.df_results["sor#"],
+            summary.df_results["linear_model_output"],
+            color="yellow",
+            label="Linear Model (OLS)",
+        )
+    if plot_layers & PlotLayer.OLS_PRED_QUAD:
+        plt.plot(
+            summary.df_results["sor#"],
+            summary.df_results["quadratic_model_output"],
+            color="magenta",
+            label="Quadratic Model (OLS)",
+        )
+
+    # WLS predictions
+    if (plot_layers & PlotLayer.WLS_PRED_LINEAR) and (
+        "linear_model_output_wls" in summary.df_results.columns
+    ):
         plt.plot(
             summary.df_results["sor#"],
             summary.df_results["linear_model_output_wls"],
@@ -1328,9 +1395,8 @@ def render_outputs(
             linestyle="-.",
             label="Linear Model (WLS)",
         )
-    if (
-        include_wls_overlay
-        and "quadratic_model_output_wls" in summary.df_results.columns
+    if (plot_layers & PlotLayer.WLS_PRED_QUAD) and (
+        "quadratic_model_output_wls" in summary.df_results.columns
     ):
         plt.plot(
             summary.df_results["sor#"],
@@ -1340,26 +1406,27 @@ def render_outputs(
             label="Quadratic Model (WLS)",
         )
 
-    # Cost per run curves (OLS)
-    plt.plot(
-        summary.df_results["sor#"],
-        summary.df_results["cost_per_run_at_fort_lin"],
-        color="green",
-        linestyle="--",
-        label="Cost/Run @ FORT (Linear, OLS)",
-    )
-    plt.plot(
-        summary.df_results["sor#"],
-        summary.df_results["cost_per_run_at_fort_quad"],
-        color="blue",
-        linestyle="--",
-        label="Cost/Run @ FORT (Quadratic, OLS)",
-    )
+    # OLS cost per run curves
+    if plot_layers & PlotLayer.OLS_COST_LINEAR:
+        plt.plot(
+            summary.df_results["sor#"],
+            summary.df_results["cost_per_run_at_fort_lin"],
+            color="green",
+            linestyle="--",
+            label="Cost/Run @ FORT (Linear, OLS)",
+        )
+    if plot_layers & PlotLayer.OLS_COST_QUAD:
+        plt.plot(
+            summary.df_results["sor#"],
+            summary.df_results["cost_per_run_at_fort_quad"],
+            color="blue",
+            linestyle="--",
+            label="Cost/Run @ FORT (Quadratic, OLS)",
+        )
 
-    # WLS cost-per-run overlays if requested and available
-    if (
-        include_wls_overlay
-        and "cost_per_run_at_fort_lin_wls" in summary.df_results.columns
+    # WLS cost-per-run curves
+    if (plot_layers & PlotLayer.WLS_COST_LINEAR) and (
+        "cost_per_run_at_fort_lin_wls" in summary.df_results.columns
     ):
         plt.plot(
             summary.df_results["sor#"],
@@ -1368,9 +1435,8 @@ def render_outputs(
             linestyle=":",
             label="Cost/Run @ FORT (Linear, WLS)",
         )
-    if (
-        include_wls_overlay
-        and "cost_per_run_at_fort_quad_wls" in summary.df_results.columns
+    if (plot_layers & PlotLayer.WLS_COST_QUAD) and (
+        "cost_per_run_at_fort_quad_wls" in summary.df_results.columns
     ):
         plt.plot(
             summary.df_results["sor#"],
@@ -1381,28 +1447,34 @@ def render_outputs(
         )
 
     # Min cost verticals (OLS)
-    plt.axvline(
-        x=summary.sor_min_cost_lin,
-        color="green",
-        linestyle="--",
-        label="Min Cost (Linear, OLS)",
-    )
-    plt.axvline(
-        x=summary.sor_min_cost_quad,
-        color="blue",
-        linestyle="--",
-        label="Min Cost (Quadratic, OLS)",
-    )
+    if plot_layers & PlotLayer.OLS_MIN_LINEAR:
+        plt.axvline(
+            x=summary.sor_min_cost_lin,
+            color="green",
+            linestyle="--",
+            label="Min Cost (Linear, OLS)",
+        )
+    if plot_layers & PlotLayer.OLS_MIN_QUAD:
+        plt.axvline(
+            x=summary.sor_min_cost_quad,
+            color="blue",
+            linestyle="--",
+            label="Min Cost (Quadratic, OLS)",
+        )
 
-    # Min cost verticals (WLS) if requested and present
-    if include_wls_overlay and summary.sor_min_cost_lin_wls is not None:
+    # Min cost verticals (WLS) if present
+    if (plot_layers & PlotLayer.WLS_MIN_LINEAR) and (
+        summary.sor_min_cost_lin_wls is not None
+    ):
         plt.axvline(
             x=summary.sor_min_cost_lin_wls,
             color="lime",
             linestyle=":",
             label="Min Cost (Linear, WLS)",
         )
-    if include_wls_overlay and summary.sor_min_cost_quad_wls is not None:
+    if (plot_layers & PlotLayer.WLS_MIN_QUAD) and (
+        summary.sor_min_cost_quad_wls is not None
+    ):
         plt.axvline(
             x=summary.sor_min_cost_quad_wls,
             color="cyan",
@@ -1412,8 +1484,10 @@ def render_outputs(
 
     plt.xlabel("Sequential Online Run #")
     plt.ylabel("Adjusted Run Time")
-    plt.title("Plot with Linear/Quadratic Models (OLS) + optional WLS overlay")
-    plt.legend()
+    plt.title("FORT Regression Models")
+
+    if plot_layers & PlotLayer.LEGEND:
+        plt.legend()
 
     plt.savefig(output_svg, format="svg")
     plt.close()
@@ -1437,7 +1511,7 @@ def main() -> None:
         delta_mode=DeltaMode.PREVIOUS_CHUNK,
         exclude_timestamp_ranges=None,  # [("20250801124409", "20250805165454")],
         verbose_filtering=True,
-        include_wls_overlay=True,
+        plot_layers=PlotLayer.DEFAULT,
     )
 
     # Build hashing payload (simplified: path + effective parameters)
@@ -1481,7 +1555,7 @@ def main() -> None:
         transformed.df_range,
         summary,
         output_svg=out_svg,
-        include_wls_overlay=params_transform.include_wls_overlay,
+        plot_layers=params_transform.plot_layers,
     )
 
     # Build and write manifest next to artifact (current working directory)
