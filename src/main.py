@@ -1338,6 +1338,62 @@ def summarize_and_model(
     )
 
 
+def _plot_layers_suffix(flags: PlotLayer) -> str:
+    """
+    Build a stable, human-readable suffix for filenames describing selected plot layers.
+
+    Rules:
+    - If flags exactly match one of the named presets, return that preset name.
+    - Otherwise, return a compact '+'-joined list of the set atomic flags in canonical order.
+
+    Example:
+      PlotLayer.DEFAULT -> "DEFAULT"
+      PlotLayer.WLS_PRED_LINEAR | PlotLayer.WLS_PRED_QUAD | PlotLayer.LEGEND
+        -> "WLS_PRED_LINEAR+WLS_PRED_QUAD+LEGEND"
+    """
+    # Ordered presets to check for exact equality
+    preset_order = [
+        "DEFAULT",
+        "EVERYTHING",
+        "NONE",
+        "ALL_OLS",
+        "ALL_WLS",
+        "ALL_DATA",
+        "ALL_PREDICTION",
+        "ALL_COST",
+        "MIN_MARKERS_ONLY",
+    ]
+    for name in preset_order:
+        if hasattr(PlotLayer, name):
+            preset_val = getattr(PlotLayer, name)
+            if flags == preset_val:
+                return name
+
+    # Canonical order of atomic flags
+    atomic_order = [
+        "DATA_SCATTER",
+        "OLS_PRED_LINEAR",
+        "OLS_PRED_QUAD",
+        "OLS_COST_LINEAR",
+        "OLS_COST_QUAD",
+        "OLS_MIN_LINEAR",
+        "OLS_MIN_QUAD",
+        "WLS_PRED_LINEAR",
+        "WLS_PRED_QUAD",
+        "WLS_COST_LINEAR",
+        "WLS_COST_QUAD",
+        "WLS_MIN_LINEAR",
+        "WLS_MIN_QUAD",
+        "LEGEND",
+    ]
+    tokens: list[str] = []
+    for name in atomic_order:
+        bit = getattr(PlotLayer, name)
+        if flags & bit:
+            tokens.append(name)
+    return "+".join(tokens) if tokens else "NONE"
+
+
 def render_outputs(
     df_range: pd.DataFrame,
     summary: SummaryModelOutputs,
@@ -1549,8 +1605,9 @@ def main() -> None:
     )
     print("\n")
 
-    # Suffix artifact filename with short hash
-    out_svg = with_hash_suffix("plot", short_hash, ".svg")
+    # Suffix artifact filename with short hash and plot layer descriptor
+    layer_suffix = _plot_layers_suffix(params_transform.plot_layers)
+    out_svg = with_hash_suffix(f"plot-{layer_suffix}", short_hash, ".svg")
     _ = render_outputs(
         transformed.df_range,
         summary,

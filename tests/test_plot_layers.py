@@ -77,6 +77,9 @@ def _build_inputs(include_wls=True):
 
 
 def test_plot_layers_default(monkeypatch, tmp_path: Path):
+    import matplotlib
+
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     # Build inputs with WLS present, but DEFAULT should only draw OLS + data + legend
@@ -129,6 +132,9 @@ def test_plot_layers_default(monkeypatch, tmp_path: Path):
 
 
 def test_plot_layers_everything(monkeypatch, tmp_path: Path):
+    import matplotlib
+
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     # Build inputs with WLS present; EVERYTHING should include all
