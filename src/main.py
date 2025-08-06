@@ -812,6 +812,8 @@ class LoadSliceParams:
 class PlotLayer(IntFlag):
     # Data
     DATA_SCATTER = 1 << 0
+    # New: Excluded-by-zscore data points (opt-in only; not included in any presets)
+    DATA_SCATTER_EXCLUDED = 1 << 14
 
     # OLS predictions
     OLS_PRED_LINEAR = 1 << 1
@@ -895,6 +897,7 @@ class TransformParams:
     # Fail fast if any timestamps fail to parse (simple and strict by default)
     fail_on_any_invalid_timestamps: bool = True
     # Plot layer configuration via flags
+    # Note: DATA_SCATTER_EXCLUDED is not included by default and must be set explicitly.
     plot_layers: PlotLayer = PlotLayer.DEFAULT
 
 
@@ -1468,6 +1471,7 @@ def _plot_layers_suffix(flags: PlotLayer) -> str:
     # Canonical order of atomic flags
     atomic_order = [
         "DATA_SCATTER",
+        "DATA_SCATTER_EXCLUDED",
         "OLS_PRED_LINEAR",
         "OLS_PRED_QUAD",
         "OLS_COST_LINEAR",
@@ -1495,14 +1499,25 @@ def render_outputs(
     summary: SummaryModelOutputs,
     output_svg: str = "plot.svg",
     plot_layers: Optional[PlotLayer] = None,
+    df_excluded: Optional[pd.DataFrame] = None,
 ) -> str:
     """
     Pure renderer: builds the plot and returns the output path.
     No prints; deterministic given inputs.
 
-    plot_layers:
-      - Bitflag (PlotLayer) selecting which visual elements to draw.
-      - If None, defaults to PlotLayer.DEFAULT.
+    Parameters:
+      - df_range: DataFrame of included rows after filtering (i.e., transformed.df_range).
+      - summary: SummaryModelOutputs computed from df_range.
+      - output_svg: Target path for the generated SVG.
+      - plot_layers: Bitflag (PlotLayer) selecting which visual elements to draw.
+                     If None, defaults to PlotLayer.DEFAULT.
+      - df_excluded: Optional DataFrame of rows excluded by z-score filtering
+                     (i.e., transformed.df_excluded). Only used when the
+                     DATA_SCATTER_EXCLUDED flag is set; otherwise ignored.
+
+    Notes:
+      - DATA_SCATTER_EXCLUDED is not part of any preset and will render only when
+        explicitly requested via plot_layers and when df_excluded is provided.
     """
     if plot_layers is None:
         plot_layers = PlotLayer.DEFAULT
@@ -1518,6 +1533,22 @@ def render_outputs(
             s=20,
             color="cyan",
             label="Data Points",
+        )
+
+    # Excluded-by-zscore points (optional)
+    if (
+        (plot_layers & PlotLayer.DATA_SCATTER_EXCLUDED)
+        and (df_excluded is not None)
+        and (not df_excluded.empty)
+    ):
+        plt.scatter(
+            df_excluded["sor#"],
+            df_excluded["adjusted_run_time"],
+            s=16,
+            marker="x",
+            color="red",
+            alpha=0.85,
+            label="Excluded by Z-score",
         )
 
     # OLS predictions
@@ -1853,17 +1884,30 @@ def build_model_comparison(diag: dict) -> tuple[str, str]:
 
 
 def render_plot_presets(
-    df_included: pd.DataFrame, summary: SummaryModelOutputs, short_hash: str
+    df_included: pd.DataFrame,
+    summary: SummaryModelOutputs,
+    short_hash: str,
+    df_excluded: Optional[pd.DataFrame] = None,
 ) -> list[str]:
     """
     Render a stable set of plot presets and return artifact paths.
+
+    Parameters:
+      - df_included: included rows after filtering (transformed.df_range)
+      - summary: SummaryModelOutputs for df_included
+      - short_hash: suffix used for artifact file names
+      - df_excluded: optional excluded rows (transformed.df_excluded); used only when
+                     PlotLayer.DATA_SCATTER_EXCLUDED is set in a preset
     """
     presets_to_render = [
         PlotLayer.ALL_OLS,
         PlotLayer.ALL_WLS,
         (PlotLayer.ALL_OLS | PlotLayer.ALL_WLS) & ~PlotLayer.MIN_MARKERS_ONLY,
         PlotLayer.ALL_PREDICTION | PlotLayer.LEGEND,
-        PlotLayer.ALL_PREDICTION | PlotLayer.LEGEND | PlotLayer.DATA_SCATTER,
+        PlotLayer.ALL_WLS
+        | PlotLayer.LEGEND
+        | PlotLayer.DATA_SCATTER
+        | PlotLayer.DATA_SCATTER_EXCLUDED,
     ]
     artifact_paths: list[str] = []
     for flags in presets_to_render:
@@ -1874,6 +1918,7 @@ def render_plot_presets(
             summary,
             output_svg=out_svg,
             plot_layers=flags,
+            df_excluded=df_excluded,
         )
         artifact_paths.append(out_svg)
     return artifact_paths
@@ -1950,7 +1995,9 @@ def main() -> None:
     best_label, table_text = build_model_comparison(summary.regression_diagnostics)
 
     # 4) Render plots
-    artifact_paths = render_plot_presets(transformed.df_range, summary, short_hash)
+    artifact_paths = render_plot_presets(
+        transformed.df_range, summary, short_hash, df_excluded=transformed.df_excluded
+    )
 
     # 5) Manifest
     total_input_rows = int(len(df_range))
