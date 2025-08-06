@@ -175,3 +175,30 @@ def test_render_outputs_writes_svg(tmp_path: Path):
     path = render_outputs(df_range, summary, output_svg=str(out_path))
     assert Path(path).exists()
     assert Path(path).suffix == ".svg"
+
+
+def test_regression_analysis_does_not_mutate_df_range_columns():
+    # Prepare input DataFrame
+    df = pd.DataFrame(
+        {
+            "sor#": [1, 2, 3, 4, 5, 6, 7],
+            "adjusted_run_time": [1.0, 1.1, 1.2, 1.05, 1.0, 0.95, 0.9],
+        }
+    )
+    # Capture original columns (order and set)
+    original_cols = df.columns.tolist()
+
+    # Call summarize_and_model which internally calls regression_analysis
+    params = TransformParams(
+        zscore_min=-2.0,
+        zscore_max=2.0,
+        input_data_fort=8,
+        ignore_mrt=True,
+        delta_mode=DeltaMode.PREVIOUS_CHUNK,
+        exclude_timestamp_ranges=None,
+        verbose_filtering=False,
+    )
+    _ = summarize_and_model(df, params)
+
+    # Assert columns unchanged in both content and order
+    assert df.columns.tolist() == original_cols

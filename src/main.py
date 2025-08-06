@@ -658,17 +658,25 @@ def regression_analysis(df_range, input_data_fort):
     # Generate sequence from 1 to input_data_fort
     sor_sequence = np.arange(1, input_data_fort + 1)
 
-    # Linear regression
-    X_linear = sm.add_constant(df_range["sor#"])
-    linear_model = sm.OLS(df_range["adjusted_run_time"], X_linear).fit()
-    linear_model_output = linear_model.predict(sm.add_constant(sor_sequence))
+    # Prepare basic arrays (no mutation of df_range)
+    y = df_range["adjusted_run_time"].to_numpy()
+    x = df_range["sor#"].to_numpy()
 
-    # Quadratic regression
-    df_range["sor#_squared"] = df_range["sor#"] ** 2
-    X_quadratic = sm.add_constant(df_range[["sor#", "sor#_squared"]])
-    quadratic_model = sm.OLS(df_range["adjusted_run_time"], X_quadratic).fit()
+    # Linear regression
+    X_linear = sm.add_constant(x, has_constant="add")
+    linear_model = sm.OLS(y, X_linear).fit()
+    linear_model_output = linear_model.predict(
+        sm.add_constant(sor_sequence, has_constant="add")
+    )
+
+    # Quadratic regression without mutating df_range
+    x_squared = x**2
+    X_quadratic = sm.add_constant(np.column_stack((x, x_squared)), has_constant="add")
+    quadratic_model = sm.OLS(y, X_quadratic).fit()
     quadratic_model_output = quadratic_model.predict(
-        sm.add_constant(np.column_stack((sor_sequence, sor_sequence**2)))
+        sm.add_constant(
+            np.column_stack((sor_sequence, sor_sequence**2)), has_constant="add"
+        )
     )
 
     # Create a new DataFrame with the required columns
