@@ -655,31 +655,93 @@ class SummaryModelOutputs:
 
 
 def regression_analysis(df_range, input_data_fort):
+    """
+    OLS regression for linear and quadratic models using pandas DataFrames
+    for design matrices. Training and prediction frames use matching column
+    names and consistent constant handling (has_constant='add') to avoid
+    column-order issues during predict.
+    """
     # Generate sequence from 1 to input_data_fort
     sor_sequence = np.arange(1, input_data_fort + 1)
 
-    # Prepare basic arrays (no mutation of df_range)
+    # Prepare response as 1D ndarray to align with statsmodels OLS expectations
     y = df_range["adjusted_run_time"].to_numpy()
-    x = df_range["sor#"].to_numpy()
 
-    # Linear regression
-    X_linear = sm.add_constant(x, has_constant="add")
-    linear_model = sm.OLS(y, X_linear).fit()
-    linear_model_output = linear_model.predict(
-        sm.add_constant(sor_sequence, has_constant="add")
+    # Training design matrices as DataFrames with explicit column names
+    X_linear_train = pd.DataFrame({"sor#": df_range["sor#"].to_numpy()})
+    X_linear_train = sm.add_constant(X_linear_train, has_constant="add")
+    # Ensure constant column is named 'const' as per statsmodels default
+    if "const" not in X_linear_train.columns:
+        # Statsmodels may sometimes name it differently; standardize
+        const_col = [
+            c for c in X_linear_train.columns if c.lower() in ("const", "intercept")
+        ]
+        if const_col:
+            X_linear_train = X_linear_train.rename(columns={const_col[0]: "const"})
+
+    linear_model = sm.OLS(y, X_linear_train).fit()
+
+    # Quadratic training design matrix with named columns
+    X_quadratic_train = pd.DataFrame(
+        {
+            "sor#": df_range["sor#"].to_numpy(),
+            "sor2": df_range["sor#"].to_numpy() ** 2,
+        }
+    )
+    X_quadratic_train = sm.add_constant(X_quadratic_train, has_constant="add")
+    if "const" not in X_quadratic_train.columns:
+        const_col = [
+            c for c in X_quadratic_train.columns if c.lower() in ("const", "intercept")
+        ]
+        if const_col:
+            X_quadratic_train = X_quadratic_train.rename(
+                columns={const_col[0]: "const"}
+            )
+
+    quadratic_model = sm.OLS(y, X_quadratic_train).fit()
+
+    # Prediction frames as DataFrames with the same column names
+    X_linear_pred = pd.DataFrame({"sor#": sor_sequence})
+    X_linear_pred = sm.add_constant(X_linear_pred, has_constant="add")
+    if "const" not in X_linear_pred.columns:
+        const_col = [
+            c for c in X_linear_pred.columns if c.lower() in ("const", "intercept")
+        ]
+        if const_col:
+            X_linear_pred = X_linear_pred.rename(columns={const_col[0]: "const"})
+    # Ensure column order matches trained model exog names to avoid any positional misalignment
+    X_linear_pred = X_linear_pred.reindex(columns=linear_model.model.exog_names)
+    # Ensure column order matches trained model exog names to avoid any positional misalignment
+    X_linear_pred = X_linear_pred.reindex(columns=linear_model.model.exog_names)
+
+    X_quadratic_pred = pd.DataFrame({"sor#": sor_sequence, "sor2": sor_sequence**2})
+    X_quadratic_pred = sm.add_constant(X_quadratic_pred, has_constant="add")
+    if "const" not in X_quadratic_pred.columns:
+        const_col = [
+            c for c in X_quadratic_pred.columns if c.lower() in ("const", "intercept")
+        ]
+        if const_col:
+            X_quadratic_pred = X_quadratic_pred.rename(columns={const_col[0]: "const"})
+    # Ensure column order matches trained model exog names
+    X_quadratic_pred = X_quadratic_pred.reindex(
+        columns=quadratic_model.model.exog_names
+    )
+    # Ensure column order matches trained model exog names
+    X_quadratic_pred = X_quadratic_pred.reindex(
+        columns=quadratic_model.model.exog_names
     )
 
-    # Quadratic regression without mutating df_range
-    x_squared = x**2
-    X_quadratic = sm.add_constant(np.column_stack((x, x_squared)), has_constant="add")
-    quadratic_model = sm.OLS(y, X_quadratic).fit()
-    quadratic_model_output = quadratic_model.predict(
-        sm.add_constant(
-            np.column_stack((sor_sequence, sor_sequence**2)), has_constant="add"
-        )
+    # Align prediction columns to trained model exog_names to avoid positional mismatch
+    X_linear_pred = X_linear_pred.reindex(columns=linear_model.model.exog_names)
+    X_quadratic_pred = X_quadratic_pred.reindex(
+        columns=quadratic_model.model.exog_names
     )
 
-    # Create a new DataFrame with the required columns
+    # Predict using DataFrames after explicit column alignment
+    linear_model_output = linear_model.predict(X_linear_pred)
+    quadratic_model_output = quadratic_model.predict(X_quadratic_pred)
+
+    # Create results DataFrame
     result_df = (
         pd.DataFrame(
             {
