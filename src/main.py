@@ -1022,6 +1022,28 @@ def regression_analysis(
         "quadratic": {"ols": _stats_dict(quad_ols)},
     }
 
+    # Attach AIC/BIC for baseline OLS fits
+    try:
+        diagnostics["linear"]["ols"]["aic"] = float(lin_ols.aic)
+        diagnostics["linear"]["ols"]["bic"] = float(lin_ols.bic)
+    except Exception as _e_aicbic_lin_ols:
+        diagnostics["linear"]["ols"]["aicbic_exception"] = str(_e_aicbic_lin_ols)
+    try:
+        diagnostics["quadratic"]["ols"]["aic"] = float(quad_ols.aic)
+        diagnostics["quadratic"]["ols"]["bic"] = float(quad_ols.bic)
+    except Exception as _e_aicbic_quad_ols:
+        diagnostics["quadratic"]["ols"]["aicbic_exception"] = str(_e_aicbic_quad_ols)
+
+    # Compute in-sample RMSEs for baseline OLS fits (common, unweighted)
+    try:
+        rmse_lin_ols = float(np.sqrt(np.mean(np.square(lin_ols.resid))))
+        rmse_quad_ols = float(np.sqrt(np.mean(np.square(quad_ols.resid))))
+        diagnostics["linear"]["ols"]["RMSE"] = rmse_lin_ols
+        diagnostics["quadratic"]["ols"]["RMSE"] = rmse_quad_ols
+    except Exception as _e_rmse_ols:
+        diagnostics["linear"]["ols"]["rmse_exception"] = str(_e_rmse_ols)
+        diagnostics["quadratic"]["ols"]["rmse_exception"] = str(_e_rmse_ols)
+
     # Variant: OLS with robust SEs (HC1)
     try:
         lin_ols_hc1 = sm.OLS(y, X_linear_train).fit(cov_type="HC1")
@@ -1065,6 +1087,32 @@ def regression_analysis(
             **_stats_dict(quad_wls),
             "weights_spec": "1/(sor#^2)",
         }
+
+        # Attach AIC/BIC for WLS fits
+        try:
+            diagnostics["linear"]["wls"]["aic"] = float(lin_wls.aic)
+            diagnostics["linear"]["wls"]["bic"] = float(lin_wls.bic)
+        except Exception as _e_aicbic_lin_wls:
+            diagnostics["linear"]["wls"]["aicbic_exception"] = str(_e_aicbic_lin_wls)
+        try:
+            diagnostics["quadratic"]["wls"]["aic"] = float(quad_wls.aic)
+            diagnostics["quadratic"]["wls"]["bic"] = float(quad_wls.bic)
+        except Exception as _e_aicbic_quad_wls:
+            diagnostics["quadratic"]["wls"]["aicbic_exception"] = str(
+                _e_aicbic_quad_wls
+            )
+
+        # Compute in-sample RMSEs for WLS fits using unweighted residuals for comparability
+        try:
+            resid_lin_wls = y - lin_wls.fittedvalues
+            resid_quad_wls = y - quad_wls.fittedvalues
+            rmse_lin_wls = float(np.sqrt(np.mean(np.square(resid_lin_wls))))
+            rmse_quad_wls = float(np.sqrt(np.mean(np.square(resid_quad_wls))))
+            diagnostics["linear"]["wls"]["RMSE"] = rmse_lin_wls
+            diagnostics["quadratic"]["wls"]["RMSE"] = rmse_quad_wls
+        except Exception as _e_rmse_wls:
+            diagnostics["linear"]["wls"]["rmse_exception"] = str(_e_rmse_wls)
+            diagnostics["quadratic"]["wls"]["rmse_exception"] = str(_e_rmse_wls)
 
         # Align prediction matrices for WLS models (same exog names)
         X_linear_pred_wls = X_linear_pred.reindex(columns=lin_wls.model.exog_names)
@@ -1604,6 +1652,80 @@ def main() -> None:
     print("\n\n")
     print(f"Predictions:\n{summary.df_results}")
     print("\n\n")
+
+    # Pretty comparison table for four model forms (OLS/WLS x Linear/Quadratic)
+    diag = summary.regression_diagnostics
+
+    def _safe_get(d: dict, *keys, default=None):
+        cur = d
+        for k in keys:
+            if not isinstance(cur, dict) or k not in cur:
+                return default
+            cur = cur[k]
+        return cur
+
+    # Mapping of display rows to diagnostic nodes
+    rows_spec = [
+        ("OLS Linear", ("linear", "ols")),
+        ("OLS Quadratic", ("quadratic", "ols")),
+        ("WLS Linear", ("linear", "wls")),
+        ("WLS Quadratic", ("quadratic", "wls")),
+    ]
+
+    # Build rows with requested metrics
+    table_rows = []
+    for label, path in rows_spec:
+        node = _safe_get(diag, *path, default={}) or {}
+        # Extract metrics; many statsmodels results are pandas/ndarray — cast to float when possible
+        rmse = _safe_get(diag, path[0], path[1], "RMSE", default=None)
+        adj_r2 = _safe_get(node, "Adj. R-squared", default=None)
+        # AIC/BIC if available on the fitted result; if not, leave blank
+        aic = None
+        bic = None
+        # Try to fetch from the stored "Summary" or parameters. We stored full result objects' summary()
+        # but not direct attributes. However, AIC/BIC can be reconstructed if res is available.
+        # Our diagnostics store "Summary" text, so for reliability we prefer direct attributes if present.
+        # The _stats_dict included Coefficients/SE/etc. but not 'aic'/'bic' scalar; we can compute from res if available
+        # but since we didn't keep res, fall back to checking if node has 'aic'/'bic' already (future-proof).
+        aic = _safe_get(node, "aic", default=None)
+        bic = _safe_get(node, "bic", default=None)
+
+        # If not present, attempt to derive from the Summary object if it has .aic/.bic attributes (statsmodels Summary2 doesn't),
+        # so we just leave as None if absent.
+        def fmt(x):
+            try:
+                return (
+                    f"{float(x):.6g}"
+                    if x is not None and np.isfinite(float(x))
+                    else "-"
+                )
+            except Exception:
+                return "-"
+
+        table_rows.append((label, fmt(rmse), fmt(adj_r2), fmt(aic), fmt(bic)))
+
+    # Column widths
+    headers = ("Model", "RMSE (in-sample)", "Adj R^2", "AIC", "BIC")
+    col_widths = [
+        max(len(headers[0]), max(len(r[0]) for r in table_rows)),
+        len(headers[1]),
+        len(headers[2]),
+        len(headers[3]),
+        len(headers[4]),
+    ]
+
+    # Render header
+    header_line = f"{headers[0]:<{col_widths[0]}}  {headers[1]:>{col_widths[1]}}  {headers[2]:>{col_widths[2]}}  {headers[3]:>{col_widths[3]}}  {headers[4]:>{col_widths[4]}}"
+    sep_line = "-" * len(header_line)
+    print("Model Comparison (OLS/WLS x Linear/Quadratic)")
+    print(header_line)
+    print(sep_line)
+    for r in table_rows:
+        print(
+            f"{r[0]:<{col_widths[0]}}  {r[1]:>{col_widths[1]}}  {r[2]:>{col_widths[2]}}  {r[3]:>{col_widths[3]}}  {r[4]:>{col_widths[4]}}"
+        )
+    print("\n")
+
     print(
         "FORT for minimum cost/run:\n"
         f"  (OLS linear): {summary.sor_min_cost_lin}\n"
