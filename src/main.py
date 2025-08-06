@@ -1963,7 +1963,7 @@ def render_plot_presets(
     artifact_paths: list[str] = []
     for flags in presets_to_render:
         layer_suffix = _plot_layers_suffix(flags)
-        out_svg = with_hash_suffix(f"plot-{layer_suffix}", short_hash, ".svg")
+        out_svg = with_hash_suffix(f"plot-{short_hash}-{layer_suffix}.svg")
         # Build a per-call PlotParams that uses preset flags with optional bounds
         pp = plot_params if plot_params is not None else None
         render_outputs(
@@ -2024,11 +2024,11 @@ def assemble_text_report(
     """
     # 1) Prepare base sections (input head, filtered head)
     parts: list[str] = []
-    parts.append("\n\n")
+    parts.append("\n")
     parts.append(f"Input data (head):\n{input_df.head()}")
-    parts.append("\n\n")
+    parts.append("\n")
     parts.append(f"Filtered data (head):\n{transformed.df_range.head()}")
-    parts.append("\n\n")
+    parts.append("\n")
 
     # 2) Trim the selected-model tail from the model comparison table
     #    The original builder appends: "", "Selected model (by policy): …", ""
@@ -2189,7 +2189,7 @@ def assemble_text_report(
         + MAX_VALUE_WIDTH
     )
 
-    parts.append("FORTs for lowest cost/run (models ordered by fit quality)")
+    parts.append("\nFORTs for lowest cost/run (models ordered by fit quality)")
 
     # Render each line with spaces so the value's right-most character lands at right_edge_col
     for disp_label, val_str in pairs:
