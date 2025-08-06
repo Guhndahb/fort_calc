@@ -842,100 +842,194 @@ def regression_analysis(
     df_range: pd.DataFrame, input_data_fort: int
 ) -> tuple[pd.DataFrame, Dict[str, Dict[str, Any]]]:
     """
-    OLS regression for linear and quadratic models using pandas DataFrames
-    for design matrices. Training and prediction frames use matching column
-    names and consistent constant handling (has_constant='add') to avoid
-    column-order issues during predict.
-    """
-    # Generate sequence from 1 to input_data_fort
-    sor_sequence = np.arange(1, input_data_fort + 1)
+    Perform regression analysis for linear and quadratic forms with statsmodels.
 
-    # Prepare response as 1D ndarray to align with statsmodels OLS expectations
+    Behavior:
+    - Trains baseline OLS models for both linear and quadratic specifications.
+    - Builds prediction matrices with named columns and explicit constant handling
+      via statsmodels add_constant(has_constant='add') to avoid column-order issues.
+    - Returns a result_df that contains ONLY the baseline OLS predictions so
+      downstream summarize_and_model() and render_outputs() remain unchanged.
+
+    Additional variants (diagnostics only):
+    In addition to the baseline OLS, this function computes extra model variants
+    and returns them under the diagnostics mapping without altering result_df:
+      - 'ols':     Baseline OLS (used for result_df predictions)
+      - 'ols_hc1': OLS fit with heteroskedasticity-robust covariance (HC1)
+      - 'wls':     Weighted Least Squares with weights 1 / (sor#^2)
+      - 'wls_hc1': WLS with HC1 robust covariance
+
+    Diagnostics schema:
+      diagnostics = {
+        "linear": {
+          "ols":      {R-squared, Adj. R-squared, F-statistic, p-value, Coefficients,
+                       Standard Errors, Confidence Intervals, Residuals, Summary},
+          "ols_hc1":  {... same keys as above ...},
+          "wls":      {... same keys ... plus "weights_spec": "1/(sor#^2)"},
+          "wls_hc1":  {... same keys ... plus "weights_spec": "1/(sor#^2)"},
+          # Optional error keys (e.g., "wls_error") may be present if a variant failed to fit.
+        },
+        "quadratic": {
+          "ols":      {...},
+          "ols_hc1":  {...},
+          "wls":      {...},
+          "wls_hc1":  {...},
+        }
+      }
+
+    Returns:
+      tuple[pd.DataFrame, dict]
+        - result_df: DataFrame with columns:
+            ["sor#", "linear_model_output", "quadratic_model_output"]
+          Both outputs are predictions from the baseline OLS models.
+        - diagnostics: Nested dict as described above containing model statistics for
+          OLS and all additional variants. These are provided for analysis, QA, or
+          optional downstream use without breaking existing consumers.
+
+    Notes:
+    - WLS weights default to 1/(sor#^2) with robust handling of zero/NaN/inf values.
+      Non-finite weights are replaced by the median finite weight; if none are finite,
+      the code falls back to uniform weights.
+    - Robust covariance is requested via fit(cov_type="HC1").
+    - The prediction series in result_df remain baseline OLS by design to preserve
+      all downstream processing and artifacts.
+    """
+
+    # Helper: ensure constant named 'const'
+    def _ensure_const_named_const(X: pd.DataFrame) -> pd.DataFrame:
+        if "const" not in X.columns:
+            const_col = [c for c in X.columns if c.lower() in ("const", "intercept")]
+            if const_col:
+                X = X.rename(columns={const_col[0]: "const"})
+        return X
+
+    # Helper: prepare design matrices
+    def _make_designs(
+        df: pd.DataFrame, seq: np.ndarray
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        Xlin_tr = pd.DataFrame({"sor#": df["sor#"].to_numpy()})
+        Xlin_tr = sm.add_constant(Xlin_tr, has_constant="add")
+        Xlin_tr = _ensure_const_named_const(Xlin_tr)
+
+        Xquad_tr = pd.DataFrame(
+            {"sor#": df["sor#"].to_numpy(), "sor2": df["sor#"].to_numpy() ** 2}
+        )
+        Xquad_tr = sm.add_constant(Xquad_tr, has_constant="add")
+        Xquad_tr = _ensure_const_named_const(Xquad_tr)
+
+        Xlin_pr = pd.DataFrame({"sor#": seq})
+        Xlin_pr = sm.add_constant(Xlin_pr, has_constant="add")
+        Xlin_pr = _ensure_const_named_const(Xlin_pr)
+
+        Xquad_pr = pd.DataFrame({"sor#": seq, "sor2": seq**2})
+        Xquad_pr = sm.add_constant(Xquad_pr, has_constant="add")
+        Xquad_pr = _ensure_const_named_const(Xquad_pr)
+
+        return Xlin_tr, Xquad_tr, Xlin_pr, Xquad_pr
+
+    # Helper: pack stats into dict
+    def _stats_dict(res) -> Dict[str, Any]:
+        return {
+            "R-squared": res.rsquared,
+            "Adj. R-squared": res.rsquared_adj,
+            "F-statistic": res.fvalue,
+            "p-value": res.f_pvalue,
+            "Coefficients": res.params,
+            "Standard Errors": res.bse,
+            "Confidence Intervals": res.conf_int(),
+            "Residuals": res.resid,
+            "Summary": res.summary(),
+        }
+
+    # Sequence and response
+    sor_sequence = np.arange(1, input_data_fort + 1)
     y = df_range["adjusted_run_time"].to_numpy()
 
-    # Training design matrices as DataFrames with explicit column names
-    X_linear_train = pd.DataFrame({"sor#": df_range["sor#"].to_numpy()})
-    X_linear_train = sm.add_constant(X_linear_train, has_constant="add")
-    # Ensure constant column is named 'const' as per statsmodels default
-    if "const" not in X_linear_train.columns:
-        # Statsmodels may sometimes name it differently; standardize
-        const_col = [
-            c for c in X_linear_train.columns if c.lower() in ("const", "intercept")
-        ]
-        if const_col:
-            X_linear_train = X_linear_train.rename(columns={const_col[0]: "const"})
-
-    linear_model = sm.OLS(y, X_linear_train).fit()
-
-    # Quadratic training design matrix with named columns
-    X_quadratic_train = pd.DataFrame(
-        {
-            "sor#": df_range["sor#"].to_numpy(),
-            "sor2": df_range["sor#"].to_numpy() ** 2,
-        }
+    # Base designs
+    X_linear_train, X_quadratic_train, X_linear_pred, X_quadratic_pred = _make_designs(
+        df_range, sor_sequence
     )
-    X_quadratic_train = sm.add_constant(X_quadratic_train, has_constant="add")
-    if "const" not in X_quadratic_train.columns:
-        const_col = [
-            c for c in X_quadratic_train.columns if c.lower() in ("const", "intercept")
-        ]
-        if const_col:
-            X_quadratic_train = X_quadratic_train.rename(
-                columns={const_col[0]: "const"}
+
+    # Baseline OLS fits
+    lin_ols = sm.OLS(y, X_linear_train).fit()
+    quad_ols = sm.OLS(y, X_quadratic_train).fit()
+
+    # Align prediction matrices to trained exog names (order only)
+    X_linear_pred = X_linear_pred.reindex(columns=lin_ols.model.exog_names)
+    X_quadratic_pred = X_quadratic_pred.reindex(columns=quad_ols.model.exog_names)
+
+    # Baseline predictions used in result_df
+    linear_model_output = lin_ols.predict(X_linear_pred)
+    quadratic_model_output = quad_ols.predict(X_quadratic_pred)
+
+    # Diagnostics container with baseline 'ols'
+    diagnostics: Dict[str, Dict[str, Any]] = {
+        "linear": {"ols": _stats_dict(lin_ols)},
+        "quadratic": {"ols": _stats_dict(quad_ols)},
+    }
+
+    # Variant: OLS with robust SEs (HC1)
+    try:
+        lin_ols_hc1 = sm.OLS(y, X_linear_train).fit(cov_type="HC1")
+        quad_ols_hc1 = sm.OLS(y, X_quadratic_train).fit(cov_type="HC1")
+        diagnostics["linear"]["ols_hc1"] = _stats_dict(lin_ols_hc1)
+        diagnostics["quadratic"]["ols_hc1"] = _stats_dict(quad_ols_hc1)
+    except Exception as e:
+        diagnostics.setdefault("linear", {})["ols_hc1_error"] = str(e)
+        diagnostics.setdefault("quadratic", {})["ols_hc1_error"] = str(e)
+
+    # Variant: WLS and WLS with robust SEs
+    # Default weights strategy: 1 / (sor#^2) guarding zero/NaN
+    try:
+        sor_vals = pd.to_numeric(df_range["sor#"], errors="coerce").to_numpy()
+        with np.errstate(divide="ignore", invalid="ignore"):
+            w = 1.0 / np.where(
+                np.isfinite(sor_vals) & (sor_vals > 0), sor_vals**2, np.nan
+            )
+        # Replace NaN/Inf weights with median of finite weights to keep WLS stable
+        if not np.isfinite(w).any():
+            # Fallback: all invalid -> uniform weights
+            w = np.ones_like(sor_vals, dtype=float)
+        else:
+            finite_mask = np.isfinite(w)
+            median_w = float(np.nanmedian(w[finite_mask]))
+            w = np.where(
+                np.isfinite(w),
+                w,
+                median_w if np.isfinite(median_w) and median_w > 0 else 1.0,
             )
 
-    quadratic_model = sm.OLS(y, X_quadratic_train).fit()
+        lin_wls = sm.WLS(y, X_linear_train, weights=w).fit()
+        quad_wls = sm.WLS(y, X_quadratic_train, weights=w).fit()
+        diagnostics["linear"]["wls"] = {
+            **_stats_dict(lin_wls),
+            "weights_spec": "1/(sor#^2)",
+        }
+        diagnostics["quadratic"]["wls"] = {
+            **_stats_dict(quad_wls),
+            "weights_spec": "1/(sor#^2)",
+        }
 
-    # Prediction frames as DataFrames with the same column names
-    X_linear_pred = pd.DataFrame({"sor#": sor_sequence})
-    X_linear_pred = sm.add_constant(X_linear_pred, has_constant="add")
-    if "const" not in X_linear_pred.columns:
-        const_col = [
-            c for c in X_linear_pred.columns if c.lower() in ("const", "intercept")
-        ]
-        if const_col:
-            X_linear_pred = X_linear_pred.rename(columns={const_col[0]: "const"})
-    # Ensure column order matches trained model exog names to avoid any positional misalignment
-    X_linear_pred = X_linear_pred.reindex(columns=linear_model.model.exog_names)
-    # Ensure column order matches trained model exog names to avoid any positional misalignment
-    X_linear_pred = X_linear_pred.reindex(columns=linear_model.model.exog_names)
+        # WLS + robust SEs (HC1)
+        try:
+            lin_wls_hc1 = sm.WLS(y, X_linear_train, weights=w).fit(cov_type="HC1")
+            quad_wls_hc1 = sm.WLS(y, X_quadratic_train, weights=w).fit(cov_type="HC1")
+            diagnostics["linear"]["wls_hc1"] = {
+                **_stats_dict(lin_wls_hc1),
+                "weights_spec": "1/(sor#^2)",
+            }
+            diagnostics["quadratic"]["wls_hc1"] = {
+                **_stats_dict(quad_wls_hc1),
+                "weights_spec": "1/(sor#^2)",
+            }
+        except Exception as e:
+            diagnostics["linear"]["wls_hc1_error"] = str(e)
+            diagnostics["quadratic"]["wls_hc1_error"] = str(e)
+    except Exception as e:
+        diagnostics.setdefault("linear", {})["wls_error"] = str(e)
+        diagnostics.setdefault("quadratic", {})["wls_error"] = str(e)
 
-    X_quadratic_pred = pd.DataFrame({"sor#": sor_sequence, "sor2": sor_sequence**2})
-    X_quadratic_pred = sm.add_constant(X_quadratic_pred, has_constant="add")
-    if "const" not in X_quadratic_pred.columns:
-        const_col = [
-            c for c in X_quadratic_pred.columns if c.lower() in ("const", "intercept")
-        ]
-        if const_col:
-            X_quadratic_pred = X_quadratic_pred.rename(columns={const_col[0]: "const"})
-    # Ensure column order matches trained model exog names
-    X_quadratic_pred = X_quadratic_pred.reindex(
-        columns=quadratic_model.model.exog_names
-    )
-    # Ensure column order matches trained model exog names
-    X_quadratic_pred = X_quadratic_pred.reindex(
-        columns=quadratic_model.model.exog_names
-    )
-
-    # Align prediction columns to trained model exog_names to avoid positional mismatch
-    X_linear_pred = X_linear_pred.reindex(columns=linear_model.model.exog_names)
-    X_quadratic_pred = X_quadratic_pred.reindex(
-        columns=quadratic_model.model.exog_names
-    )
-
-    # Predict using DataFrames after explicit column alignment
-    linear_model_output = linear_model.predict(X_linear_pred)
-    quadratic_model_output = quadratic_model.predict(X_quadratic_pred)
-
-    # test plot to show heteroskedasticity
-    # plt.scatter(df_range["sor#"], quadratic_model.resid, alpha=0.5)
-    # plt.axhline(0, color="gray", linestyle="--")
-    # plt.xlabel("sor#")
-    # plt.ylabel("Residuals")
-    # plt.title("Residuals vs sor#")
-    # plt.show()
-
-    # Create results DataFrame
+    # Assemble result_df using baseline OLS predictions only (no downstream changes)
     result_df = (
         pd.DataFrame(
             {
@@ -947,32 +1041,6 @@ def regression_analysis(
         .sort_values(by="sor#")
         .reset_index(drop=True)
     )
-
-    # Diagnostics
-    diagnostics = {
-        "linear": {
-            "R-squared": linear_model.rsquared,
-            "Adj. R-squared": linear_model.rsquared_adj,
-            "F-statistic": linear_model.fvalue,
-            "p-value": linear_model.f_pvalue,
-            "Coefficients": linear_model.params,
-            "Standard Errors": linear_model.bse,
-            "Confidence Intervals": linear_model.conf_int(),
-            "Residuals": linear_model.resid,
-            "Summary": linear_model.summary(),
-        },
-        "quadratic": {
-            "R-squared": quadratic_model.rsquared,
-            "Adj. R-squared": quadratic_model.rsquared_adj,
-            "F-statistic": quadratic_model.fvalue,
-            "p-value": quadratic_model.f_pvalue,
-            "Coefficients": quadratic_model.params,
-            "Standard Errors": quadratic_model.bse,
-            "Confidence Intervals": quadratic_model.conf_int(),
-            "Residuals": quadratic_model.resid,
-            "Summary": quadratic_model.summary(),
-        },
-    }
 
     return result_df, diagnostics
 
