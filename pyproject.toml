@@ -15,3 +15,8 @@ quote-style = "double"
 indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
+
+[tool.pytest.ini_options]
+# Ensure pytest adds project root (containing 'src') to sys.path for direct invocations
+testpaths = ["tests"]
+pythonpath = ["."]
