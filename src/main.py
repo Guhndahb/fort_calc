@@ -896,9 +896,6 @@ class TransformParams:
     verbose_filtering: bool = False
     # Fail fast if any timestamps fail to parse (simple and strict by default)
     fail_on_any_invalid_timestamps: bool = True
-    # Plot layer configuration via flags
-    # Note: DATA_SCATTER_EXCLUDED is not included by default and must be set explicitly.
-    plot_layers: PlotLayer = PlotLayer.DEFAULT
 
 
 @dataclass
@@ -1494,12 +1491,30 @@ def _plot_layers_suffix(flags: PlotLayer) -> str:
     return "+".join(tokens) if tokens else "NONE"
 
 
+@dataclass
+class PlotParams:
+    """
+    Plotting controls including layer selection and optional axis bounds.
+
+    x_min/x_max/y_min/y_max:
+      - Optional float bounds applied via plt.xlim/plt.ylim if provided.
+      - One-sided limits are allowed by passing only one side (the other remains automatic).
+      - x_min/x_max are floats to align with matplotlib float limits and allow half-step framing.
+    """
+
+    plot_layers: PlotLayer = PlotLayer.DEFAULT
+    x_min: Optional[float] = None
+    x_max: Optional[float] = None
+    y_min: Optional[float] = None
+    y_max: Optional[float] = None
+
+
 def render_outputs(
     df_range: pd.DataFrame,
     summary: SummaryModelOutputs,
     output_svg: str = "plot.svg",
-    plot_layers: Optional[PlotLayer] = None,
     df_excluded: Optional[pd.DataFrame] = None,
+    plot_params: Optional[PlotParams] = None,
 ) -> str:
     """
     Pure renderer: builds the plot and returns the output path.
@@ -1509,24 +1524,38 @@ def render_outputs(
       - df_range: DataFrame of included rows after filtering (i.e., transformed.df_range).
       - summary: SummaryModelOutputs computed from df_range.
       - output_svg: Target path for the generated SVG.
-      - plot_layers: Bitflag (PlotLayer) selecting which visual elements to draw.
-                     If None, defaults to PlotLayer.DEFAULT.
       - df_excluded: Optional DataFrame of rows excluded by z-score filtering
                      (i.e., transformed.df_excluded). Only used when the
                      DATA_SCATTER_EXCLUDED flag is set; otherwise ignored.
+      - plot_params: Optional PlotParams controlling plot layers and axis limits.
+                     When provided, plot layers come from plot_params.plot_layers and
+                     axis limits are applied using its x/y bounds. If not provided,
+                     defaults to PlotLayer.DEFAULT with automatic axis limits.
+
+    Axis limit behavior:
+      - If plot_params is provided:
+          plt.xlim(left=plot_params.x_min if plot_params.x_min is not None else None,
+                   right=plot_params.x_max if plot_params.x_max is not None else None)
+          plt.ylim(bottom=plot_params.y_min if plot_params.y_min is not None else None,
+                   top=plot_params.y_max if plot_params.y_max is not None else None)
+        One-sided limits are supported by leaving the other side None (automatic).
+      - If no plot_params: use automatic axis scaling (default matplotlib behavior).
 
     Notes:
       - DATA_SCATTER_EXCLUDED is not part of any preset and will render only when
-        explicitly requested via plot_layers and when df_excluded is provided.
+        explicitly requested via the effective plot_layers and when df_excluded is provided.
     """
-    if plot_layers is None:
-        plot_layers = PlotLayer.DEFAULT
+    # Determine effective plot layer flags (PlotParams is the single source of truth)
+    # Callers are expected to always pass PlotParams; it already carries a default PlotLayer.DEFAULT.
+    if plot_params is None:
+        raise TypeError("render_outputs requires plot_params (PlotParams)")
+    effective_flags = plot_params.plot_layers
 
     plt.style.use("dark_background")
     plt.figure(figsize=(10, 6))
 
     # Data points
-    if plot_layers & PlotLayer.DATA_SCATTER:
+    if effective_flags & PlotLayer.DATA_SCATTER:
         plt.scatter(
             df_range["sor#"],
             df_range["adjusted_run_time"],
@@ -1537,7 +1566,7 @@ def render_outputs(
 
     # Excluded-by-zscore points (optional)
     if (
-        (plot_layers & PlotLayer.DATA_SCATTER_EXCLUDED)
+        (effective_flags & PlotLayer.DATA_SCATTER_EXCLUDED)
         and (df_excluded is not None)
         and (not df_excluded.empty)
     ):
@@ -1552,14 +1581,14 @@ def render_outputs(
         )
 
     # OLS predictions
-    if plot_layers & PlotLayer.OLS_PRED_LINEAR:
+    if effective_flags & PlotLayer.OLS_PRED_LINEAR:
         plt.plot(
             summary.df_results["sor#"],
             summary.df_results["linear_model_output"],
             color="yellow",
             label="Linear Model (OLS)",
         )
-    if plot_layers & PlotLayer.OLS_PRED_QUAD:
+    if effective_flags & PlotLayer.OLS_PRED_QUAD:
         plt.plot(
             summary.df_results["sor#"],
             summary.df_results["quadratic_model_output"],
@@ -1568,7 +1597,7 @@ def render_outputs(
         )
 
     # WLS predictions
-    if (plot_layers & PlotLayer.WLS_PRED_LINEAR) and (
+    if (effective_flags & PlotLayer.WLS_PRED_LINEAR) and (
         "linear_model_output_wls" in summary.df_results.columns
     ):
         plt.plot(
@@ -1578,7 +1607,7 @@ def render_outputs(
             linestyle="-.",
             label="Linear Model (WLS)",
         )
-    if (plot_layers & PlotLayer.WLS_PRED_QUAD) and (
+    if (effective_flags & PlotLayer.WLS_PRED_QUAD) and (
         "quadratic_model_output_wls" in summary.df_results.columns
     ):
         plt.plot(
@@ -1590,7 +1619,7 @@ def render_outputs(
         )
 
     # OLS cost per run curves
-    if plot_layers & PlotLayer.OLS_COST_LINEAR:
+    if effective_flags & PlotLayer.OLS_COST_LINEAR:
         plt.plot(
             summary.df_results["sor#"],
             summary.df_results["cost_per_run_at_fort_lin"],
@@ -1598,7 +1627,7 @@ def render_outputs(
             linestyle="--",
             label="Cost/Run @ FORT (Linear, OLS)",
         )
-    if plot_layers & PlotLayer.OLS_COST_QUAD:
+    if effective_flags & PlotLayer.OLS_COST_QUAD:
         plt.plot(
             summary.df_results["sor#"],
             summary.df_results["cost_per_run_at_fort_quad"],
@@ -1608,7 +1637,7 @@ def render_outputs(
         )
 
     # WLS cost-per-run curves
-    if (plot_layers & PlotLayer.WLS_COST_LINEAR) and (
+    if (effective_flags & PlotLayer.WLS_COST_LINEAR) and (
         "cost_per_run_at_fort_lin_wls" in summary.df_results.columns
     ):
         plt.plot(
@@ -1618,7 +1647,7 @@ def render_outputs(
             linestyle=":",
             label="Cost/Run @ FORT (Linear, WLS)",
         )
-    if (plot_layers & PlotLayer.WLS_COST_QUAD) and (
+    if (effective_flags & PlotLayer.WLS_COST_QUAD) and (
         "cost_per_run_at_fort_quad_wls" in summary.df_results.columns
     ):
         plt.plot(
@@ -1630,14 +1659,14 @@ def render_outputs(
         )
 
     # Min cost verticals (OLS)
-    if plot_layers & PlotLayer.OLS_MIN_LINEAR:
+    if effective_flags & PlotLayer.OLS_MIN_LINEAR:
         plt.axvline(
             x=summary.sor_min_cost_lin,
             color="green",
             linestyle="--",
             label="Min Cost (Linear, OLS)",
         )
-    if plot_layers & PlotLayer.OLS_MIN_QUAD:
+    if effective_flags & PlotLayer.OLS_MIN_QUAD:
         plt.axvline(
             x=summary.sor_min_cost_quad,
             color="blue",
@@ -1646,7 +1675,7 @@ def render_outputs(
         )
 
     # Min cost verticals (WLS) if present
-    if (plot_layers & PlotLayer.WLS_MIN_LINEAR) and (
+    if (effective_flags & PlotLayer.WLS_MIN_LINEAR) and (
         summary.sor_min_cost_lin_wls is not None
     ):
         plt.axvline(
@@ -1655,7 +1684,7 @@ def render_outputs(
             linestyle=":",
             label="Min Cost (Linear, WLS)",
         )
-    if (plot_layers & PlotLayer.WLS_MIN_QUAD) and (
+    if (effective_flags & PlotLayer.WLS_MIN_QUAD) and (
         summary.sor_min_cost_quad_wls is not None
     ):
         plt.axvline(
@@ -1669,8 +1698,18 @@ def render_outputs(
     plt.ylabel("Adjusted Run Time")
     plt.title("FORT Regression Models")
 
-    if plot_layers & PlotLayer.LEGEND:
+    if effective_flags & PlotLayer.LEGEND:
         plt.legend()
+
+    # Apply axis limits from PlotParams; support one-sided bounds
+    plt.xlim(
+        left=plot_params.x_min if plot_params.x_min is not None else None,
+        right=plot_params.x_max if plot_params.x_max is not None else None,
+    )
+    plt.ylim(
+        bottom=plot_params.y_min if plot_params.y_min is not None else None,
+        top=plot_params.y_max if plot_params.y_max is not None else None,
+    )
 
     plt.savefig(output_svg, format="svg")
     plt.close()
@@ -1680,9 +1719,9 @@ def render_outputs(
 # --- Helper extractions to simplify main() ---
 
 
-def get_default_params() -> tuple[LoadSliceParams, TransformParams]:
+def get_default_params() -> tuple[LoadSliceParams, TransformParams, PlotParams]:
     """
-    Build default LoadSliceParams and TransformParams.
+    Build default LoadSliceParams, TransformParams, and PlotParams.
     Kept simple for now; later can be swapped to argparse/env without touching main().
     """
     # Example defaults (preserve existing behavior)
@@ -1701,9 +1740,15 @@ def get_default_params() -> tuple[LoadSliceParams, TransformParams]:
         delta_mode=DeltaMode.PREVIOUS_CHUNK,
         exclude_timestamp_ranges=None,  # [("20250801124409", "20250805165454")],
         verbose_filtering=True,
-        plot_layers=PlotLayer.DEFAULT,
     )
-    return load, trans
+    plotp = PlotParams(
+        plot_layers=PlotLayer.DEFAULT,
+        x_min=None,
+        x_max=None,
+        y_min=None,
+        y_max=None,
+    )
+    return load, trans, plotp
 
 
 def build_run_identity(
@@ -1888,6 +1933,7 @@ def render_plot_presets(
     summary: SummaryModelOutputs,
     short_hash: str,
     df_excluded: Optional[pd.DataFrame] = None,
+    plot_params: Optional[PlotParams] = None,
 ) -> list[str]:
     """
     Render a stable set of plot presets and return artifact paths.
@@ -1898,6 +1944,9 @@ def render_plot_presets(
       - short_hash: suffix used for artifact file names
       - df_excluded: optional excluded rows (transformed.df_excluded); used only when
                      PlotLayer.DATA_SCATTER_EXCLUDED is set in a preset
+      - plot_params: Optional PlotParams to thread axis limits to each preset; only
+                     plot_layers from the presets are used for layers, while axis bounds
+                     come from plot_params if provided.
     """
     presets_to_render = [
         PlotLayer.ALL_OLS,
@@ -1913,12 +1962,22 @@ def render_plot_presets(
     for flags in presets_to_render:
         layer_suffix = _plot_layers_suffix(flags)
         out_svg = with_hash_suffix(f"plot-{layer_suffix}", short_hash, ".svg")
+        # Build a per-call PlotParams that uses preset flags with optional bounds
+        pp = plot_params if plot_params is not None else None
         render_outputs(
             df_included,
             summary,
             output_svg=out_svg,
-            plot_layers=flags,
             df_excluded=df_excluded,
+            plot_params=PlotParams(
+                plot_layers=flags,
+                x_min=pp.x_min if pp is not None else None,
+                x_max=pp.x_max if pp is not None else None,
+                y_min=pp.y_min if pp is not None else None,
+                y_max=pp.y_max if pp is not None else None,
+            )
+            if pp is not None
+            else PlotParams(plot_layers=flags),
         )
         artifact_paths.append(out_svg)
     return artifact_paths
@@ -1981,7 +2040,7 @@ def assemble_text_report(
 
 def main() -> None:
     # 1) Build params and run identity
-    params_load, params_transform = get_default_params()
+    params_load, params_transform, params_plot = get_default_params()
     abs_input_posix, short_hash, full_hash, effective_params = build_run_identity(
         params_load, params_transform
     )
@@ -1996,7 +2055,11 @@ def main() -> None:
 
     # 4) Render plots
     artifact_paths = render_plot_presets(
-        transformed.df_range, summary, short_hash, df_excluded=transformed.df_excluded
+        transformed.df_range,
+        summary,
+        short_hash,
+        df_excluded=transformed.df_excluded,
+        plot_params=params_plot,
     )
 
     # 5) Manifest
