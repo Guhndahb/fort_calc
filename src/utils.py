@@ -45,18 +45,6 @@ def canonical_json_hash(payload: dict[str, Any]) -> tuple[str, str]:
 
 
 # -------------------------
-# Naming utilities
-# -------------------------
-def with_hash_suffix(basename: str, short_hash: str, ext: str) -> str:
-    """
-    Compose an artifact filename as: {basename}-{short_hash}{ext}
-    """
-    if not ext.startswith("."):
-        ext = "." + ext
-    return f"{basename}-{short_hash}{ext}"
-
-
-# -------------------------
 # Manifest helpers
 # -------------------------
 def _normalize_value(v: Any) -> Any:

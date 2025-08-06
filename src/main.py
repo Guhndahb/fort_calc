@@ -43,7 +43,6 @@ except ImportError:
         canonical_json_hash,
         normalize_abs_posix,
         utc_timestamp_seconds,
-        with_hash_suffix,
         write_manifest,
     )
 
@@ -1963,7 +1962,7 @@ def render_plot_presets(
     artifact_paths: list[str] = []
     for flags in presets_to_render:
         layer_suffix = _plot_layers_suffix(flags)
-        out_svg = with_hash_suffix(f"plot-{short_hash}-{layer_suffix}.svg")
+        out_svg = f"plot-{short_hash}-{layer_suffix}.svg"
         # Build a per-call PlotParams that uses preset flags with optional bounds
         pp = plot_params if plot_params is not None else None
         render_outputs(
