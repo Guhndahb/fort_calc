@@ -32,7 +32,6 @@ try:
         canonical_json_hash,
         normalize_abs_posix,
         utc_timestamp_seconds,
-        with_hash_suffix,
         write_manifest,
     )
 except ImportError:
@@ -2279,8 +2278,10 @@ def assemble_text_report(
     parts.append("\nFORTs for lowest cost/run (models ordered by fit quality)")
 
     # Render each line with spaces so the value's right-most character lands at right_edge_col
-    for disp_label, val_str in pairs:
-        label_len = len(disp_label)
+    for idx, (disp_label, val_str) in enumerate(pairs, start=1):
+        # Prefix each line with its 1-based rank "(n) "
+        label_with_rank = f"({idx}) {disp_label}"
+        label_len = len(label_with_rank)
         value_width = len(val_str)  # "-" => 1, numbers in [1..3]
         current_prefix_len = (
             len_prefix_fixed + label_len + len_close_paren + len_colon_space
@@ -2288,7 +2289,7 @@ def assemble_text_report(
         spaces_needed = right_edge_col - (current_prefix_len + value_width)
         if spaces_needed < 1:
             spaces_needed = 1  # ensure at least one space after the colon
-        parts.append(f"  ({disp_label}):{' ' * spaces_needed}{val_str}")
+        parts.append(f"  {label_with_rank}:{' ' * spaces_needed}{val_str}")
 
     return "\n".join(parts)
 
