@@ -342,26 +342,36 @@ def convert_timestamp_column_to_datetime(
     # Convert timestamp column to datetime (in place)
     try:
         if not pd.api.types.is_datetime64_any_dtype(df[timestamp_column]):
-            # Handle both string and integer timestamps
-            if df[timestamp_column].dtype in ["int64", "float64"]:
-                df[timestamp_column] = pd.to_datetime(
-                    df[timestamp_column].astype(str),
-                    format=timestamp_format,
-                    errors="coerce",
-                )
-            else:
-                df[timestamp_column] = pd.to_datetime(
-                    df[timestamp_column], format=timestamp_format, errors="coerce"
-                )
+            # Always parse using a string path to preserve leading zeros when dtype is numeric.
+            # Use exact=True per spec; errors='coerce' to mark invalids as NaT.
+            series_to_parse = df[timestamp_column].astype(str)
+            df[timestamp_column] = pd.to_datetime(
+                series_to_parse,
+                format=timestamp_format,
+                errors="coerce",
+                exact=True,
+            )
 
-        # Check for parsing failures
-        invalid_timestamps = int(df[timestamp_column].isna().sum())
+        # Check for parsing failures and always persist metrics on the frame
+        # even if the column was already datetime dtype.
+        if pd.api.types.is_datetime64_any_dtype(df[timestamp_column]):
+            invalid_timestamps = int(df[timestamp_column].isna().sum())
+            converted_dtype = str(df[timestamp_column].dtype)
+        else:
+            # Not datetime -> treat as full failure
+            invalid_timestamps = int(len(df))
+            converted_dtype = str(df[timestamp_column].dtype)
+        total_rows = int(len(df))
         if invalid_timestamps > 0:
             result.add_warning(
-                f"Found {invalid_timestamps} invalid timestamps in column '{timestamp_column}'"
+                f"Found {invalid_timestamps} invalid timestamps in column '{timestamp_column}' out of {total_rows} rows"
             )
         result.add_metric("invalid_timestamps", invalid_timestamps)
-        result.add_metric("converted_dtype", str(df[timestamp_column].dtype))
+        result.add_metric("invalid_timestamps_total_rows", total_rows)
+        result.add_metric("converted_dtype", converted_dtype)
+        # Persist invalid count on the frame for downstream checks
+        df.attrs["invalid_timestamps"] = invalid_timestamps
+        df.attrs["invalid_timestamps_total_rows"] = total_rows
 
         if verbose:
             logger.info(f"Converted dtype: {df[timestamp_column].dtype}")
@@ -636,6 +646,8 @@ class TransformParams:
     delta_mode: "DeltaMode"
     exclude_timestamp_ranges: Optional[List[Tuple[str, str]]]
     verbose_filtering: bool = False
+    # Fail fast if any timestamps fail to parse (simple and strict by default)
+    fail_on_any_invalid_timestamps: bool = True
 
 
 @dataclass
@@ -808,25 +820,44 @@ def transform_pipeline(
     Pure transformation pipeline from raw range to filtered frames.
     Returns included and excluded DataFrames.
     """
-    df_range = (
-        df_range.pipe(
-            clean_ignore,
-            input_data_fort=params.input_data_fort,
-            verbose=params.verbose_filtering,
-        )
-        .pipe(compute_adjusted_run_time, ignore_mrt=params.ignore_mrt)
-        .pipe(
-            convert_timestamp_column_to_datetime,
-            timestamp_column="timestamp",
-            verbose=params.verbose_filtering,
-        )
-        .pipe(
-            filter_timestamp_ranges,
-            exclude_timestamp_ranges=params.exclude_timestamp_ranges,
-            verbose=params.verbose_filtering,
-        )
-        .pipe(fill_first_note_if_empty, verbose=params.verbose_filtering)
+    # Build the pipeline step-by-step so we can fail-fast immediately after timestamp parsing
+    df_range = df_range.pipe(
+        clean_ignore,
+        input_data_fort=params.input_data_fort,
+        verbose=params.verbose_filtering,
     )
+    df_range = compute_adjusted_run_time(df_range, ignore_mrt=params.ignore_mrt)
+    # Convert timestamps early, once
+    df_range = convert_timestamp_column_to_datetime(
+        df_range, timestamp_column="timestamp", verbose=params.verbose_filtering
+    )
+    # Fail fast on invalid timestamps immediately after parsing (before any downstream filtering)
+    if "timestamp" in df_range.columns:
+        # Prefer metrics persisted by the converter for robustness against view/copy behavior
+        persisted_invalid = df_range.attrs.get("invalid_timestamps", None)
+        persisted_total = df_range.attrs.get("invalid_timestamps_total_rows", None)
+        if persisted_invalid is None:
+            # Fallback: derive from the current column
+            if pd.api.types.is_datetime64_any_dtype(df_range["timestamp"]):
+                invalid_ts_count = int(df_range["timestamp"].isna().sum())
+            else:
+                invalid_ts_count = int(len(df_range))
+            total_rows = int(len(df_range))
+        else:
+            invalid_ts_count = int(persisted_invalid)
+            total_rows = int(
+                persisted_total if persisted_total is not None else len(df_range)
+            )
+        if params.fail_on_any_invalid_timestamps and invalid_ts_count > 0:
+            raise ValueError(
+                f"Invalid timestamps detected after parsing: {invalid_ts_count} of {total_rows} rows are NaT"
+            )
+    # Continue with the rest of the pipeline
+    df_range = df_range.pipe(
+        filter_timestamp_ranges,
+        exclude_timestamp_ranges=params.exclude_timestamp_ranges,
+        verbose=params.verbose_filtering,
+    ).pipe(fill_first_note_if_empty, verbose=params.verbose_filtering)
 
     df_included, df_excluded = filter_by_adjusted_run_time_zscore(
         df_range, params.zscore_min, params.zscore_max, params.input_data_fort
