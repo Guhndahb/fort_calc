@@ -380,63 +380,63 @@ def filter_timestamp_ranges(
 ) -> pd.DataFrame:
     """
     Filter out rows that fall within specified timestamp ranges with comprehensive debugging.
-
-    Enhanced version with logging for invalid ranges and observability features.
-
-    Args:
-        df: Input DataFrame
-        exclude_timestamp_ranges: List of (start, end) timestamp tuples as strings in YYYYMMDDHHMMSS format
-        timestamp_column: Name of the timestamp column to filter on
-        verbose: Enable detailed logging for debugging
-
-    Returns:
-        DataFrame with rows outside the specified timestamp ranges
+    Refactored to use enhanced FilterResult diagnostics (label, timing, metrics/events)
+    while preserving DataFrame -> DataFrame piping. Avoids unnecessary .copy().
     """
-    result = FilterResult()
+    result = FilterResult(label="filter_timestamp_ranges")
+    result.start()
     result.original_rows = len(df)
 
     # Early return for empty DataFrame
     if df.empty:
-        result.add_warning("Empty DataFrame provided - no filtering performed")
+        result.set_skipped("empty dataframe - no filtering performed")
+        result.filtered_rows = len(df)
+        result.stop()
         if verbose:
-            logger.info(f"Filter result: {result.__dict__}")
+            logger.info(result.summarize())
         return df
 
     # Early return for empty ranges
     if not exclude_timestamp_ranges:
+        result.set_skipped("no exclude ranges provided")
+        result.filtered_rows = len(df)
+        result.stop()
+        if verbose:
+            logger.info(result.summarize())
         return df
 
     # Check if timestamp column exists
     if timestamp_column not in df.columns:
-        result.add_warning(
-            f"Timestamp column '{timestamp_column}' not found - no filtering performed"
-        )
+        result.set_skipped(f"timestamp column '{timestamp_column}' not found")
+        result.filtered_rows = len(df)
+        result.stop()
         if verbose:
-            logger.info(f"Filter result: {result.__dict__}")
+            logger.info(result.summarize())
         return df
-
-    # Process timestamp column - now expects datetime format
-    df_work = df.copy()
 
     # Add diagnostic logging for timestamp column
     if verbose:
-        logger.info(f"Timestamp column dtype: {df_work[timestamp_column].dtype}")
+        logger.info(f"Timestamp column dtype: {df[timestamp_column].dtype}")
         logger.info(
-            f"First few timestamp values: {df_work[timestamp_column].iloc[:3].tolist()}"
+            f"First few timestamp values: {df[timestamp_column].iloc[:3].tolist()}"
         )
         logger.info(f"Sample exclude ranges: {exclude_timestamp_ranges}")
 
+    result.add_metric("timestamp_dtype", str(df[timestamp_column].dtype))
+
     # Verify timestamp column is properly parsed as datetime
-    if not pd.api.types.is_datetime64_any_dtype(df_work[timestamp_column]):
-        result.add_warning(
-            f"Timestamp column '{timestamp_column}' is not in datetime format - skipping filtering"
+    if not pd.api.types.is_datetime64_any_dtype(df[timestamp_column]):
+        result.set_skipped(
+            f"timestamp column '{timestamp_column}' is not in datetime format"
         )
+        result.filtered_rows = len(df)
+        result.stop()
         if verbose:
-            logger.info(f"Filter result: {result.__dict__}")
+            logger.info(result.summarize())
         return df
 
     # Process valid timestamp ranges
-    valid_ranges = []
+    valid_ranges: list[tuple[pd.Timestamp, pd.Timestamp]] = []
     for start_str, end_str in exclude_timestamp_ranges:
         try:
             start_ts = pd.to_datetime(start_str, format="%Y%m%d%H%M%S")
@@ -457,60 +457,64 @@ def filter_timestamp_ranges(
             result.log_invalid_range(start_str, end_str, str(e))
             continue
 
+    result.add_metric("valid_range_count", len(valid_ranges))
+
     # Early return if no valid ranges
     if not valid_ranges:
-        result.add_warning("No valid timestamp ranges found - no filtering performed")
+        result.set_skipped("no valid timestamp ranges found")
         if verbose:
+            # keep previous helpful samples
             logger.info(
-                f"DataFrame timestamp column sample: {df_work[timestamp_column].iloc[:5]}"
+                f"DataFrame timestamp column sample: {df[timestamp_column].iloc[:5]}"
             )
             logger.info(
-                f"Parsed timestamps sample: {df_work[timestamp_column].iloc[:5].dt.strftime('%Y%m%d%H%M%S')}"
+                f"Parsed timestamps sample: {df[timestamp_column].iloc[:5].dt.strftime('%Y%m%d%H%M%S')}"
             )
+            logger.info(result.summarize())
+        result.filtered_rows = len(df)
+        result.stop()
         return df
 
-    # Build exclusion mask for valid ranges
-    exclude_mask = pd.Series([False] * len(df_work), index=df_work.index)
+    # Build exclusion mask for valid ranges (avoid copy; operate on df directly)
+    exclude_mask = pd.Series(False, index=df.index)
 
     if verbose:
         logger.info(f"Valid ranges to exclude: {valid_ranges}")
         logger.info(
-            f"Timestamp range in data: {df_work[timestamp_column].min()} to {df_work[timestamp_column].max()}"
+            f"Timestamp range in data: {df[timestamp_column].min()} to {df[timestamp_column].max()}"
         )
 
     for start_ts, end_ts in valid_ranges:
-        range_mask = (df_work[timestamp_column] >= start_ts) & (
-            df_work[timestamp_column] <= end_ts
+        range_mask = (df[timestamp_column] >= start_ts) & (
+            df[timestamp_column] <= end_ts
         )
         if verbose:
-            matched_count = range_mask.sum()
+            matched_count = int(range_mask.sum())
             logger.info(
                 f"Range {start_ts} to {end_ts}: {matched_count} rows would be excluded"
             )
             if matched_count > 0:
                 logger.info(
-                    f"Sample excluded timestamps: {df_work[range_mask][timestamp_column].iloc[:3].tolist()}"
+                    f"Sample excluded timestamps: {df.loc[range_mask, timestamp_column].iloc[:3].tolist()}"
                 )
         exclude_mask |= range_mask
 
-    # Apply filtering
-    filtered_df = df_work[~exclude_mask]
+    # Apply filtering (this returns a view/copy as per pandas semantics, but we avoid an explicit copy())
+    filtered_df = df.loc[~exclude_mask]
+
+    # Populate diagnostics
+    excluded_rows = int(exclude_mask.sum())
     result.filtered_rows = len(filtered_df)
-    result.excluded_ranges = exclude_mask.sum()
+    result.excluded_rows = excluded_rows
+    result.excluded_ranges = excluded_rows  # keep legacy counter aligned to rows here
+    result.add_metric("excluded_rows", excluded_rows)
 
     # Log summary
+    result.stop()
     if verbose or result.warnings:
-        logger.info(
-            f"Timestamp filtering completed: "
-            f"{result.original_rows} → {result.filtered_rows} rows "
-            f"({result.excluded_ranges} rows excluded)"
-        )
-
+        logger.info(result.summarize())
         if result.invalid_ranges:
             logger.info(f"Invalid ranges skipped: {len(result.invalid_ranges)}")
-
-        if result.warnings:
-            logger.info(f"Warnings: {len(result.warnings)}")
 
     return filtered_df
 
