@@ -12,7 +12,6 @@ from src.main import (
     TransformOutputs,
     TransformParams,
     load_and_slice_csv,
-    render_outputs,
     summarize_and_model,
     transform_pipeline,
 )
@@ -147,43 +146,7 @@ def test_summarize_and_model_contract():
     assert isinstance(summary.offline_cost, float)
 
 
-def test_render_outputs_writes_svg(tmp_path: Path):
-    # Minimal viable inputs: df_range and a precomputed SummaryModelOutputs
-    df_range = pd.DataFrame(
-        {
-            "sor#": [1, 2, 3, 4, 5],
-            "adjusted_run_time": [1.0, 1.1, 1.2, 1.15, 1.05],
-        }
-    )
-    df_results = pd.DataFrame(
-        {
-            "sor#": [1, 2, 3, 4, 5],
-            "linear_model_output": [1.0, 1.05, 1.1, 1.15, 1.2],
-            "quadratic_model_output": [1.0, 1.04, 1.09, 1.15, 1.22],
-        }
-    )
-    df_results["sum_lin"] = df_results["linear_model_output"].cumsum()
-    df_results["sum_quad"] = df_results["quadratic_model_output"].cumsum()
-    df_results["cost_per_run_at_fort_lin"] = (df_results["sum_lin"] + 0.1) / df_results[
-        "sor#"
-    ]
-    df_results["cost_per_run_at_fort_quad"] = (
-        df_results["sum_quad"] + 0.1
-    ) / df_results["sor#"]
-
-    summary = SummaryModelOutputs(
-        df_summary=pd.DataFrame({"a": [1]}),
-        df_results=df_results,
-        regression_diagnostics={},
-        offline_cost=0.1,
-        sor_min_cost_lin=2,
-        sor_min_cost_quad=3,
-    )
-
-    out_path = tmp_path / "plot.svg"
-    path = render_outputs(df_range, summary, output_svg=str(out_path))
-    assert Path(path).exists()
-    assert Path(path).suffix == ".svg"
+# moved to tests/test_plot_layers.py: test_render_outputs_writes_svg
 
 
 def test_regression_analysis_does_not_mutate_df_range_columns():

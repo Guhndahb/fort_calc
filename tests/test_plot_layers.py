@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.main import PlotLayer, SummaryModelOutputs, render_outputs
+from src.main import PlotLayer, PlotParams, SummaryModelOutputs, render_outputs
 
 
 class CallCounter:
@@ -99,7 +99,10 @@ def test_plot_layers_default(monkeypatch, tmp_path: Path):
 
     out_path = tmp_path / "default.svg"
     render_outputs(
-        df_range, summary, output_svg=str(out_path), plot_layers=PlotLayer.DEFAULT
+        df_range,
+        summary,
+        output_svg=str(out_path),
+        plot_params=PlotParams(plot_layers=PlotLayer.DEFAULT),
     )
 
     # DEFAULT expectations:
@@ -154,7 +157,10 @@ def test_plot_layers_everything(monkeypatch, tmp_path: Path):
 
     out_path = tmp_path / "everything.svg"
     render_outputs(
-        df_range, summary, output_svg=str(out_path), plot_layers=PlotLayer.EVERYTHING
+        df_range,
+        summary,
+        output_svg=str(out_path),
+        plot_params=PlotParams(plot_layers=PlotLayer.EVERYTHING),
     )
 
     labels = [c["label"] for c in plot_cc.calls]
@@ -209,7 +215,12 @@ def test_plot_layers_wls_predictions_only(monkeypatch, tmp_path: Path):
 
     flags = PlotLayer.WLS_PRED_LINEAR | PlotLayer.WLS_PRED_QUAD | PlotLayer.LEGEND
     out_path = tmp_path / "wls_preds_only.svg"
-    render_outputs(df_range, summary, output_svg=str(out_path), plot_layers=flags)
+    render_outputs(
+        df_range,
+        summary,
+        output_svg=str(out_path),
+        plot_params=PlotParams(plot_layers=flags),
+    )
 
     # No scatter, no min markers
     assert len(scatter_cc.calls) == 0
@@ -230,3 +241,47 @@ def test_plot_layers_wls_predictions_only(monkeypatch, tmp_path: Path):
 
     # file saved
     assert out_path.exists()
+
+
+def test_render_outputs_writes_svg(tmp_path: Path):
+    # Minimal viable inputs: df_range and a precomputed SummaryModelOutputs
+    df_range = pd.DataFrame(
+        {
+            "sor#": [1, 2, 3, 4, 5],
+            "adjusted_run_time": [1.0, 1.1, 1.2, 1.15, 1.05],
+        }
+    )
+    df_results = pd.DataFrame(
+        {
+            "sor#": [1, 2, 3, 4, 5],
+            "linear_model_output": [1.0, 1.05, 1.1, 1.15, 1.2],
+            "quadratic_model_output": [1.0, 1.04, 1.09, 1.15, 1.22],
+        }
+    )
+    df_results["sum_lin"] = df_results["linear_model_output"].cumsum()
+    df_results["sum_quad"] = df_results["quadratic_model_output"].cumsum()
+    df_results["cost_per_run_at_fort_lin"] = (df_results["sum_lin"] + 0.1) / df_results[
+        "sor#"
+    ]
+    df_results["cost_per_run_at_fort_quad"] = (
+        df_results["sum_quad"] + 0.1
+    ) / df_results["sor#"]
+
+    summary = SummaryModelOutputs(
+        df_summary=pd.DataFrame({"a": [1]}),
+        df_results=df_results,
+        regression_diagnostics={},
+        offline_cost=0.1,
+        sor_min_cost_lin=2,
+        sor_min_cost_quad=3,
+    )
+
+    out_path = tmp_path / "plot.svg"
+    path = render_outputs(
+        df_range,
+        summary,
+        output_svg=str(out_path),
+        plot_params=PlotParams(),
+    )
+    assert Path(path).exists()
+    assert Path(path).suffix == ".svg"
