@@ -1712,37 +1712,113 @@ def main() -> None:
         ("WLS Quadratic (empirical)", ("quadratic", "wls")),
     ]
 
-    # Build rows with requested metrics
-    table_rows = []
+    # Small data class-like tuple for clarity
+    from typing import NamedTuple
+    from typing import Optional as _Optional
+
+    class ModelRow(NamedTuple):
+        label: str
+        rmse: _Optional[float]
+        adj_r2: _Optional[float]
+        aic: _Optional[float]
+        bic: _Optional[float]
+        # Encoded complexity where lower = simpler, used as final tie-breaker
+        # Simplicity order: Linear (0) < Quadratic (1), OLS (0) < WLS (1)
+        complexity_rank: int
+
+    def _complexity_rank_for(label: str) -> int:
+        is_linear = "Linear" in label and "Quadratic" not in label
+        is_quadratic = "Quadratic" in label
+        is_wls = "WLS" in label
+        # rank by (form_rank, est_rank)
+        form_rank = 0 if is_linear else (1 if is_quadratic else 2)
+        est_rank = 1 if is_wls else 0
+        return form_rank * 10 + est_rank  # keep form primary
+
+    # Extract raw numeric rows (unformatted) to feed selection policy
+    raw_rows: list[ModelRow] = []
     for label, path in rows_spec:
         node = _safe_get(diag, *path, default={}) or {}
-        # Extract metrics; many statsmodels results are pandas/ndarray — cast to float when possible
         rmse = _safe_get(diag, path[0], path[1], "RMSE", default=None)
         adj_r2 = _safe_get(node, "Adj. R-squared", default=None)
-        # AIC/BIC if available on the fitted result; if not, leave blank
-        aic = None
-        bic = None
-        # Try to fetch from the stored "Summary" or parameters. We stored full result objects' summary()
-        # but not direct attributes. However, AIC/BIC can be reconstructed if res is available.
-        # Our diagnostics store "Summary" text, so for reliability we prefer direct attributes if present.
-        # The _stats_dict included Coefficients/SE/etc. but not 'aic'/'bic' scalar; we can compute from res if available
-        # but since we didn't keep res, fall back to checking if node has 'aic'/'bic' already (future-proof).
         aic = _safe_get(node, "aic", default=None)
         bic = _safe_get(node, "bic", default=None)
+        raw_rows.append(
+            ModelRow(
+                label=label,
+                rmse=float(rmse) if rmse is not None else None,
+                adj_r2=float(adj_r2) if adj_r2 is not None else None,
+                aic=float(aic) if aic is not None else None,
+                bic=float(bic) if bic is not None else None,
+                complexity_rank=_complexity_rank_for(label),
+            )
+        )
 
-        # If not present, attempt to derive from the Summary object if it has .aic/.bic attributes (statsmodels Summary2 doesn't),
-        # so we just leave as None if absent.
-        def fmt(x):
+    # Pluggable selection policy (isolated, easy to modify)
+    def select_best_model(rows: list[ModelRow]) -> ModelRow:
+        """
+        Deterministic model selection applied to the comparison table.
+
+        Policy (in priority order):
+          1) Minimize BIC
+          2) Minimize AIC
+          3) Minimize RMSE (in-sample)
+          4) Maximize Adjusted R^2
+          5) Prefer simpler model via complexity_rank
+             - Simplicity order encoded in _complexity_rank_for():
+               Linear < Quadratic; OLS < WLS
+
+        Notes:
+        - This selector is intentionally self-contained so you can adjust the policy here
+          without touching other code paths or data structures.
+        - Missing values are handled conservatively:
+            * For minimizing metrics (BIC, AIC, RMSE), None/NaN/Inf are treated as +inf (worst).
+            * For maximizing Adjusted R^2, None/NaN/Inf are treated as -inf (worst).
+        - To change preferences, edit the sort key below or _complexity_rank_for() above.
+
+        Returns:
+            ModelRow: the chosen best row according to the policy.
+        """
+
+        def pos_inf_if_none(x: _Optional[float]) -> float:
+            return float("inf") if x is None or not np.isfinite(x) else float(x)
+
+        def neg_inf_if_none(x: _Optional[float]) -> float:
+            # For maximizing adj_r2: missing -> -inf
+            if x is None:
+                return float("-inf")
             try:
-                return (
-                    f"{float(x):.6g}"
-                    if x is not None and np.isfinite(float(x))
-                    else "-"
-                )
+                xv = float(x)
+                return xv if np.isfinite(xv) else float("-inf")
             except Exception:
-                return "-"
+                return float("-inf")
 
-        table_rows.append((label, fmt(rmse), fmt(adj_r2), fmt(aic), fmt(bic)))
+        # Build stable sort key
+        return sorted(
+            rows,
+            key=lambda r: (
+                pos_inf_if_none(r.bic),
+                pos_inf_if_none(r.aic),
+                pos_inf_if_none(r.rmse),
+                -neg_inf_if_none(r.adj_r2),  # negate because we want to maximize
+                r.complexity_rank,
+                r.label,  # final stable tie-breaker
+            ),
+        )[0]
+
+    best_row = select_best_model(raw_rows)
+
+    # Build printable table rows with formatting
+    def _fmt(x):
+        try:
+            return f"{float(x):.6g}" if x is not None and np.isfinite(float(x)) else "-"
+        except Exception:
+            return "-"
+
+    table_rows = [
+        (r.label, _fmt(r.rmse), _fmt(r.adj_r2), _fmt(r.aic), _fmt(r.bic))
+        for r in raw_rows
+    ]
 
     # Column widths
     headers = ("Model", "RMSE (in-sample)", "Adj R^2", "AIC", "BIC")
@@ -1754,7 +1830,7 @@ def main() -> None:
         len(headers[4]),
     ]
 
-    # Render header
+    # Render header and table
     header_line = f"{headers[0]:<{col_widths[0]}}  {headers[1]:>{col_widths[1]}}  {headers[2]:>{col_widths[2]}}  {headers[3]:>{col_widths[3]}}  {headers[4]:>{col_widths[4]}}"
     sep_line = "-" * len(header_line)
     print("Model Comparison (OLS/WLS x Linear/Quadratic)")
@@ -1764,6 +1840,8 @@ def main() -> None:
         print(
             f"{r[0]:<{col_widths[0]}}  {r[1]:>{col_widths[1]}}  {r[2]:>{col_widths[2]}}  {r[3]:>{col_widths[3]}}  {r[4]:>{col_widths[4]}}"
         )
+    print("\n")
+    print(f"Selected model (by policy): {best_row.label}")
     print("\n")
 
     print(
