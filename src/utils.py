@@ -22,7 +22,7 @@ def normalize_abs_posix(path: str | Path) -> str:
 # -------------------------
 # Hashing utilities
 # -------------------------
-def canonical_json_dumps(payload: dict) -> str:
+def canonical_json_dumps(payload: dict[str, Any]) -> str:
     """
     Deterministic JSON string for hashing and storage:
     - separators=(',', ':')
@@ -34,7 +34,7 @@ def canonical_json_dumps(payload: dict) -> str:
     )
 
 
-def canonical_json_hash(payload: dict) -> tuple[str, str]:
+def canonical_json_hash(payload: dict[str, Any]) -> tuple[str, str]:
     """
     Return (short_hash8, full_hash_hex) computed over canonical JSON bytes (UTF-8).
     """
@@ -66,13 +66,13 @@ def _normalize_value(v: Any) -> Any:
     if hasattr(v, "name") and isinstance(getattr(v, "name"), str):
         # Enums like DeltaMode
         try:
-            return v.name  # type: ignore[attr-defined]
+            return getattr(v, "name")  # attribute exists per hasattr check
         except Exception:
             pass
     return v
 
 
-def build_effective_parameters(load, transform) -> dict:
+def build_effective_parameters(load: Any, transform: Any) -> dict[str, Any]:
     """
     Convert LoadSliceParams and TransformParams to a JSON-serializable dictionary
     with normalized values (Paths -> posix strings, Enums -> names).

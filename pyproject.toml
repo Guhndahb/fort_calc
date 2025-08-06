@@ -2,7 +2,7 @@
 # Black-compatible line length
 line-length = 88
 indent-width = 4
-target-version = "py38"
+target-version = "py311"
 
 [tool.ruff.lint]
 # Enable common linting rules
@@ -20,3 +20,24 @@ line-ending = "auto"
 # Ensure pytest adds project root (containing 'src') to sys.path for direct invocations
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.mypy]
+python_version = "3.11"
+# Minimal strictness requested
+strict_optional = true
+warn_redundant_casts = true
+
+# Being pragmatic with third-party libraries like pandas/statsmodels
+ignore_missing_imports = true
+
+# Project layout
+mypy_path = "src"
+files = ["src"]
+
+# Ensure mypy treats "src" as the package root to avoid duplicate module paths like "src.csv_processor" vs "csv_processor"
+explicit_package_bases = true
+namespace_packages = true
+
+# Helpful warnings
+warn_unused_ignores = true
+no_implicit_optional = false

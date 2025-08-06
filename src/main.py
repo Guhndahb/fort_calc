@@ -16,7 +16,7 @@ import logging
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -26,8 +26,8 @@ import statsmodels.api as sm
 # Support both package and script execution modes
 try:
     # When run as a package: python -m src.main
-    from .csv_processor import CSVRangeProcessor  # type: ignore
-    from .utils import (  # type: ignore
+    from .csv_processor import CSVRangeProcessor
+    from .utils import (
         build_effective_parameters,
         canonical_json_hash,
         normalize_abs_posix,
@@ -37,8 +37,8 @@ try:
     )
 except ImportError:
     # When run directly: python src/main.py
-    from csv_processor import CSVRangeProcessor  # type: ignore
-    from utils import (  # type: ignore
+    from csv_processor import CSVRangeProcessor
+    from utils import (
         build_effective_parameters,
         canonical_json_hash,
         normalize_abs_posix,
@@ -62,9 +62,9 @@ class DeltaMode(Enum):
 class FilterResult:
     """Container for filter operation results and diagnostics."""
 
-    def __init__(self, label: Optional[str] = None):
+    def __init__(self, label: Optional[str] = None) -> None:
         # Identification
-        self.label = label
+        self.label: Optional[str] = label
 
         # Row counters
         self.original_rows: int = 0
@@ -87,12 +87,12 @@ class FilterResult:
         self.elapsed_ms: Optional[float] = None
 
     # Timing helpers
-    def start(self):
+    def start(self) -> None:
         import time
 
         self.started_at = time.perf_counter()
 
-    def stop(self):
+    def stop(self) -> None:
         import time
 
         self.finished_at = time.perf_counter()
@@ -100,26 +100,26 @@ class FilterResult:
             self.elapsed_ms = (self.finished_at - self.started_at) * 1000.0
 
     # Logging helpers
-    def add_warning(self, message: str):
+    def add_warning(self, message: str) -> None:
         """Add a warning message."""
         self.warnings.append(message)
         logger.warning(message)
 
-    def add_event(self, message: str):
+    def add_event(self, message: str) -> None:
         """Add an info-level event message."""
         self.events.append(message)
         logger.info(message)
 
-    def add_metric(self, name: str, value):
+    def add_metric(self, name: str, value: int | float | str) -> None:
         """Attach a named metric."""
         self.metrics[name] = value
 
-    def log_invalid_range(self, start: str, end: str, reason: str):
+    def log_invalid_range(self, start: str, end: str, reason: str) -> None:
         """Log an invalid timestamp range."""
         self.invalid_ranges.append((start, end, reason))
         logger.warning(f"Invalid timestamp range skipped: {start}-{end} - {reason}")
 
-    def set_skipped(self, reason: str):
+    def set_skipped(self, reason: str) -> None:
         """Mark the step as skipped with a reason."""
         self.skipped_reason = reason
         self.add_warning(f"Step skipped: {reason}")
@@ -691,7 +691,11 @@ def summarize_run_time_by_sor_range(
             else:  # DeltaMode.FIRST_CHUNK
                 baseline = rows[0][2]  # first chunk mean
             # baseline may be NaN if previous chunk had no data; subtraction yields NaN
-            delta = mean_runtime - float(baseline) if pd.notna(baseline) else np.nan
+            delta = (
+                mean_runtime - float(baseline)  # type: ignore[arg-type]
+                if pd.notna(baseline)
+                else np.nan
+            )
         rows.append([start_i, end_i, mean_runtime, delta])
 
     # Append the final exact fort row (degenerate interval: start == end == input_data_fort)
@@ -706,8 +710,11 @@ def summarize_run_time_by_sor_range(
             baseline_final = rows[-1][2]
         else:
             baseline_final = rows[0][2]
+        # baseline_final element can be float | int | None due to list storage; guard with pd.notna
         delta_final = (
-            mean_fort - float(baseline_final) if pd.notna(baseline_final) else np.nan
+            mean_fort - float(baseline_final)  # type: ignore[arg-type]
+            if pd.notna(baseline_final)
+            else np.nan
         )
 
     rows.append(
@@ -761,7 +768,7 @@ class TransformParams:
     zscore_max: float
     input_data_fort: int
     ignore_mrt: bool
-    delta_mode: "DeltaMode"
+    delta_mode: DeltaMode
     exclude_timestamp_ranges: Optional[List[Tuple[str, str]]]
     verbose_filtering: bool = False
     # Fail fast if any timestamps fail to parse (simple and strict by default)
@@ -784,7 +791,9 @@ class SummaryModelOutputs:
     sor_min_cost_quad: int
 
 
-def regression_analysis(df_range, input_data_fort):
+def regression_analysis(
+    df_range: pd.DataFrame, input_data_fort: int
+) -> tuple[pd.DataFrame, Dict[str, Dict[str, Any]]]:
     """
     OLS regression for linear and quadratic models using pandas DataFrames
     for design matrices. Training and prediction frames use matching column
@@ -1132,7 +1141,7 @@ def render_outputs(
     return output_svg
 
 
-def main():
+def main() -> None:
     # Example configuration (was previously hardcoded)
     log_path = Path("C:/Games/Utility/ICScriptHub/log-reset.csv").resolve()
     params_load = LoadSliceParams(
