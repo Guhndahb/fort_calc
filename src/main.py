@@ -2294,22 +2294,25 @@ def assemble_text_report(
     return "\n".join(parts)
 
 
-def main() -> None:
-    # 1) Build params and run identity
-    params_load, params_transform, params_plot = get_default_params()
+def _orchestrate(
+    params_load: LoadSliceParams,
+    params_transform: TransformParams,
+    params_plot: PlotParams,
+) -> None:
+    """
+    Orchestrate the full pipeline given explicit parameter objects.
+    Split from main() so the CLI can remain thin and tests can call this directly.
+    """
     abs_input_posix, short_hash, full_hash, effective_params = build_run_identity(
         params_load, params_transform
     )
 
-    # 2) Orchestration
     df_range = load_and_slice_csv(params_load)
     transformed = transform_pipeline(df_range, params_transform)
     summary = summarize_and_model(transformed.df_range, params_transform)
 
-    # 3) Model comparison table
     best_label, table_text = build_model_comparison(summary.regression_diagnostics)
 
-    # 4) Render plots
     artifact_paths = render_plot_presets(
         transformed.df_range,
         summary,
@@ -2318,7 +2321,6 @@ def main() -> None:
         plot_params=params_plot,
     )
 
-    # 5) Manifest
     total_input_rows = int(len(df_range))
     processed_row_count = int(len(transformed.df_range))
     excluded_row_count = int(len(transformed.df_excluded))
@@ -2340,11 +2342,259 @@ def main() -> None:
     )
     write_manifest(f"manifest-{short_hash}.json", manifest)
 
-    # 6) Focused report to stdout
     report = assemble_text_report(
         df_range, transformed, summary, table_text, best_label
     )
     print(report)
+
+
+def _parse_plot_layers(spec: str) -> PlotLayer:
+    """
+    Parse plot layer specification.
+    Accepts preset names (e.g., 'DEFAULT') or '+'-joined atomic names
+    (e.g., 'DATA_SCATTER+OLS_PRED_LINEAR+LEGEND'), case-insensitive.
+    """
+    s = spec.strip().upper()
+    if hasattr(PlotLayer, s):
+        return getattr(PlotLayer, s)
+    flags = PlotLayer(0)
+    for token in s.split("+"):
+        token = token.strip()
+        if not token:
+            continue
+        if not hasattr(PlotLayer, token):
+            raise ValueError(f"Unknown plot layer token: {token}")
+        flags |= getattr(PlotLayer, token)
+    return flags
+
+
+def _build_cli_parser():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="fort-calc",
+        description="FORT Calculator pipeline (load -> transform -> model -> plot).",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    parser.add_argument(
+        "--print-defaults",
+        action="store_true",
+        help="Print default parameter values and exit.",
+    )
+
+    # LoadSliceParams
+    g_load = parser.add_argument_group("LoadSliceParams")
+    g_load.add_argument(
+        "--log-path", type=str, required=True, help="Path to CSV log file (required)."
+    )
+    g_load.add_argument(
+        "--start-line", type=int, default=None, help="1-based inclusive start line."
+    )
+    g_load.add_argument(
+        "--end-line", type=int, default=None, help="1-based inclusive end line."
+    )
+    g_load.add_argument(
+        "--no-header",
+        action="store_true",
+        help="Slice has no header (include_header=False).",
+    )
+
+    # TransformParams
+    g_tr = parser.add_argument_group("TransformParams")
+    g_tr.add_argument("--zscore-min", type=float, help="Minimum z-score bound.")
+    g_tr.add_argument("--zscore-max", type=float, help="Maximum z-score bound.")
+    g_tr.add_argument(
+        "--fort",
+        type=int,
+        dest="input_data_fort",
+        help="Target SOR run (input_data_fort).",
+    )
+    # Boolean pair to allow explicit choice; default comes from get_default_params
+    g_tr.add_argument(
+        "--ignore-resetticks",
+        dest="ignore_resetticks",
+        action="store_true",
+        help="Ignore resetticks when computing adjusted_run_time.",
+    )
+    g_tr.add_argument(
+        "--use-resetticks",
+        dest="ignore_resetticks",
+        action="store_false",
+        help="Subtract resetticks from runticks when computing adjusted_run_time.",
+    )
+    g_tr.add_argument(
+        "--delta-mode",
+        choices=["PREVIOUS_CHUNK", "FIRST_CHUNK"],
+        help="Delta mode for summarize_run_time_by_sor_range.",
+    )
+    g_tr.add_argument(
+        "--exclude-range",
+        action="append",
+        metavar="START,END",
+        help="Exclude timestamp range(s) YYYYMMDDHHMMSS,YYYYMMDDHHMMSS. May be repeated.",
+    )
+    g_tr.add_argument(
+        "--verbose-filtering",
+        action="store_true",
+        help="Enable verbose diagnostics during filtering.",
+    )
+    g_tr.add_argument(
+        "--no-fail-on-invalid-ts",
+        dest="fail_on_any_invalid_timestamps",
+        action="store_false",
+        help="Do not fail when any timestamps fail to parse.",
+    )
+
+    # PlotParams
+    g_plot = parser.add_argument_group("PlotParams")
+    g_plot.add_argument(
+        "--plot-layers",
+        type=str,
+        help="Preset or '+'-joined atomic flags (e.g., DEFAULT or DATA_SCATTER+OLS_PRED_LINEAR+LEGEND).",
+    )
+    g_plot.add_argument("--x-min", type=float, default=None, help="X axis minimum.")
+    g_plot.add_argument("--x-max", type=float, default=None, help="X axis maximum.")
+    g_plot.add_argument("--y-min", type=float, default=None, help="Y axis minimum.")
+    g_plot.add_argument("--y-max", type=float, default=None, help="Y axis maximum.")
+
+    return parser
+
+
+def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, PlotParams]:
+    """
+    Merge CLI args over defaults to build parameter objects.
+    Only override values explicitly provided by user; otherwise keep defaults.
+    """
+    d_load, d_trans, d_plot = get_default_params()
+
+    # LoadSliceParams
+    log_path = (
+        Path(args.log_path).resolve()
+        if getattr(args, "log_path", None)
+        else d_load.log_path
+    )
+    include_header = d_load.include_header
+    if hasattr(args, "no_header") and args.no_header:
+        include_header = False
+    load = LoadSliceParams(
+        log_path=log_path,
+        start_line=args.start_line
+        if args.start_line is not None
+        else d_load.start_line,
+        end_line=args.end_line if args.end_line is not None else d_load.end_line,
+        include_header=include_header,
+    )
+
+    # TransformParams
+    delta_mode = d_trans.delta_mode
+    if getattr(args, "delta_mode", None):
+        delta_mode = DeltaMode[args.delta_mode]
+
+    exclude_ranges = d_trans.exclude_timestamp_ranges
+    if getattr(args, "exclude_range", None):
+        parsed: list[tuple[str, str]] = []
+        for item in args.exclude_range:
+            try:
+                start_s, end_s = [p.strip() for p in item.split(",", 1)]
+            except ValueError:
+                raise ValueError(
+                    f"Invalid --exclude-range value: '{item}'. Expected START,END"
+                )
+            parsed.append((start_s, end_s))
+        exclude_ranges = parsed
+
+    ignore_resetticks = d_trans.ignore_resetticks
+    if hasattr(args, "ignore_resetticks") and args.ignore_resetticks is not None:
+        ignore_resetticks = args.ignore_resetticks
+
+    fail_on_invalid = d_trans.fail_on_any_invalid_timestamps
+    if (
+        hasattr(args, "fail_on_any_invalid_timestamps")
+        and args.fail_on_any_invalid_timestamps is not None
+    ):
+        fail_on_invalid = args.fail_on_any_invalid_timestamps
+
+    transform = TransformParams(
+        zscore_min=args.zscore_min
+        if args.zscore_min is not None
+        else d_trans.zscore_min,
+        zscore_max=args.zscore_max
+        if args.zscore_max is not None
+        else d_trans.zscore_max,
+        input_data_fort=args.input_data_fort
+        if args.input_data_fort is not None
+        else d_trans.input_data_fort,
+        ignore_resetticks=ignore_resetticks,
+        delta_mode=delta_mode,
+        exclude_timestamp_ranges=exclude_ranges,
+        verbose_filtering=bool(
+            getattr(args, "verbose_filtering", d_trans.verbose_filtering)
+        ),
+        fail_on_any_invalid_timestamps=fail_on_invalid,
+    )
+
+    # PlotParams
+    layers = d_plot.plot_layers
+    if getattr(args, "plot_layers", None):
+        layers = _parse_plot_layers(args.plot_layers)
+    plot = PlotParams(
+        plot_layers=layers,
+        x_min=args.x_min if args.x_min is not None else d_plot.x_min,
+        x_max=args.x_max if args.x_max is not None else d_plot.x_max,
+        y_min=args.y_min if args.y_min is not None else d_plot.y_min,
+        y_max=args.y_max if args.y_max is not None else d_plot.y_max,
+    )
+
+    return load, transform, plot
+
+
+def main() -> None:
+    """
+    CLI entry point. Parses arguments, builds parameter objects, then orchestrates.
+    With no CLI args, defaults from get_default_params() are used.
+    """
+    parser = _build_cli_parser()
+    args = parser.parse_args()
+
+    if getattr(args, "print_defaults", False):
+        import json
+
+        d_load, d_trans, d_plot = get_default_params()
+        print(
+            json.dumps(
+                {
+                    "LoadSliceParams": {
+                        "log_path": str(d_load.log_path),
+                        "start_line": d_load.start_line,
+                        "end_line": d_load.end_line,
+                        "include_header": d_load.include_header,
+                    },
+                    "TransformParams": {
+                        "zscore_min": d_trans.zscore_min,
+                        "zscore_max": d_trans.zscore_max,
+                        "input_data_fort": d_trans.input_data_fort,
+                        "ignore_resetticks": d_trans.ignore_resetticks,
+                        "delta_mode": d_trans.delta_mode.name,
+                        "exclude_timestamp_ranges": d_trans.exclude_timestamp_ranges,
+                        "verbose_filtering": d_trans.verbose_filtering,
+                        "fail_on_any_invalid_timestamps": d_trans.fail_on_any_invalid_timestamps,
+                    },
+                    "PlotParams": {
+                        "plot_layers": _plot_layers_suffix(d_plot.plot_layers),
+                        "x_min": d_plot.x_min,
+                        "x_max": d_plot.x_max,
+                        "y_min": d_plot.y_min,
+                        "y_max": d_plot.y_max,
+                    },
+                },
+                indent=2,
+            )
+        )
+        return
+
+    params_load, params_transform, params_plot = _args_to_params(args)
+    _orchestrate(params_load, params_transform, params_plot)
 
 
 if __name__ == "__main__":
