@@ -1084,28 +1084,28 @@ def summarize_and_model(
       row produced by summarize_run_time_by_sor_range() under the chosen delta_mode.
 
     Notes:
-    - The final "offline" row created by summarize_run_time_by_sor_range has no range
-      and can legitimately have NaN for run_time_mean. We treat exactly one NaN in the
-      final row as acceptable and do not raise in that case.
+    - The final "offline" row created by summarize_run_time_by_sor_range has start == end == input_data_fort
+      and must have a valid (non-NaN) run_time_mean. Any NaN in run_time_mean anywhere is an error.
     """
     df_summary = summarize_run_time_by_sor_range(
         df_range, params.input_data_fort, params.delta_mode
     )
 
-    # Allow exactly one NaN in the final row (offline cost row). If more NaNs exist
-    # or NaNs occur outside the final row, raise.
+    # Disallow any NaNs in run_time_mean (including the final 'fort' row).
     run_time_mean_isna = df_summary["run_time_mean"].isna()
     nan_count = int(run_time_mean_isna.sum())
     if nan_count > 0:
-        bad_positions = df_summary.index[run_time_mean_isna].tolist()
-        only_final_row_nan = nan_count == 1 and bad_positions == [df_summary.index[-1]]
-        if not only_final_row_nan:
-            raise ValueError(
-                f"Insufficient input data: Found {nan_count} summary rows with no mean run time values."
-            )
+        raise ValueError(
+            f"Insufficient input data: Found {nan_count} summary rows with no mean run time values."
+        )
 
-    # Offline cost comes from the final row's delta
-    offline_cost = float(df_summary.iloc[-1]["run_time_delta"])
+    # Offline cost comes from the final row's delta; must be finite and not NaN
+    final_delta = df_summary.iloc[-1]["run_time_delta"]
+    if not np.isfinite(final_delta):
+        raise ValueError(
+            "Offline cost could not be computed: final run_time_delta is NaN or not finite."
+        )
+    offline_cost = float(final_delta)
 
     df_results, regression_diagnostics = regression_analysis(
         df_range, params.input_data_fort - 1
