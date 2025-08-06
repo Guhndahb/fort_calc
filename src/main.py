@@ -850,6 +850,7 @@ class PlotLayer(IntFlag):
         | OLS_COST_QUAD
         | OLS_MIN_LINEAR
         | OLS_MIN_QUAD
+        | LEGEND
     )
     ALL_WLS = (
         WLS_PRED_LINEAR
@@ -858,10 +859,17 @@ class PlotLayer(IntFlag):
         | WLS_COST_QUAD
         | WLS_MIN_LINEAR
         | WLS_MIN_QUAD
+        | LEGEND
     )
-    ALL_PREDICTION = OLS_PRED_LINEAR | OLS_PRED_QUAD | WLS_PRED_LINEAR | WLS_PRED_QUAD
-    ALL_COST = OLS_COST_LINEAR | OLS_COST_QUAD | WLS_COST_LINEAR | WLS_COST_QUAD
-    MIN_MARKERS_ONLY = OLS_MIN_LINEAR | OLS_MIN_QUAD | WLS_MIN_LINEAR | WLS_MIN_QUAD
+    ALL_PREDICTION = (
+        OLS_PRED_LINEAR | OLS_PRED_QUAD | WLS_PRED_LINEAR | WLS_PRED_QUAD | LEGEND
+    )
+    ALL_COST = (
+        OLS_COST_LINEAR | OLS_COST_QUAD | WLS_COST_LINEAR | WLS_COST_QUAD | LEGEND
+    )
+    MIN_MARKERS_ONLY = (
+        OLS_MIN_LINEAR | OLS_MIN_QUAD | WLS_MIN_LINEAR | WLS_MIN_QUAD | LEGEND
+    )
     DEFAULT = (
         DATA_SCATTER
         | OLS_PRED_LINEAR
@@ -1605,15 +1613,25 @@ def main() -> None:
     )
     print("\n")
 
-    # Suffix artifact filename with short hash and plot layer descriptor
-    layer_suffix = _plot_layers_suffix(params_transform.plot_layers)
-    out_svg = with_hash_suffix(f"plot-{layer_suffix}", short_hash, ".svg")
-    _ = render_outputs(
-        transformed.df_range,
-        summary,
-        output_svg=out_svg,
-        plot_layers=params_transform.plot_layers,
-    )
+    # Render multiple plots with different flag presets
+    presets_to_render = [
+        PlotLayer.ALL_OLS,
+        PlotLayer.ALL_WLS,
+        (PlotLayer.ALL_OLS | PlotLayer.ALL_WLS) & ~PlotLayer.MIN_MARKERS_ONLY,
+        PlotLayer.ALL_PREDICTION | PlotLayer.LEGEND,
+        PlotLayer.ALL_PREDICTION | PlotLayer.LEGEND | PlotLayer.DATA_SCATTER,
+    ]
+    artifact_paths: list[str] = []
+    for flags in presets_to_render:
+        layer_suffix = _plot_layers_suffix(flags)
+        out_svg = with_hash_suffix(f"plot-{layer_suffix}", short_hash, ".svg")
+        _ = render_outputs(
+            transformed.df_range,
+            summary,
+            output_svg=out_svg,
+            plot_layers=flags,
+        )
+        artifact_paths.append(out_svg)
 
     # Build and write manifest next to artifact (current working directory)
     total_input_rows = int(len(df_range))
@@ -1639,7 +1657,7 @@ def main() -> None:
         "effective_parameters": effective_params,
         "canonical_hash": full_hash,
         "canonical_hash_short": short_hash,
-        "artifacts": {"plot_svg": out_svg},
+        "artifacts": {"plot_svgs": artifact_paths},
     }
     manifest_name = f"manifest-{short_hash}.json"
     write_manifest(manifest_name, manifest)
