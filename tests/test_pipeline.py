@@ -112,6 +112,14 @@ def test_summarize_and_model_contract():
         verbose_filtering=False,
     )
 
+    # Suppress statsmodels/scipy normality warnings due to small n in unit tests
+    import warnings
+
+    warnings.filterwarnings(
+        "ignore",
+        message="`kurtosistest` p-value may be inaccurate",
+        category=UserWarning,
+    )
     summary: SummaryModelOutputs = summarize_and_model(df, params)
     assert isinstance(summary, SummaryModelOutputs)
     assert {
@@ -199,6 +207,14 @@ def test_regression_analysis_does_not_mutate_df_range_columns():
         delta_mode=DeltaMode.PREVIOUS_CHUNK,
         exclude_timestamp_ranges=None,
         verbose_filtering=False,
+    )
+    # Suppress statsmodels/scipy normality warnings due to small n in unit tests
+    import warnings
+
+    warnings.filterwarnings(
+        "ignore",
+        message="`kurtosistest` p-value may be inaccurate",
+        category=UserWarning,
     )
     _ = summarize_and_model(df, params)
 
