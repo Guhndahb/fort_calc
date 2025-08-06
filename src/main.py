@@ -1694,7 +1694,17 @@ def build_run_identity(
 def build_model_comparison(diag: dict) -> tuple[str, str]:
     """
     Build the model-comparison table and return (best_label, table_text).
-    Policy and formatting preserved from previous inline logic.
+
+    Formatting:
+      - Headers: [Model, BIC, AIC, RMSE_in, Adj R²]
+      - Fixed notation only
+      - Widths/decimals:
+          BIC:  width=12, decimals=1
+          AIC:  width=12, decimals=1
+          RMSE: width=12, decimals=5
+          AdjR²:width=10, decimals=5
+      - Right-aligned numeric columns with trailing zero padding for decimals
+      - Missing/non-finite rendered as "-" centered in the field
     """
 
     def _safe_get(d: dict, *keys, default=None):
@@ -1705,8 +1715,31 @@ def build_model_comparison(diag: dict) -> tuple[str, str]:
             cur = cur[k]
         return cur
 
+    import math
     from typing import NamedTuple
     from typing import Optional as _Optional
+
+    # Fixed-width format helpers
+    def _fmt_fixed(x: float | None, width: int, decimals: int) -> str:
+        """
+        Format a number in fixed notation with specified width and decimals.
+        Returns '-' centered in the field if x is None or not finite.
+        """
+        if x is None:
+            s = "-"
+        else:
+            try:
+                xf = float(x)
+                if not math.isfinite(xf):
+                    s = "-"
+                else:
+                    s = f"{xf:.{decimals}f}"
+            except Exception:
+                s = "-"
+        # Right-align numbers; center '-' for missing
+        if s == "-":
+            return s.center(width)
+        return s.rjust(width)
 
     class ModelRow(NamedTuple):
         label: str
@@ -1776,26 +1809,34 @@ def build_model_comparison(diag: dict) -> tuple[str, str]:
 
     best_row = select_best_model(raw_rows)
 
-    def _fmt(x):
-        try:
-            return f"{float(x):.6g}" if x is not None and np.isfinite(float(x)) else "-"
-        except Exception:
-            return "-"
+    # Column layout and formats
+    headers = ("Model", "BIC", "AIC", "RMSE_in", "Adj R²")
+    width_bic, dec_bic = 12, 1
+    width_aic, dec_aic = 12, 1
+    width_rmse, dec_rmse = 12, 5
+    width_adj, dec_adj = 10, 5
 
+    # Format all rows according to fixed widths/decimals
     table_rows = [
-        (r.label, _fmt(r.rmse), _fmt(r.adj_r2), _fmt(r.aic), _fmt(r.bic))
+        (
+            r.label,
+            _fmt_fixed(r.bic, width_bic, dec_bic),
+            _fmt_fixed(r.aic, width_aic, dec_aic),
+            _fmt_fixed(r.rmse, width_rmse, dec_rmse),
+            _fmt_fixed(r.adj_r2, width_adj, dec_adj),
+        )
         for r in raw_rows
     ]
 
-    headers = ("Model", "RMSE (in-sample)", "Adj R^2", "AIC", "BIC")
-    col_widths = [
-        max(len(headers[0]), max(len(r[0]) for r in table_rows)),
-        len(headers[1]),
-        len(headers[2]),
-        len(headers[3]),
-        len(headers[4]),
-    ]
-    header_line = f"{headers[0]:<{col_widths[0]}}  {headers[1]:>{col_widths[1]}}  {headers[2]:>{col_widths[2]}}  {headers[3]:>{col_widths[3]}}  {headers[4]:>{col_widths[4]}}"
+    # Compute Model column width based on label/header; numeric are fixed
+    col0_width = max(len(headers[0]), max(len(r[0]) for r in table_rows))
+    header_line = (
+        f"{headers[0]:<{col0_width}}  "
+        f"{headers[1]:>{width_bic}}  "
+        f"{headers[2]:>{width_aic}}  "
+        f"{headers[3]:>{width_rmse}}  "
+        f"{headers[4]:>{width_adj}}"
+    )
     sep_line = "-" * len(header_line)
 
     lines = []
@@ -1803,9 +1844,7 @@ def build_model_comparison(diag: dict) -> tuple[str, str]:
     lines.append(header_line)
     lines.append(sep_line)
     for r in table_rows:
-        lines.append(
-            f"{r[0]:<{col_widths[0]}}  {r[1]:>{col_widths[1]}}  {r[2]:>{col_widths[2]}}  {r[3]:>{col_widths[3]}}  {r[4]:>{col_widths[4]}}"
-        )
+        lines.append(f"{r[0]:<{col0_width}}  {r[1]}  {r[2]}  {r[3]}  {r[4]}")
     lines.append("")
     lines.append(f"Selected model (by policy): {best_row.label}")
     lines.append("")
