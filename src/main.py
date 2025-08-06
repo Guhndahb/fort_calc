@@ -1646,16 +1646,23 @@ def render_outputs(
     return output_svg
 
 
-def main() -> None:
-    # Example configuration (was previously hardcoded)
+# --- Helper extractions to simplify main() ---
+
+
+def get_default_params() -> tuple[LoadSliceParams, TransformParams]:
+    """
+    Build default LoadSliceParams and TransformParams.
+    Kept simple for now; later can be swapped to argparse/env without touching main().
+    """
+    # Example defaults (preserve existing behavior)
     log_path = Path("C:/Games/Utility/ICScriptHub/log-reset.csv").resolve()
-    params_load = LoadSliceParams(
+    load = LoadSliceParams(
         log_path=log_path,
         start_line=4883,
         end_line=None,
         include_header=True,
     )
-    params_transform = TransformParams(
+    trans = TransformParams(
         zscore_min=-1.5,
         zscore_max=3,
         input_data_fort=100,
@@ -1665,36 +1672,30 @@ def main() -> None:
         verbose_filtering=True,
         plot_layers=PlotLayer.DEFAULT,
     )
+    return load, trans
 
-    # Build hashing payload (simplified: path + effective parameters)
 
-    abs_input_posix = normalize_abs_posix(params_load.log_path)
-    effective_params = build_effective_parameters(params_load, params_transform)
+def build_run_identity(
+    load: LoadSliceParams, trans: TransformParams
+) -> tuple[str, str, str, dict]:
+    """
+    Returns (abs_input_posix, short_hash, full_hash, effective_params)
+    """
+    abs_input_posix = normalize_abs_posix(load.log_path)
+    effective_params = build_effective_parameters(load, trans)
     canonical_payload = {
         "absolute_input_path": abs_input_posix,
         "effective_parameters": effective_params,
     }
     short_hash, full_hash = canonical_json_hash(canonical_payload)
+    return abs_input_posix, short_hash, full_hash, effective_params
 
-    # Orchestration (side-effect free besides plot file write in render)
-    df_range = load_and_slice_csv(params_load)
-    print("\n\n")
-    print(f"Input data:\n{df_range}")
-    print("\n\n")
-    transformed = transform_pipeline(df_range, params_transform)
-    print("\n\n")
-    print(f"Filtered data:\n{transformed.df_range}")
-    print("\n\n")
-    summary = summarize_and_model(transformed.df_range, params_transform)
-    print(f"Regression Diagnostics:\n{summary.regression_diagnostics}")
-    print("\n\n")
-    print(f"Summary:\n{summary.df_summary}")
-    print("\n\n")
-    print(f"Predictions:\n{summary.df_results}")
-    print("\n\n")
 
-    # Pretty comparison table for four model forms (OLS/WLS x Linear/Quadratic)
-    diag = summary.regression_diagnostics
+def build_model_comparison(diag: dict) -> tuple[str, str]:
+    """
+    Build the model-comparison table and return (best_label, table_text).
+    Policy and formatting preserved from previous inline logic.
+    """
 
     def _safe_get(d: dict, *keys, default=None):
         cur = d
@@ -1704,15 +1705,6 @@ def main() -> None:
             cur = cur[k]
         return cur
 
-    # Mapping of display rows to diagnostic nodes
-    rows_spec = [
-        ("OLS Linear", ("linear", "ols")),
-        ("OLS Quadratic", ("quadratic", "ols")),
-        ("WLS Linear (empirical)", ("linear", "wls")),
-        ("WLS Quadratic (empirical)", ("quadratic", "wls")),
-    ]
-
-    # Small data class-like tuple for clarity
     from typing import NamedTuple
     from typing import Optional as _Optional
 
@@ -1722,20 +1714,23 @@ def main() -> None:
         adj_r2: _Optional[float]
         aic: _Optional[float]
         bic: _Optional[float]
-        # Encoded complexity where lower = simpler, used as final tie-breaker
-        # Simplicity order: Linear (0) < Quadratic (1), OLS (0) < WLS (1)
         complexity_rank: int
 
     def _complexity_rank_for(label: str) -> int:
         is_linear = "Linear" in label and "Quadratic" not in label
         is_quadratic = "Quadratic" in label
         is_wls = "WLS" in label
-        # rank by (form_rank, est_rank)
         form_rank = 0 if is_linear else (1 if is_quadratic else 2)
         est_rank = 1 if is_wls else 0
-        return form_rank * 10 + est_rank  # keep form primary
+        return form_rank * 10 + est_rank
 
-    # Extract raw numeric rows (unformatted) to feed selection policy
+    rows_spec = [
+        ("OLS Linear", ("linear", "ols")),
+        ("OLS Quadratic", ("quadratic", "ols")),
+        ("WLS Linear (empirical)", ("linear", "wls")),
+        ("WLS Quadratic (empirical)", ("quadratic", "wls")),
+    ]
+
     raw_rows: list[ModelRow] = []
     for label, path in rows_spec:
         node = _safe_get(diag, *path, default={}) or {}
@@ -1754,37 +1749,11 @@ def main() -> None:
             )
         )
 
-    # Pluggable selection policy (isolated, easy to modify)
     def select_best_model(rows: list[ModelRow]) -> ModelRow:
-        """
-        Deterministic model selection applied to the comparison table.
-
-        Policy (in priority order):
-          1) Minimize BIC
-          2) Minimize AIC
-          3) Minimize RMSE (in-sample)
-          4) Maximize Adjusted R^2
-          5) Prefer simpler model via complexity_rank
-             - Simplicity order encoded in _complexity_rank_for():
-               Linear < Quadratic; OLS < WLS
-
-        Notes:
-        - This selector is intentionally self-contained so you can adjust the policy here
-          without touching other code paths or data structures.
-        - Missing values are handled conservatively:
-            * For minimizing metrics (BIC, AIC, RMSE), None/NaN/Inf are treated as +inf (worst).
-            * For maximizing Adjusted R^2, None/NaN/Inf are treated as -inf (worst).
-        - To change preferences, edit the sort key below or _complexity_rank_for() above.
-
-        Returns:
-            ModelRow: the chosen best row according to the policy.
-        """
-
         def pos_inf_if_none(x: _Optional[float]) -> float:
             return float("inf") if x is None or not np.isfinite(x) else float(x)
 
         def neg_inf_if_none(x: _Optional[float]) -> float:
-            # For maximizing adj_r2: missing -> -inf
             if x is None:
                 return float("-inf")
             try:
@@ -1793,22 +1762,20 @@ def main() -> None:
             except Exception:
                 return float("-inf")
 
-        # Build stable sort key
         return sorted(
             rows,
             key=lambda r: (
                 pos_inf_if_none(r.bic),
                 pos_inf_if_none(r.aic),
                 pos_inf_if_none(r.rmse),
-                -neg_inf_if_none(r.adj_r2),  # negate because we want to maximize
+                -neg_inf_if_none(r.adj_r2),
                 r.complexity_rank,
-                r.label,  # final stable tie-breaker
+                r.label,
             ),
         )[0]
 
     best_row = select_best_model(raw_rows)
 
-    # Build printable table rows with formatting
     def _fmt(x):
         try:
             return f"{float(x):.6g}" if x is not None and np.isfinite(float(x)) else "-"
@@ -1820,7 +1787,6 @@ def main() -> None:
         for r in raw_rows
     ]
 
-    # Column widths
     headers = ("Model", "RMSE (in-sample)", "Adj R^2", "AIC", "BIC")
     col_widths = [
         max(len(headers[0]), max(len(r[0]) for r in table_rows)),
@@ -1829,31 +1795,30 @@ def main() -> None:
         len(headers[3]),
         len(headers[4]),
     ]
-
-    # Render header and table
     header_line = f"{headers[0]:<{col_widths[0]}}  {headers[1]:>{col_widths[1]}}  {headers[2]:>{col_widths[2]}}  {headers[3]:>{col_widths[3]}}  {headers[4]:>{col_widths[4]}}"
     sep_line = "-" * len(header_line)
-    print("Model Comparison (OLS/WLS x Linear/Quadratic)")
-    print(header_line)
-    print(sep_line)
+
+    lines = []
+    lines.append("Model Comparison (OLS/WLS x Linear/Quadratic)")
+    lines.append(header_line)
+    lines.append(sep_line)
     for r in table_rows:
-        print(
+        lines.append(
             f"{r[0]:<{col_widths[0]}}  {r[1]:>{col_widths[1]}}  {r[2]:>{col_widths[2]}}  {r[3]:>{col_widths[3]}}  {r[4]:>{col_widths[4]}}"
         )
-    print("\n")
-    print(f"Selected model (by policy): {best_row.label}")
-    print("\n")
+    lines.append("")
+    lines.append(f"Selected model (by policy): {best_row.label}")
+    lines.append("")
 
-    print(
-        "FORT for minimum cost/run:\n"
-        f"  (OLS linear): {summary.sor_min_cost_lin}\n"
-        f"  (OLS quadratic): {summary.sor_min_cost_quad}\n"
-        f"  (WLS linear): {summary.sor_min_cost_lin_wls}\n"
-        f"  (WLS quadratic): {summary.sor_min_cost_quad_wls}\n"
-    )
-    print("\n")
+    return best_row.label, "\n".join(lines)
 
-    # Render multiple plots with different flag presets
+
+def render_plot_presets(
+    df_included: pd.DataFrame, summary: SummaryModelOutputs, short_hash: str
+) -> list[str]:
+    """
+    Render a stable set of plot presets and return artifact paths.
+    """
     presets_to_render = [
         PlotLayer.ALL_OLS,
         PlotLayer.ALL_WLS,
@@ -1865,42 +1830,116 @@ def main() -> None:
     for flags in presets_to_render:
         layer_suffix = _plot_layers_suffix(flags)
         out_svg = with_hash_suffix(f"plot-{layer_suffix}", short_hash, ".svg")
-        _ = render_outputs(
-            transformed.df_range,
+        render_outputs(
+            df_included,
             summary,
             output_svg=out_svg,
             plot_layers=flags,
         )
         artifact_paths.append(out_svg)
+    return artifact_paths
 
-    # Build and write manifest next to artifact (current working directory)
-    total_input_rows = int(len(df_range))
-    processed_row_count = int(len(transformed.df_range))
-    excluded_row_count = int(len(transformed.df_excluded))
-    # Derive pre-zscore exclusions (timestamp range and earlier filters)
-    pre_zscore_excluded = max(
-        total_input_rows - processed_row_count - excluded_row_count, 0
-    )
+
+def build_manifest_dict(
+    abs_input_posix: str,
+    counts: dict,
+    effective_params: dict,
+    hashes: tuple[str, str],
+    artifact_paths: list[str],
+) -> dict:
+    short_hash, full_hash = hashes
     exclusion_reasons = (
-        f"timestamp_range_excluded_rows={pre_zscore_excluded}; "
-        f"zscore_excluded_rows={excluded_row_count}"
+        f"timestamp_range_excluded_rows={counts.get('pre_zscore_excluded', 0)}; "
+        f"zscore_excluded_rows={counts.get('excluded_row_count', 0)}"
     )
-
-    manifest = {
+    return {
         "version": "1",
         "timestamp_utc": utc_timestamp_seconds(),
         "absolute_input_path": abs_input_posix,
-        "total_input_rows": total_input_rows,
-        "processed_row_count": processed_row_count,
-        "excluded_row_count": excluded_row_count,
+        "total_input_rows": int(counts.get("total_input_rows", 0)),
+        "processed_row_count": int(counts.get("processed_row_count", 0)),
+        "excluded_row_count": int(counts.get("excluded_row_count", 0)),
         "exclusion_reasons": exclusion_reasons,
         "effective_parameters": effective_params,
         "canonical_hash": full_hash,
         "canonical_hash_short": short_hash,
         "artifacts": {"plot_svgs": artifact_paths},
     }
-    manifest_name = f"manifest-{short_hash}.json"
-    write_manifest(manifest_name, manifest)
+
+
+def assemble_text_report(
+    input_df: pd.DataFrame,
+    transformed: TransformOutputs,
+    summary: SummaryModelOutputs,
+    table_text: str,
+    best_label: str,
+) -> str:
+    """
+    Create a concise, readable report. Keeps current information content but in one place.
+    """
+    parts: list[str] = []
+    parts.append("\n\n")
+    parts.append(f"Input data (head):\n{input_df.head()}")
+    parts.append("\n\n")
+    parts.append(f"Filtered data (head):\n{transformed.df_range.head()}")
+    parts.append("\n\n")
+    parts.append(table_text)
+    parts.append(
+        "FORT for minimum cost/run:\n"
+        f"  (OLS linear): {summary.sor_min_cost_lin}\n"
+        f"  (OLS quadratic): {summary.sor_min_cost_quad}\n"
+        f"  (WLS linear): {summary.sor_min_cost_lin_wls}\n"
+        f"  (WLS quadratic): {summary.sor_min_cost_quad_wls}\n"
+    )
+    parts.append("\n")
+    return "\n".join(parts)
+
+
+def main() -> None:
+    # 1) Build params and run identity
+    params_load, params_transform = get_default_params()
+    abs_input_posix, short_hash, full_hash, effective_params = build_run_identity(
+        params_load, params_transform
+    )
+
+    # 2) Orchestration
+    df_range = load_and_slice_csv(params_load)
+    transformed = transform_pipeline(df_range, params_transform)
+    summary = summarize_and_model(transformed.df_range, params_transform)
+
+    # 3) Model comparison table
+    best_label, table_text = build_model_comparison(summary.regression_diagnostics)
+
+    # 4) Render plots
+    artifact_paths = render_plot_presets(transformed.df_range, summary, short_hash)
+
+    # 5) Manifest
+    total_input_rows = int(len(df_range))
+    processed_row_count = int(len(transformed.df_range))
+    excluded_row_count = int(len(transformed.df_excluded))
+    pre_zscore_excluded = max(
+        total_input_rows - processed_row_count - excluded_row_count, 0
+    )
+    counts = {
+        "total_input_rows": total_input_rows,
+        "processed_row_count": processed_row_count,
+        "excluded_row_count": excluded_row_count,
+        "pre_zscore_excluded": pre_zscore_excluded,
+    }
+    manifest = build_manifest_dict(
+        abs_input_posix=abs_input_posix,
+        counts=counts,
+        effective_params=effective_params,
+        hashes=(short_hash, full_hash),
+        artifact_paths=artifact_paths,
+    )
+    write_manifest(f"manifest-{short_hash}.json", manifest)
+
+    # 6) Focused report to stdout
+    report = assemble_text_report(
+        df_range, transformed, summary, table_text, best_label
+    )
+    print(report)
 
 
 if __name__ == "__main__":
