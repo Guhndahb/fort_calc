@@ -589,44 +589,146 @@ def summarize_run_time_by_sor_range(
     input_data_fort: int,
     delta_mode: DeltaMode = DeltaMode.PREVIOUS_CHUNK,
 ) -> pd.DataFrame:
-    ranges = []
-    chunk_size = (input_data_fort - 1) // 4
-    remainder = (input_data_fort - 1) % 4
+    """
+    Summarize adjusted_run_time by SOR ranges using vectorized binning.
 
+    Behavior:
+    - Partition the inclusive range [1..input_data_fort-1] into 4 contiguous bins
+      as evenly as possible, preserving the original chunking logic.
+    - Compute run_time_mean per bin via groupby aggregation.
+    - Append a final row for the exact fort (sor == input_data_fort) as a degenerate interval,
+      setting both sorr_start and sorr_end to input_data_fort.
+    - Compute run_time_delta according to delta_mode using the bin means; the first
+      row's delta is NaN.
+    """
+    # Compute boundaries for the 4 bins covering [1..input_data_fort-1]
+    total = max(input_data_fort - 1, 0)
+    chunk_size = total // 4
+    remainder = total % 4
+
+    starts: list[int] = []
+    ends: list[int] = []
     start = 1
     for i in range(4):
         end = start + chunk_size - 1
         if i < remainder:
             end += 1
-        ranges.append((start, end))
+        # Clamp for empty prefixes when input_data_fort <= 1
+        if start <= end:
+            starts.append(start)
+            ends.append(end)
         start = end + 1
 
-    # Final row for input_data_fort
-    ranges.append((input_data_fort, None))
+    # Build cut edges for pandas.cut (right-closed bins to match between(start,end))
+    # Edges must be strictly increasing; if no bins, edges will be empty.
+    edges: list[float] = []
+    if starts and ends:
+        # Combine starts and ends into edges: [s1, e1, e2, e3, e4]
+        edges = [float(starts[0])]
+        for e in ends:
+            edges.append(float(e))
 
-    output_rows = []
-    for i, (start, end) in enumerate(ranges):
-        if end is None:
-            mask = df_range["sor#"] == start
-        else:
-            mask = df_range["sor#"].between(start, end)
+    # Prepare DataFrame slice for values in [1..input_data_fort-1]
+    # Coerce sor# to numeric to be robust
+    sor_numeric = pd.to_numeric(df_range["sor#"], errors="coerce")
+    df_vals = df_range.loc[
+        (sor_numeric >= 1) & (sor_numeric <= input_data_fort - 1)
+    ].copy()
+    df_vals["sor_numeric"] = sor_numeric.loc[df_vals.index]
 
-        mean_runtime = df_range.loc[mask, "adjusted_run_time"].mean()
+    # If we have valid bin edges, assign bins; otherwise create an empty grouping
+    if len(edges) >= 2:
+        # pandas.cut expects edges for right-closed bins: (edges[i-1], edges[i]]
+        # We supply labels as 0..len(ends)-1 to map back to (start,end)
+        labels = list(range(len(ends)))
+        df_vals["bin"] = pd.cut(
+            df_vals["sor_numeric"],
+            bins=edges,
+            right=True,
+            include_lowest=True,
+            labels=labels,
+        )
+        # Group by bin and aggregate mean
+        grouped = (
+            df_vals.groupby("bin", observed=True)["adjusted_run_time"]
+            .mean()
+            .reindex(labels)  # ensure all bins present in order
+        )
+        run_time_means = grouped.to_numpy()
+    else:
+        # No bins (e.g., input_data_fort <= 1)
+        run_time_means = np.array([], dtype=float)
+
+    # Build summary rows for the 4 range bins actually created
+    rows: list[list[float | int | None]] = []
+    for i in range(len(run_time_means)):
+        start_i = int(starts[i])
+        end_i = int(ends[i])
+        mean_runtime = (
+            float(run_time_means[i]) if pd.notna(run_time_means[i]) else np.nan
+        )
         if i == 0:
             delta = np.nan
         else:
             if delta_mode is DeltaMode.PREVIOUS_CHUNK:
-                baseline = output_rows[-1][2]  # previous chunk
+                baseline = rows[-1][2]  # previous chunk mean
             else:  # DeltaMode.FIRST_CHUNK
-                baseline = output_rows[0][2]  # first chunk
-            delta = mean_runtime - baseline
+                baseline = rows[0][2]  # first chunk mean
+            # baseline may be NaN if previous chunk had no data; subtraction yields NaN
+            delta = mean_runtime - float(baseline) if pd.notna(baseline) else np.nan
+        rows.append([start_i, end_i, mean_runtime, delta])
 
-        output_rows.append([start, end, mean_runtime, delta])
+    # Append the final exact fort row (degenerate interval: start == end == input_data_fort)
+    mask_fort = sor_numeric == input_data_fort
+    mean_fort = df_range.loc[mask_fort, "adjusted_run_time"].mean()
+    if len(rows) == 0:
+        # If there were no range rows, the "first" baseline for FIRST_CHUNK mode
+        # should remain NaN; previous-chunk also yields NaN.
+        delta_final = np.nan
+    else:
+        if delta_mode is DeltaMode.PREVIOUS_CHUNK:
+            baseline_final = rows[-1][2]
+        else:
+            baseline_final = rows[0][2]
+        delta_final = (
+            mean_fort - float(baseline_final) if pd.notna(baseline_final) else np.nan
+        )
 
-    return pd.DataFrame(
-        output_rows,
+    rows.append(
+        [
+            int(input_data_fort),
+            int(input_data_fort),  # set end equal to start (degenerate interval)
+            float(mean_fort) if pd.notna(mean_fort) else np.nan,
+            delta_final,
+        ]
+    )
+
+    # Build DataFrame
+    df_summary = pd.DataFrame(
+        rows,
         columns=["sorr_start", "sorr_end", "run_time_mean", "run_time_delta"],
     )
+
+    # Enforce domain invariants:
+    # 1) sorr_start and sorr_end must be positive integers
+    # 2) Non-overlapping, ordered bins
+    # 3) Cast to plain int64 to avoid float/NaN upcasts and enforce strictness
+    #    (degenerate final row ensures no NaN in sorr_end)
+    df_summary["sorr_start"] = df_summary["sorr_start"].astype("int64")
+    df_summary["sorr_end"] = df_summary["sorr_end"].astype("int64")
+
+    assert (df_summary["sorr_start"] > 0).all() and (df_summary["sorr_end"] > 0).all()
+    # end >= start for each row
+    assert (df_summary["sorr_end"] >= df_summary["sorr_start"]).all()
+    # strictly increasing without overlaps for range rows vs next start
+    if len(df_summary) > 1:
+        # For all transitions up to the penultimate row, ensure next start > current end
+        assert (
+            df_summary["sorr_start"].iloc[1:].values
+            > df_summary["sorr_end"].iloc[:-1].values
+        ).all()
+
+    return df_summary
 
 
 @dataclass
