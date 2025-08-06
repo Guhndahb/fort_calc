@@ -921,6 +921,14 @@ def regression_analysis(
     linear_model_output = linear_model.predict(X_linear_pred)
     quadratic_model_output = quadratic_model.predict(X_quadratic_pred)
 
+    # test plot to show heteroskedasticity
+    # plt.scatter(df_range["sor#"], quadratic_model.resid, alpha=0.5)
+    # plt.axhline(0, color="gray", linestyle="--")
+    # plt.xlabel("sor#")
+    # plt.ylabel("Residuals")
+    # plt.title("Residuals vs sor#")
+    # plt.show()
+
     # Create results DataFrame
     result_df = (
         pd.DataFrame(
@@ -1235,7 +1243,7 @@ def main() -> None:
         input_data_fort=100,
         ignore_resetticks=True,
         delta_mode=DeltaMode.PREVIOUS_CHUNK,
-        exclude_timestamp_ranges=[("20250801124409", "20250805165454")],
+        exclude_timestamp_ranges=None,  # [("20250801124409", "20250805165454")],
         verbose_filtering=True,
     )
 
@@ -1259,6 +1267,8 @@ def main() -> None:
     print(f"Filtered data:\n{transformed.df_range}")
     print("\n\n")
     summary = summarize_and_model(transformed.df_range, params_transform)
+    print(f"Regression Diagnostics:\n{summary.regression_diagnostics}")
+    print("\n\n")
     print(f"Summary\n{summary.df_summary}")
     print("\n\n")
     print(f"Minimum cost per run at fort (linear): sor# {summary.sor_min_cost_lin}")
@@ -1273,8 +1283,14 @@ def main() -> None:
     total_input_rows = int(len(df_range))
     processed_row_count = int(len(transformed.df_range))
     excluded_row_count = int(len(transformed.df_excluded))
-    exclusion_reasons = f"timestamp_range_excluded_rows={total_input_rows - len(df_range)}; zscore_excluded_rows={excluded_row_count}"
-    # Note: timestamp exclusion count cannot be derived post-hoc without deeper plumbing; keep simple summary.
+    # Derive pre-zscore exclusions (timestamp range and earlier filters)
+    pre_zscore_excluded = max(
+        total_input_rows - processed_row_count - excluded_row_count, 0
+    )
+    exclusion_reasons = (
+        f"timestamp_range_excluded_rows={pre_zscore_excluded}; "
+        f"zscore_excluded_rows={excluded_row_count}"
+    )
 
     manifest = {
         "version": "1",
@@ -1283,7 +1299,7 @@ def main() -> None:
         "total_input_rows": total_input_rows,
         "processed_row_count": processed_row_count,
         "excluded_row_count": excluded_row_count,
-        "exclusion_reasons": f"zscore_excluded_rows={excluded_row_count}",
+        "exclusion_reasons": exclusion_reasons,
         "effective_parameters": effective_params,
         "canonical_hash": full_hash,
         "canonical_hash_short": short_hash,
