@@ -87,7 +87,7 @@ def build_effective_parameters(load: Any, transform: Any) -> dict[str, Any]:
         "zscore_min": _normalize_value(transform.zscore_min),
         "zscore_max": _normalize_value(transform.zscore_max),
         "input_data_fort": _normalize_value(transform.input_data_fort),
-        "ignore_mrt": _normalize_value(transform.ignore_mrt),
+        "ignore_resetticks": _normalize_value(transform.ignore_resetticks),
         "delta_mode": _normalize_value(transform.delta_mode),
         "exclude_timestamp_ranges": transform.exclude_timestamp_ranges,
         "verbose_filtering": _normalize_value(transform.verbose_filtering),

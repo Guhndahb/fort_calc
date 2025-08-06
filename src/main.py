@@ -55,6 +55,19 @@ logger = logging.getLogger(__name__)
 
 
 class DeltaMode(Enum):
+    """
+    Controls how run_time_delta is computed in summarize_run_time_by_sor_range().
+
+    Semantics:
+    - PREVIOUS_CHUNK: run_time_delta = run_time_mean(current_chunk) - run_time_mean(previous_chunk)
+                      The first chunk has no previous baseline and thus yields NaN.
+    - FIRST_CHUNK:    run_time_delta = run_time_mean(current_chunk) - run_time_mean(first_chunk)
+                      The first chunk uses itself as baseline and thus yields NaN.
+
+    See also: summarize_run_time_by_sor_range() for details on how deltas are populated,
+    including the degenerate final 'fort' row.
+    """
+
     PREVIOUS_CHUNK = auto()  # delta vs. the immediately-preceding chunk
     FIRST_CHUNK = auto()  # delta vs. the very first chunk
 
@@ -261,16 +274,32 @@ def fill_first_note_if_empty(df: pd.DataFrame, verbose: bool = False) -> pd.Data
 
 
 def compute_adjusted_run_time(
-    df: pd.DataFrame, ignore_mrt: bool, verbose: bool = False
+    df: pd.DataFrame, ignore_resetticks: bool, verbose: bool = False
 ) -> pd.DataFrame:
     """
     Compute adjusted_run_time with diagnostics via FilterResult.
     Preserves DataFrame -> DataFrame contract for pandas piping.
     NOTE: Avoids df.copy() to respect in-place performance preference.
 
+    Column/parameter semantics:
+    - runticks:     Run duration in ticks (milliseconds).
+    - resetticks:   The duration in ticks (milliseconds) that it takes for the Modron reset
+                    to occur. This column may be omitted from the data.
+    - ignore_resetticks:   When True, ignore resetticks entirely. When False, subtract resetticks
+                    from runticks to eliminate Modron reset time from the regression input.
+
     Behavior:
-    - If ignore_mrt is True: adjusted_run_time = runticks / 1000.0
-    - Else: adjusted_run_time = (runticks - resetticks) / 1000.0 with resetticks coerced to numeric and NaN→0
+    - If ignore_resetticks is True:
+        adjusted_run_time = runticks / 1000.0
+      (resetticks is not accessed)
+    - Else:
+        adjusted_run_time = (runticks - resetticks) / 1000.0
+        where resetticks is coerced to numeric and NaN → 0.
+
+    Units:
+    - adjusted_run_time is expressed in seconds.
+
+    Diagnostics:
     - Emits warnings/metrics for NaN/negative adjusted values and missing columns.
     """
     result = FilterResult(label="compute_adjusted_run_time")
@@ -278,7 +307,7 @@ def compute_adjusted_run_time(
     result.original_rows = len(df)
 
     # Validate required columns
-    required = ["runticks"] + ([] if ignore_mrt else ["resetticks"])
+    required = ["runticks"] + ([] if ignore_resetticks else ["resetticks"])
     missing_cols = [c for c in required if c not in df.columns]
     if missing_cols:
         result.set_skipped(f"missing required columns: {missing_cols}")
@@ -291,7 +320,7 @@ def compute_adjusted_run_time(
     # Ensure runticks numeric (in-place)
     df["runticks"] = pd.to_numeric(df["runticks"], errors="coerce")
 
-    if ignore_mrt:
+    if ignore_resetticks:
         # No need to touch resetticks at all
         df["adjusted_run_time"] = df["runticks"] / 1000.0
     else:
@@ -313,7 +342,7 @@ def compute_adjusted_run_time(
         )
 
     # Track metrics
-    result.add_metric("ignore_mrt", ignore_mrt)
+    result.add_metric("ignore_resetticks", ignore_resetticks)
     result.add_metric("nan_adjusted_values", int(nan_count))
     result.add_metric("negative_adjusted_values", int(neg_count))
 
@@ -616,6 +645,18 @@ def summarize_run_time_by_sor_range(
       setting both sorr_start and sorr_end to input_data_fort.
     - Compute run_time_delta according to delta_mode using the bin means; the first
       row's delta is NaN.
+
+    Delta semantics (delta_mode):
+    - PREVIOUS_CHUNK: run_time_delta = run_time_mean(current_chunk) - run_time_mean(previous_chunk)
+    - FIRST_CHUNK:    run_time_delta = run_time_mean(current_chunk) - run_time_mean(first_chunk)
+
+    Offline cost interpretation:
+    - The final degenerate 'fort' row’s run_time_delta is used downstream as offline_cost,
+      representing the estimated extra time game restarts (usually offline stacks) take
+      versus an online stack.
+
+    Returns:
+    - DataFrame with columns: ['sorr_start', 'sorr_end', 'run_time_mean', 'run_time_delta'].
     """
     # Compute boundaries for the 4 bins covering [1..input_data_fort-1]
     total = max(input_data_fort - 1, 0)
@@ -767,7 +808,7 @@ class TransformParams:
     zscore_min: float
     zscore_max: float
     input_data_fort: int
-    ignore_mrt: bool
+    ignore_resetticks: bool
     delta_mode: DeltaMode
     exclude_timestamp_ranges: Optional[List[Tuple[str, str]]]
     verbose_filtering: bool = False
@@ -946,6 +987,37 @@ def transform_pipeline(
     """
     Pure transformation pipeline from raw range to filtered frames.
     Returns included and excluded DataFrames.
+
+    Example (typical pipeline):
+        >>> # Load a CSV slice (see load_and_slice_csv)
+        >>> df = pd.DataFrame({
+        ...     "timestamp": [20250101000001, 20250101000002, 20250101000003,
+        ...                    20250101000004, 20250101000005, 20250101000006],
+        ...     "ignore": ["FALSE"]*6,
+        ...     "sor#": [1, 2, 3, 4, 5, 6],
+        ...     "runticks": [1000, 1010, 1020, 1030, 1040, 1050],
+        ...     "resetticks": [0, 0, 0, 0, 0, 0],
+        ...     "notes": [""]*6,
+        ... })
+        >>> params = TransformParams(
+        ...     zscore_min=-2.0,
+        ...     zscore_max=2.0,
+        ...     input_data_fort=6,
+        ...     ignore_resetticks=True,  # if False, resetticks will be subtracted from runticks
+        ...     delta_mode=DeltaMode.PREVIOUS_CHUNK,
+        ...     exclude_timestamp_ranges=None,
+        ... )
+        >>> out = transform_pipeline(df, params)
+        >>> out.df_range.columns  # doctest: +ELLIPSIS
+        Index([... 'adjusted_run_time' ...], dtype='object')
+
+    Related definitions:
+    - resetticks: duration in ticks (ms) that Modron reset takes; may be absent in input.
+    - ignore_resetticks (param): when True, the resetticks column is ignored;
+      when False, resetticks is subtracted from runticks before converting to seconds.
+    - adjusted_run_time: computed seconds value, see compute_adjusted_run_time() for units and rules.
+    - delta_mode: controls how run_time_delta is computed, see DeltaMode and summarize_run_time_by_sor_range().
+    - offline_cost: derived later in summarize_and_model() from the final row’s run_time_delta.
     """
     # Build the pipeline step-by-step so we can fail-fast immediately after timestamp parsing
     df_range = df_range.pipe(
@@ -953,7 +1025,9 @@ def transform_pipeline(
         input_data_fort=params.input_data_fort,
         verbose=params.verbose_filtering,
     )
-    df_range = compute_adjusted_run_time(df_range, ignore_mrt=params.ignore_mrt)
+    df_range = compute_adjusted_run_time(
+        df_range, ignore_resetticks=params.ignore_resetticks
+    )
     # Convert timestamps early, once
     df_range = convert_timestamp_column_to_datetime(
         df_range, timestamp_column="timestamp", verbose=params.verbose_filtering
@@ -1003,6 +1077,11 @@ def summarize_and_model(
 ) -> SummaryModelOutputs:
     """
     Produce summary table, regression outputs, and cost metrics.
+
+    Definitions:
+    - offline_cost: The estimated extra time game restarts (usually offline stacks) take
+      versus an online stack. Computed as the run_time_delta of the final degenerate 'fort'
+      row produced by summarize_run_time_by_sor_range() under the chosen delta_mode.
 
     Notes:
     - The final "offline" row created by summarize_run_time_by_sor_range has no range
@@ -1154,7 +1233,7 @@ def main() -> None:
         zscore_min=-1.5,
         zscore_max=3,
         input_data_fort=100,
-        ignore_mrt=True,
+        ignore_resetticks=True,
         delta_mode=DeltaMode.PREVIOUS_CHUNK,
         exclude_timestamp_ranges=[("20250801124409", "20250805165454")],
         verbose_filtering=True,

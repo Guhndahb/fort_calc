@@ -14,7 +14,7 @@ def make_base_params():
         zscore_min=-2.0,
         zscore_max=2.0,
         input_data_fort=6,
-        ignore_mrt=True,
+        ignore_resetticks=True,
         delta_mode=DeltaMode.PREVIOUS_CHUNK,
         exclude_timestamp_ranges=None,
         verbose_filtering=False,
