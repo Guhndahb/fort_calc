@@ -820,6 +820,8 @@ class TransformParams:
     verbose_filtering: bool = False
     # Fail fast if any timestamps fail to parse (simple and strict by default)
     fail_on_any_invalid_timestamps: bool = True
+    # Control WLS overlay rendering and computations in outputs
+    include_wls_overlay: bool = False
 
 
 @dataclass
@@ -836,6 +838,9 @@ class SummaryModelOutputs:
     offline_cost: float
     sor_min_cost_lin: int
     sor_min_cost_quad: int
+    # New: WLS min-cost markers (optional presence based on include_wls_overlay)
+    sor_min_cost_lin_wls: Optional[int] = None
+    sor_min_cost_quad_wls: Optional[int] = None
 
 
 def regression_analysis(
@@ -846,53 +851,28 @@ def regression_analysis(
 
     Behavior:
     - Trains baseline OLS models for both linear and quadratic specifications.
+    - Additionally trains WLS variants and returns their predictions alongside OLS.
     - Builds prediction matrices with named columns and explicit constant handling
       via statsmodels add_constant(has_constant='add') to avoid column-order issues.
-    - Returns a result_df that contains ONLY the baseline OLS predictions so
-      downstream summarize_and_model() and render_outputs() remain unchanged.
 
-    Additional variants (diagnostics only):
-    In addition to the baseline OLS, this function computes extra model variants
-    and returns them under the diagnostics mapping without altering result_df:
-      - 'ols':     Baseline OLS (used for result_df predictions)
-      - 'ols_hc1': OLS fit with heteroskedasticity-robust covariance (HC1)
+    Variants included in diagnostics:
+      - 'ols':     Baseline OLS
+      - 'ols_hc1': OLS with heteroskedasticity-robust covariance (HC1)
       - 'wls':     Weighted Least Squares with weights 1 / (sor#^2)
       - 'wls_hc1': WLS with HC1 robust covariance
-
-    Diagnostics schema:
-      diagnostics = {
-        "linear": {
-          "ols":      {R-squared, Adj. R-squared, F-statistic, p-value, Coefficients,
-                       Standard Errors, Confidence Intervals, Residuals, Summary},
-          "ols_hc1":  {... same keys as above ...},
-          "wls":      {... same keys ... plus "weights_spec": "1/(sor#^2)"},
-          "wls_hc1":  {... same keys ... plus "weights_spec": "1/(sor#^2)"},
-          # Optional error keys (e.g., "wls_error") may be present if a variant failed to fit.
-        },
-        "quadratic": {
-          "ols":      {...},
-          "ols_hc1":  {...},
-          "wls":      {...},
-          "wls_hc1":  {...},
-        }
-      }
 
     Returns:
       tuple[pd.DataFrame, dict]
         - result_df: DataFrame with columns:
-            ["sor#", "linear_model_output", "quadratic_model_output"]
-          Both outputs are predictions from the baseline OLS models.
-        - diagnostics: Nested dict as described above containing model statistics for
-          OLS and all additional variants. These are provided for analysis, QA, or
-          optional downstream use without breaking existing consumers.
+            ["sor#", "linear_model_output", "quadratic_model_output",
+             "linear_model_output_wls", "quadratic_model_output_wls"]
+        - diagnostics: Nested dict containing model statistics for all variants.
 
     Notes:
     - WLS weights default to 1/(sor#^2) with robust handling of zero/NaN/inf values.
       Non-finite weights are replaced by the median finite weight; if none are finite,
       the code falls back to uniform weights.
     - Robust covariance is requested via fit(cov_type="HC1").
-    - The prediction series in result_df remain baseline OLS by design to preserve
-      all downstream processing and artifacts.
     """
 
     # Helper: ensure constant named 'const'
@@ -980,6 +960,8 @@ def regression_analysis(
 
     # Variant: WLS and WLS with robust SEs
     # Default weights strategy: 1 / (sor#^2) guarding zero/NaN
+    linear_model_output_wls = None
+    quadratic_model_output_wls = None
     try:
         sor_vals = pd.to_numeric(df_range["sor#"], errors="coerce").to_numpy()
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -1010,6 +992,14 @@ def regression_analysis(
             "weights_spec": "1/(sor#^2)",
         }
 
+        # Align prediction matrices for WLS models (same exog names)
+        X_linear_pred_wls = X_linear_pred.reindex(columns=lin_wls.model.exog_names)
+        X_quadratic_pred_wls = X_quadratic_pred.reindex(
+            columns=quad_wls.model.exog_names
+        )
+        linear_model_output_wls = lin_wls.predict(X_linear_pred_wls)
+        quadratic_model_output_wls = quad_wls.predict(X_quadratic_pred_wls)
+
         # WLS + robust SEs (HC1)
         try:
             lin_wls_hc1 = sm.WLS(y, X_linear_train, weights=w).fit(cov_type="HC1")
@@ -1029,18 +1019,22 @@ def regression_analysis(
         diagnostics.setdefault("linear", {})["wls_error"] = str(e)
         diagnostics.setdefault("quadratic", {})["wls_error"] = str(e)
 
-    # Assemble result_df using baseline OLS predictions only (no downstream changes)
-    result_df = (
-        pd.DataFrame(
-            {
-                "sor#": sor_sequence,
-                "linear_model_output": linear_model_output,
-                "quadratic_model_output": quadratic_model_output,
-            }
-        )
-        .sort_values(by="sor#")
-        .reset_index(drop=True)
-    )
+    # Assemble result_df with both OLS and WLS predictions (WLS columns may be None)
+    df_dict = {
+        "sor#": sor_sequence,
+        "linear_model_output": linear_model_output,
+        "quadratic_model_output": quadratic_model_output,
+    }
+    if linear_model_output_wls is not None:
+        df_dict["linear_model_output_wls"] = linear_model_output_wls
+    else:
+        df_dict["linear_model_output_wls"] = pd.Series([np.nan] * len(sor_sequence))
+    if quadratic_model_output_wls is not None:
+        df_dict["quadratic_model_output_wls"] = quadratic_model_output_wls
+    else:
+        df_dict["quadratic_model_output_wls"] = pd.Series([np.nan] * len(sor_sequence))
+
+    result_df = pd.DataFrame(df_dict).sort_values(by="sor#").reset_index(drop=True)
 
     return result_df, diagnostics
 
@@ -1208,17 +1202,35 @@ def summarize_and_model(
         df_range, params.input_data_fort - 1
     )
 
-    # Cumulative sums
+    # Cumulative sums (OLS)
     df_results["sum_lin"] = df_results["linear_model_output"].cumsum()
     df_results["sum_quad"] = df_results["quadratic_model_output"].cumsum()
 
-    # Cost per run columns
+    # If WLS predictions exist, compute their sums too
+    has_wls_cols = all(
+        c in df_results.columns
+        for c in ["linear_model_output_wls", "quadratic_model_output_wls"]
+    )
+    if has_wls_cols:
+        df_results["sum_lin_wls"] = df_results["linear_model_output_wls"].cumsum()
+        df_results["sum_quad_wls"] = df_results["quadratic_model_output_wls"].cumsum()
+
+    # Cost per run columns (OLS)
     df_results["cost_per_run_at_fort_lin"] = (
         df_results["sum_lin"] + offline_cost
     ) / df_results["sor#"]
     df_results["cost_per_run_at_fort_quad"] = (
         df_results["sum_quad"] + offline_cost
     ) / df_results["sor#"]
+
+    # If WLS available, compute WLS cost-per-run
+    if has_wls_cols:
+        df_results["cost_per_run_at_fort_lin_wls"] = (
+            df_results["sum_lin_wls"] + offline_cost
+        ) / df_results["sor#"]
+        df_results["cost_per_run_at_fort_quad_wls"] = (
+            df_results["sum_quad_wls"] + offline_cost
+        ) / df_results["sor#"]
 
     # Handle potential all-NA series robustly for small synthetic inputs
     def _safe_idxmin(series: pd.Series) -> int:
@@ -1234,6 +1246,20 @@ def summarize_and_model(
         df_results.loc[_safe_idxmin(df_results["cost_per_run_at_fort_quad"]), "sor#"]
     )
 
+    sor_min_cost_lin_wls: Optional[int] = None
+    sor_min_cost_quad_wls: Optional[int] = None
+    if has_wls_cols:
+        sor_min_cost_lin_wls = int(
+            df_results.loc[
+                _safe_idxmin(df_results["cost_per_run_at_fort_lin_wls"]), "sor#"
+            ]
+        )
+        sor_min_cost_quad_wls = int(
+            df_results.loc[
+                _safe_idxmin(df_results["cost_per_run_at_fort_quad_wls"]), "sor#"
+            ]
+        )
+
     return SummaryModelOutputs(
         df_summary=df_summary,
         df_results=df_results,
@@ -1241,6 +1267,8 @@ def summarize_and_model(
         offline_cost=offline_cost,
         sor_min_cost_lin=sor_min_cost_lin,
         sor_min_cost_quad=sor_min_cost_quad,
+        sor_min_cost_lin_wls=sor_min_cost_lin_wls,
+        sor_min_cost_quad_wls=sor_min_cost_quad_wls,
     )
 
 
@@ -1248,11 +1276,25 @@ def render_outputs(
     df_range: pd.DataFrame,
     summary: SummaryModelOutputs,
     output_svg: str = "plot.svg",
+    include_wls_overlay: Optional[bool] = None,
 ) -> str:
     """
     Pure renderer: builds the plot and returns the output path.
     No prints; deterministic given inputs.
+
+    include_wls_overlay:
+      - If None, attempt to infer from presence of WLS cols/mins and default to False.
+      - If True, overlay WLS predictions and cost curves and min-cost markers.
     """
+    # Infer overlay flag from data if not provided
+    if include_wls_overlay is None:
+        include_wls_overlay = False
+        if (
+            "linear_model_output_wls" in summary.df_results.columns
+            or "cost_per_run_at_fort_lin_wls" in summary.df_results.columns
+        ):
+            include_wls_overlay = False  # default remains False unless caller opts in
+
     plt.style.use("dark_background")
     plt.figure(figsize=(10, 6))
     plt.scatter(
@@ -1263,53 +1305,114 @@ def render_outputs(
         label="Data Points",
     )
 
-    # Overlay models
+    # Overlay OLS model predictions
     plt.plot(
         summary.df_results["sor#"],
         summary.df_results["linear_model_output"],
         color="yellow",
-        label="Linear Model",
+        label="Linear Model (OLS)",
     )
     plt.plot(
         summary.df_results["sor#"],
         summary.df_results["quadratic_model_output"],
         color="magenta",
-        label="Quadratic Model",
+        label="Quadratic Model (OLS)",
     )
 
-    # Cost per run curves
+    # If requested, overlay WLS predictions if present
+    if include_wls_overlay and "linear_model_output_wls" in summary.df_results.columns:
+        plt.plot(
+            summary.df_results["sor#"],
+            summary.df_results["linear_model_output_wls"],
+            color="orange",
+            linestyle="-.",
+            label="Linear Model (WLS)",
+        )
+    if (
+        include_wls_overlay
+        and "quadratic_model_output_wls" in summary.df_results.columns
+    ):
+        plt.plot(
+            summary.df_results["sor#"],
+            summary.df_results["quadratic_model_output_wls"],
+            color="violet",
+            linestyle="-.",
+            label="Quadratic Model (WLS)",
+        )
+
+    # Cost per run curves (OLS)
     plt.plot(
         summary.df_results["sor#"],
         summary.df_results["cost_per_run_at_fort_lin"],
         color="green",
         linestyle="--",
-        label="Cost/Run @ FORT (Linear)",
+        label="Cost/Run @ FORT (Linear, OLS)",
     )
     plt.plot(
         summary.df_results["sor#"],
         summary.df_results["cost_per_run_at_fort_quad"],
         color="blue",
         linestyle="--",
-        label="Cost/Run @ FORT (Quadratic)",
+        label="Cost/Run @ FORT (Quadratic, OLS)",
     )
 
-    # Min cost verticals
+    # WLS cost-per-run overlays if requested and available
+    if (
+        include_wls_overlay
+        and "cost_per_run_at_fort_lin_wls" in summary.df_results.columns
+    ):
+        plt.plot(
+            summary.df_results["sor#"],
+            summary.df_results["cost_per_run_at_fort_lin_wls"],
+            color="lime",
+            linestyle=":",
+            label="Cost/Run @ FORT (Linear, WLS)",
+        )
+    if (
+        include_wls_overlay
+        and "cost_per_run_at_fort_quad_wls" in summary.df_results.columns
+    ):
+        plt.plot(
+            summary.df_results["sor#"],
+            summary.df_results["cost_per_run_at_fort_quad_wls"],
+            color="cyan",
+            linestyle=":",
+            label="Cost/Run @ FORT (Quadratic, WLS)",
+        )
+
+    # Min cost verticals (OLS)
     plt.axvline(
         x=summary.sor_min_cost_lin,
         color="green",
         linestyle="--",
-        label="Min Cost (Linear)",
+        label="Min Cost (Linear, OLS)",
     )
     plt.axvline(
         x=summary.sor_min_cost_quad,
         color="blue",
         linestyle="--",
-        label="Min Cost (Quadratic)",
+        label="Min Cost (Quadratic, OLS)",
     )
+
+    # Min cost verticals (WLS) if requested and present
+    if include_wls_overlay and summary.sor_min_cost_lin_wls is not None:
+        plt.axvline(
+            x=summary.sor_min_cost_lin_wls,
+            color="lime",
+            linestyle=":",
+            label="Min Cost (Linear, WLS)",
+        )
+    if include_wls_overlay and summary.sor_min_cost_quad_wls is not None:
+        plt.axvline(
+            x=summary.sor_min_cost_quad_wls,
+            color="cyan",
+            linestyle=":",
+            label="Min Cost (Quadratic, WLS)",
+        )
 
     plt.xlabel("Sequential Online Run #")
     plt.ylabel("Adjusted Run Time")
-    plt.title("Plot with Linear and Quadratic Models")
+    plt.title("Plot with Linear/Quadratic Models (OLS) + optional WLS overlay")
     plt.legend()
 
     plt.savefig(output_svg, format="svg")
@@ -1334,6 +1437,7 @@ def main() -> None:
         delta_mode=DeltaMode.PREVIOUS_CHUNK,
         exclude_timestamp_ranges=None,  # [("20250801124409", "20250805165454")],
         verbose_filtering=True,
+        include_wls_overlay=True,
     )
 
     # Build hashing payload (simplified: path + effective parameters)
@@ -1358,15 +1462,27 @@ def main() -> None:
     summary = summarize_and_model(transformed.df_range, params_transform)
     print(f"Regression Diagnostics:\n{summary.regression_diagnostics}")
     print("\n\n")
-    print(f"Summary\n{summary.df_summary}")
+    print(f"Summary:\n{summary.df_summary}")
     print("\n\n")
-    print(f"Minimum cost per run at fort (linear): sor# {summary.sor_min_cost_lin}")
-    print(f"Minimum cost per run at fort (quadratic): sor# {summary.sor_min_cost_quad}")
+    print(f"Predictions:\n{summary.df_results}")
+    print("\n\n")
+    print(
+        "FORT for minimum cost/run:\n"
+        f"  (OLS linear): {summary.sor_min_cost_lin}\n"
+        f"  (OLS quadratic): {summary.sor_min_cost_quad}\n"
+        f"  (WLS linear): {summary.sor_min_cost_lin_wls}\n"
+        f"  (WLS quadratic): {summary.sor_min_cost_quad_wls}\n"
+    )
     print("\n")
 
     # Suffix artifact filename with short hash
     out_svg = with_hash_suffix("plot", short_hash, ".svg")
-    _ = render_outputs(transformed.df_range, summary, output_svg=out_svg)
+    _ = render_outputs(
+        transformed.df_range,
+        summary,
+        output_svg=out_svg,
+        include_wls_overlay=params_transform.include_wls_overlay,
+    )
 
     # Build and write manifest next to artifact (current working directory)
     total_input_rows = int(len(df_range))
