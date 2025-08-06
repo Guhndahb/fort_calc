@@ -134,4 +134,10 @@ samples/
 
 # Logs
 *.log
-scatterplot.svg
+
+# Plots
+*.svg
+
+# Manifests
+manifest*.json
+

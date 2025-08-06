@@ -27,9 +27,25 @@ import statsmodels.api as sm
 try:
     # When run as a package: python -m src.main
     from .csv_processor import CSVRangeProcessor  # type: ignore
+    from .utils import (  # type: ignore
+        build_effective_parameters,
+        canonical_json_hash,
+        normalize_abs_posix,
+        utc_timestamp_seconds,
+        with_hash_suffix,
+        write_manifest,
+    )
 except ImportError:
     # When run directly: python src/main.py
     from csv_processor import CSVRangeProcessor  # type: ignore
+    from utils import (  # type: ignore
+        build_effective_parameters,
+        canonical_json_hash,
+        normalize_abs_posix,
+        utc_timestamp_seconds,
+        with_hash_suffix,
+        write_manifest,
+    )
 
 # Configure logging for debugging
 logging.basicConfig(
@@ -1046,7 +1062,7 @@ def summarize_and_model(
 def render_outputs(
     df_range: pd.DataFrame,
     summary: SummaryModelOutputs,
-    output_svg: str = "scatterplot.svg",
+    output_svg: str = "plot.svg",
 ) -> str:
     """
     Pure renderer: builds the plot and returns the output path.
@@ -1108,7 +1124,7 @@ def render_outputs(
 
     plt.xlabel("Sequential Online Run #")
     plt.ylabel("Adjusted Run Time")
-    plt.title("Scatterplot with Linear and Quadratic Models")
+    plt.title("Plot with Linear and Quadratic Models")
     plt.legend()
 
     plt.savefig(output_svg, format="svg")
@@ -1135,6 +1151,16 @@ def main():
         verbose_filtering=True,
     )
 
+    # Build hashing payload (simplified: path + effective parameters)
+
+    abs_input_posix = normalize_abs_posix(params_load.log_path)
+    effective_params = build_effective_parameters(params_load, params_transform)
+    canonical_payload = {
+        "absolute_input_path": abs_input_posix,
+        "effective_parameters": effective_params,
+    }
+    short_hash, full_hash = canonical_json_hash(canonical_payload)
+
     # Orchestration (side-effect free besides plot file write in render)
     df_range = load_and_slice_csv(params_load)
     print("\n\n")
@@ -1151,7 +1177,32 @@ def main():
     print(f"Minimum cost per run at fort (quadratic): sor# {summary.sor_min_cost_quad}")
     print("\n")
 
-    _ = render_outputs(transformed.df_range, summary, output_svg="scatterplot.svg")
+    # Suffix artifact filename with short hash
+    out_svg = with_hash_suffix("plot", short_hash, ".svg")
+    _ = render_outputs(transformed.df_range, summary, output_svg=out_svg)
+
+    # Build and write manifest next to artifact (current working directory)
+    total_input_rows = int(len(df_range))
+    processed_row_count = int(len(transformed.df_range))
+    excluded_row_count = int(len(transformed.df_excluded))
+    exclusion_reasons = f"timestamp_range_excluded_rows={total_input_rows - len(df_range)}; zscore_excluded_rows={excluded_row_count}"
+    # Note: timestamp exclusion count cannot be derived post-hoc without deeper plumbing; keep simple summary.
+
+    manifest = {
+        "version": "1",
+        "timestamp_utc": utc_timestamp_seconds(),
+        "absolute_input_path": abs_input_posix,
+        "total_input_rows": total_input_rows,
+        "processed_row_count": processed_row_count,
+        "excluded_row_count": excluded_row_count,
+        "exclusion_reasons": f"zscore_excluded_rows={excluded_row_count}",
+        "effective_parameters": effective_params,
+        "canonical_hash": full_hash,
+        "canonical_hash_short": short_hash,
+        "artifacts": {"plot_svg": out_svg},
+    }
+    manifest_name = f"manifest-{short_hash}.json"
+    write_manifest(manifest_name, manifest)
 
 
 if __name__ == "__main__":
