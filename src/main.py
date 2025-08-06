@@ -2021,12 +2021,100 @@ def assemble_text_report(
     """
     Create a concise, readable report. Keeps current information content but in one place.
     """
-    # 1) Prepare base sections (input head, filtered head)
+    # 1) Prepare base sections (input head/tail, filtered head/tail)
     parts: list[str] = []
     parts.append("\n")
-    parts.append(f"Input data (head):\n{input_df.head()}")
+
+    def _fmt_head_tail(df: pd.DataFrame, n: int = 10) -> str:
+        """
+        Render head and tail with original headers and no index.
+        If rows <= 2n, show only head to avoid duplication.
+        """
+        if df.empty:
+            return "(no rows)"
+        head_txt = df.head(n).to_string(index=False)
+        tail_txt = df.tail(n).to_string(index=False)
+        if len(df) <= 2 * n:
+            return head_txt
+        return f"{head_txt}\n...\n{tail_txt}"
+
+    parts.append(f"Input data (head/tail):\n{_fmt_head_tail(input_df, n=5)}")
     parts.append("\n")
-    parts.append(f"Filtered data (head):\n{transformed.df_range.head()}")
+    parts.append(
+        f"Filtered data (head/tail):\n{_fmt_head_tail(transformed.df_range, n=5)}"
+    )
+    parts.append("\n")
+    parts.append(
+        f"Excluded data (head/tail):\n{_fmt_head_tail(transformed.df_excluded, n=5)}"
+    )
+    parts.append("\n")
+
+    # 1.5) Insert model results preview (head and tail) with shortened headers
+    def _shorten_headers(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Return a shallow header-renamed view for display only.
+        This does not mutate the original DataFrame.
+        """
+        rename_map = {
+            "sor#": "sor",
+            "linear_model_output": "lin",
+            "quadratic_model_output": "quad",
+            "linear_model_output_wls": "lin_wls",
+            "quadratic_model_output_wls": "quad_wls",
+            "sum_lin": "Σlin",
+            "sum_quad": "Σquad",
+            "sum_lin_wls": "Σlin_wls",
+            "sum_quad_wls": "Σquad_wls",
+            "cost_per_run_at_fort_lin": "cpr_lin",
+            "cost_per_run_at_fort_quad": "cpr_quad",
+            "cost_per_run_at_fort_lin_wls": "cpr_lin_wls",
+            "cost_per_run_at_fort_quad_wls": "cpr_quad_wls",
+        }
+        # Only rename columns that exist to avoid KeyError
+        present = {k: v for k, v in rename_map.items() if k in df.columns}
+        return df.rename(columns=present)
+
+    def _fmt_table(df: pd.DataFrame, n: int = 10) -> str:
+        """
+        Render head and tail with no index for compactness.
+        """
+        if df.empty:
+            return "(no rows)"
+        df_disp = _shorten_headers(df)
+        head_txt = df_disp.head(n).to_string(index=False)
+        tail_txt = df_disp.tail(n).to_string(index=False)
+        # If total rows <= 2n, head and tail overlap; show only head
+        if len(df) <= 2 * n:
+            return head_txt
+        return f"{head_txt}\n...\n{tail_txt}"
+
+    parts.append("Model results (head/tail):")
+    parts.append(_fmt_table(summary.df_results, n=5))
+    parts.append("\n")
+
+    # 1.6) Insert summary of run-time by SOR range (df_summary) right after results
+    def _shorten_summary_headers(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Display-only header shortening for df_summary.
+        """
+        rename_map = {
+            "sorr_start": "start",
+            "sorr_end": "end",
+            "run_time_mean": "rt_mean",
+            "run_time_delta": "rt_delta",
+        }
+        present = {k: v for k, v in rename_map.items() if k in df.columns}
+        return df.rename(columns=present)
+
+    def _fmt_summary(df: pd.DataFrame) -> str:
+        if df.empty:
+            return "(no summary rows)"
+        df_disp = _shorten_summary_headers(df)
+        # Show full summary; it's only a handful of rows (<=5)
+        return df_disp.to_string(index=False)
+
+    parts.append("Run-time summary by SOR range:")
+    parts.append(_fmt_summary(summary.df_summary))
     parts.append("\n")
 
     # 2) Trim the selected-model tail from the model comparison table
