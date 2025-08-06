@@ -525,8 +525,8 @@ def filter_timestamp_ranges(
                 )
         exclude_mask |= range_mask
 
-    # Apply filtering (this returns a view/copy as per pandas semantics, but we avoid an explicit copy())
-    filtered_df = df.loc[~exclude_mask]
+    # Apply filtering and explicitly create an independent copy to avoid SettingWithCopy warnings downstream
+    filtered_df = df.loc[~exclude_mask].copy()
 
     # Populate diagnostics
     excluded_rows = int(exclude_mask.sum())
