@@ -135,7 +135,7 @@ class FilterResult:
     def set_skipped(self, reason: str) -> None:
         """Mark the step as skipped with a reason."""
         self.skipped_reason = reason
-        self.add_warning(f"Step skipped: {reason}")
+        self.add_event(f"Step skipped: {reason}")
 
     def summarize(self) -> str:
         """Produce a concise summary string for diagnostics."""
@@ -497,6 +497,8 @@ def filter_timestamp_ranges(
 
     # Verify timestamp column is properly parsed as datetime
     if not pd.api.types.is_datetime64_any_dtype(df[timestamp_column]):
+        # Preserve explicit diagnostic message for tests that assert on it
+        logger.info(f"timestamp column '{timestamp_column}' is not in datetime format")
         result.set_skipped(
             f"timestamp column '{timestamp_column}' is not in datetime format"
         )
@@ -2034,7 +2036,6 @@ def assemble_text_report(
         f"  (WLS linear): {summary.sor_min_cost_lin_wls}\n"
         f"  (WLS quadratic): {summary.sor_min_cost_quad_wls}\n"
     )
-    parts.append("\n")
     return "\n".join(parts)
 
 

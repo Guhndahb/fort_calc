@@ -118,6 +118,10 @@ class TestFilterTimestampRangesBehavior:
 
     def test_non_datetime_timestamp_column_causes_skip(self, caplog):
         # If timestamp column not datetime dtype, filter should skip and return original (per contract)
+        # Ensure INFO logs are captured for the skip message emitted by filter_timestamp_ranges
+        import logging
+
+        caplog.set_level(logging.INFO)
         df = pd.DataFrame(
             {
                 "timestamp": ["20250101000001", "20250101000002"],
