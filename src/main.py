@@ -925,15 +925,16 @@ def regression_analysis(
 
     Behavior:
     - Trains baseline OLS models for both linear and quadratic specifications.
-    - Additionally trains WLS variants and returns their predictions alongside OLS.
+    - Replaces the previous fixed WLS (1/(sor#^2)) with empirical WLS that estimates a variance-power p̂
+      from OLS residuals via a log–log regression of residual^2 on sor#.
     - Builds prediction matrices with named columns and explicit constant handling
       via statsmodels add_constant(has_constant='add') to avoid column-order issues.
 
     Variants included in diagnostics:
-      - 'ols':     Baseline OLS
-      - 'ols_hc1': OLS with heteroskedasticity-robust covariance (HC1)
-      - 'wls':     Weighted Least Squares with weights 1 / (sor#^2)
-      - 'wls_hc1': WLS with HC1 robust covariance
+      - 'ols':        Baseline OLS
+      - 'ols_hc1':    OLS with heteroskedasticity-robust covariance (HC1)
+      - 'wls_emp':    Empirical WLS with weights 1 / (sor#^p̂)
+      - 'wls_emp_hc1':Empirical WLS with HC1 robust covariance
 
     Returns:
       tuple[pd.DataFrame, dict]
@@ -943,9 +944,10 @@ def regression_analysis(
         - diagnostics: Nested dict containing model statistics for all variants.
 
     Notes:
-    - WLS weights default to 1/(sor#^2) with robust handling of zero/NaN/inf values.
-      Non-finite weights are replaced by the median finite weight; if none are finite,
-      the code falls back to uniform weights.
+    - Empirical WLS:
+        p̂ is estimated by regressing log(e_i^2 + eps) on log(sor_i) using OLS residuals e_i and a small eps to
+        avoid -inf. Weights are set to 1/(sor#^p̂). Non-finite weights are replaced by the median finite weight;
+        if none are finite, fall back to uniform weights. If estimation fails, we skip WLS_emp and record an error.
     - Robust covariance is requested via fit(cov_type="HC1").
     """
 
@@ -1054,19 +1056,49 @@ def regression_analysis(
         diagnostics.setdefault("linear", {})["ols_hc1_error"] = str(e)
         diagnostics.setdefault("quadratic", {})["ols_hc1_error"] = str(e)
 
-    # Variant: WLS and WLS with robust SEs
-    # Default weights strategy: 1 / (sor#^2) guarding zero/NaN
+    # Variant: Empirical WLS (replace fixed 1/(sor#^2))
+    # Estimate variance-power p via log(resid^2 + eps) ~ log(sor#), then weights = 1 / (sor#^p)
     linear_model_output_wls = None
     quadratic_model_output_wls = None
     try:
-        sor_vals = pd.to_numeric(df_range["sor#"], errors="coerce").to_numpy()
+        sor_vals = pd.to_numeric(df_range["sor#"], errors="coerce").to_numpy(
+            dtype=float
+        )
+
+        # Choose residuals from the model whose mean structure we'll weight.
+        # Use quadratic residuals to allow curvature; fallback to linear if needed.
+        resid_source = quad_ols.resid if hasattr(quad_ols, "resid") else lin_ols.resid
+        resid = np.asarray(resid_source, dtype=float)
+
+        # Build design for variance-power regression: z = log(resid^2 + eps), x = log(sor)
+        eps = 1e-12
+        with np.errstate(invalid="ignore", divide="ignore"):
+            z = np.log(np.square(resid) + eps)
+            x = np.log(sor_vals)
+
+        # Keep only finite pairs and sor_vals > 0
+        mask = np.isfinite(z) & np.isfinite(x) & (sor_vals > 0)
+        if mask.sum() < 3:
+            raise ValueError("Insufficient finite points to estimate variance power")
+
+        X_var = sm.add_constant(x[mask], has_constant="add")
+        var_fit = sm.OLS(z[mask], X_var).fit()
+        p_hat = (
+            float(var_fit.params[1])
+            if len(var_fit.params) >= 2
+            else float(var_fit.params[0])
+        )
+
+        # Compute empirical weights: w = 1 / (sor#^p_hat)
         with np.errstate(divide="ignore", invalid="ignore"):
             w = 1.0 / np.where(
-                np.isfinite(sor_vals) & (sor_vals > 0), sor_vals**2, np.nan
+                np.isfinite(sor_vals) & (sor_vals > 0),
+                np.power(sor_vals, p_hat),
+                np.nan,
             )
-        # Replace NaN/Inf weights with median of finite weights to keep WLS stable
+
+        # Replace NaN/Inf weights with median finite weight to keep WLS stable
         if not np.isfinite(w).any():
-            # Fallback: all invalid -> uniform weights
             w = np.ones_like(sor_vals, dtype=float)
         else:
             finite_mask = np.isfinite(w)
@@ -1077,18 +1109,22 @@ def regression_analysis(
                 median_w if np.isfinite(median_w) and median_w > 0 else 1.0,
             )
 
+        # Fit empirical WLS
         lin_wls = sm.WLS(y, X_linear_train, weights=w).fit()
         quad_wls = sm.WLS(y, X_quadratic_train, weights=w).fit()
+        # Backward-compatible keys expected by tests: expose empirical WLS under 'wls' and 'wls_hc1'
         diagnostics["linear"]["wls"] = {
             **_stats_dict(lin_wls),
-            "weights_spec": "1/(sor#^2)",
+            "weights_spec": f"1/(sor#^{p_hat:.6g})",
+            "p_hat": p_hat,
         }
         diagnostics["quadratic"]["wls"] = {
             **_stats_dict(quad_wls),
-            "weights_spec": "1/(sor#^2)",
+            "weights_spec": f"1/(sor#^{p_hat:.6g})",
+            "p_hat": p_hat,
         }
 
-        # Attach AIC/BIC for WLS fits
+        # Attach AIC/BIC for empirical WLS fits
         try:
             diagnostics["linear"]["wls"]["aic"] = float(lin_wls.aic)
             diagnostics["linear"]["wls"]["bic"] = float(lin_wls.bic)
@@ -1102,19 +1138,21 @@ def regression_analysis(
                 _e_aicbic_quad_wls
             )
 
-        # Compute in-sample RMSEs for WLS fits using unweighted residuals for comparability
+        # In-sample RMSEs using unweighted residuals for comparability
         try:
             resid_lin_wls = y - lin_wls.fittedvalues
             resid_quad_wls = y - quad_wls.fittedvalues
-            rmse_lin_wls = float(np.sqrt(np.mean(np.square(resid_lin_wls))))
-            rmse_quad_wls = float(np.sqrt(np.mean(np.square(resid_quad_wls))))
-            diagnostics["linear"]["wls"]["RMSE"] = rmse_lin_wls
-            diagnostics["quadratic"]["wls"]["RMSE"] = rmse_quad_wls
+            diagnostics["linear"]["wls"]["RMSE"] = float(
+                np.sqrt(np.mean(np.square(resid_lin_wls)))
+            )
+            diagnostics["quadratic"]["wls"]["RMSE"] = float(
+                np.sqrt(np.mean(np.square(resid_quad_wls)))
+            )
         except Exception as _e_rmse_wls:
             diagnostics["linear"]["wls"]["rmse_exception"] = str(_e_rmse_wls)
             diagnostics["quadratic"]["wls"]["rmse_exception"] = str(_e_rmse_wls)
 
-        # Align prediction matrices for WLS models (same exog names)
+        # Predictions (align exog)
         X_linear_pred_wls = X_linear_pred.reindex(columns=lin_wls.model.exog_names)
         X_quadratic_pred_wls = X_quadratic_pred.reindex(
             columns=quad_wls.model.exog_names
@@ -1122,17 +1160,19 @@ def regression_analysis(
         linear_model_output_wls = lin_wls.predict(X_linear_pred_wls)
         quadratic_model_output_wls = quad_wls.predict(X_quadratic_pred_wls)
 
-        # WLS + robust SEs (HC1)
+        # Empirical WLS + robust SEs (HC1)
         try:
             lin_wls_hc1 = sm.WLS(y, X_linear_train, weights=w).fit(cov_type="HC1")
             quad_wls_hc1 = sm.WLS(y, X_quadratic_train, weights=w).fit(cov_type="HC1")
             diagnostics["linear"]["wls_hc1"] = {
                 **_stats_dict(lin_wls_hc1),
-                "weights_spec": "1/(sor#^2)",
+                "weights_spec": f"1/(sor#^{p_hat:.6g})",
+                "p_hat": p_hat,
             }
             diagnostics["quadratic"]["wls_hc1"] = {
                 **_stats_dict(quad_wls_hc1),
-                "weights_spec": "1/(sor#^2)",
+                "weights_spec": f"1/(sor#^{p_hat:.6g})",
+                "p_hat": p_hat,
             }
         except Exception as e:
             diagnostics["linear"]["wls_hc1_error"] = str(e)
@@ -1668,8 +1708,8 @@ def main() -> None:
     rows_spec = [
         ("OLS Linear", ("linear", "ols")),
         ("OLS Quadratic", ("quadratic", "ols")),
-        ("WLS Linear", ("linear", "wls")),
-        ("WLS Quadratic", ("quadratic", "wls")),
+        ("WLS Linear (empirical)", ("linear", "wls")),
+        ("WLS Quadratic (empirical)", ("quadratic", "wls")),
     ]
 
     # Build rows with requested metrics
