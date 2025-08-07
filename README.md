@@ -1,6 +1,6 @@
 # Idle Champions Optimal FORT Calculator
 
-Estimate the optimal number of online runs before performing an offline restart (FORT) to minimize average time per run in a repeated process whose run-time tends to grow with continued online runs. The system uses regression to smooth noisy run durations, estimates the offline restart cost from data, and selects the FORT that minimizes:
+Estimate the optimal number of online runs before performing a restart (FORT) to minimize average time per run in a repeated process whose run-time tends to grow with continued online runs. The system uses regression to smooth noisy run durations, estimates the offline restart cost from data, and selects the FORT that minimizes:
 
 average_cost(k) = (sum of predicted online run times for runs 1..k + offline_cost) / k
 
