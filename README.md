@@ -1,0 +1,223 @@
+# Idle Champions Optimal FORT Calculator
+
+Estimate the optimal number of online runs before performing an offline restart (FORT) to minimize average time per run in a repeated process whose run-time tends to grow with continued online runs. The system uses regression to smooth noisy run durations, estimates the offline restart cost from data, and selects the FORT that minimizes:
+
+average_cost(k) = (sum of predicted online run times for runs 1..k + offline_cost) / k
+
+The project is implemented as a pure, functional pipeline in Python with clear, testable stages:
+
+- Loading CSV slices
+- Data cleaning and transformations
+- Summarization and offline cost estimation
+- Regression modeling (OLS and empirical WLS)
+- Cost-per-run curve construction and FORT selection
+- Plot rendering and reporting
+
+## Why this matters
+
+When gem farming in Idle Champions of the Forgotten Realms, repeated online runs gradually slow down due to internal state or resource fragmentation. A restart (usually an offline Briv stack) resets those degradations but costs a fixed amount of time. You want a cadence that amortizes the restart cost against the increasing online run durations. Because measurements are noisy, we model the online trend with regression, estimate offline restart cost from observed data at the fort boundary, then compute the average cost curve to pick the best FORT.
+
+## How it works
+
+1. Load and slice CSV
+
+- Use a dedicated range reader to ingest a chosen portion of a CSV log.
+- The CSV must include columns: sor#, runticks
+- The CSV may include columns: ignore, resetticks, notes
+- The CSV may include timestamp; it is optional unless you use --exclude-range, in which case a parseable timestamp column is required
+- Additional columns will be ignored
+
+2. Transform pipeline
+
+- Clean rows marked ignore and enforce sor# bounds in [1..FORT].
+- Compute adjusted_run_time (seconds):
+  - If ignore_resetticks=True: adjusted = runticks / 1000
+  - Else: adjusted = (runticks − resetticks) / 1000
+    (This calculation is part of the transformation pipeline.)
+- If a timestamp column is present, parse to datetime with metrics for invalid timestamps.
+- Optionally remove timestamp ranges when --exclude-range is provided; valid parsed timestamps are required for this step.
+- Ensure the first notes value is present.
+- Remove outliers by z-score on adjusted_run_time while always keeping the fort row. Degenerate variance is auto-handled.
+- Enforce that at least 5 rows remain after filtering; otherwise fail early.
+
+3. Summarize and estimate offline_cost
+
+- Partition sor ∈ [1..FORT−1] into 4 bins (balanced), compute mean adjusted_run_time per bin, and create a degenerate last row for fort (sor==FORT).
+- Compute offline_cost as the last row’s run_time_delta under a selected policy; default and recommended policy is PREVIOUS_CHUNK:
+  offline_cost = mean(fort) − mean(last bin) when delta_mode==PREVIOUS_CHUNK
+- Validate the summary (no NaNs in run_time_mean, fort row present).
+
+4. Regression modeling
+
+- Fit OLS linear and quadratic models of adjusted_run_time ~ sor and adjusted_run_time ~ sor + sor^2
+- Compute diagnostics (R², Adj R², AIC, BIC, RMSE), and robust HC1 variants for reference
+- Empirical WLS: Estimate heteroskedastic variance power p̂ by regressing log(resid^2) on log(sor); then fit WLS with weights 1/(sor^p̂)
+- Predictions cover sor ∈ [1..FORT] for cost computation, while training uses the filtered data you pass in (which excludes the fort effect from the fit)
+  (Performed during the regression analysis phase.)
+
+5. Cost-per-run curve and FORT selection
+
+- Construct cumulative sums of predictions Σ(k) for k ∈ [1..FORT], add offline_cost, and divide by k
+- Compute curves for OLS linear/quadratic, and WLS linear/quadratic (if WLS converged)
+- Select the k that minimizes average cost for each model family:
+  sor_min_cost_lin, sor_min_cost_quad, sor_min_cost_lin_wls, sor_min_cost_quad_wls
+  (Computed during model summarization.)
+
+6. Plot and reporting
+
+- Flexible layer flags let you render data, predictions, cost curves, and min markers, in OLS and WLS variants.
+- Multiple plot presets are rendered with stable, descriptive filenames.
+- A manifest JSON is written with parameters, counts, and artifacts.
+- A human-readable text report is printed with data heads/tails, results, summary, and a compact model-comparison table with ranked FORTs.
+
+## Installation
+
+Python 3.10+ recommended.
+
+- Install dependencies (see pyproject.toml):
+  - pandas, numpy, matplotlib, statsmodels
+- Recommended: use a virtual environment:
+  - python -m venv .venv
+  - .venv\Scripts\activate (Windows) or source .venv/bin/activate (Unix)
+  - pip install -e .
+
+Run tests:
+
+- pytest
+
+## CLI Usage
+
+Run as a module:
+
+- python -m src.main --log-path PATH/TO/log.csv [options]
+
+Required:
+
+- --log-path: CSV file
+
+Slice options:
+
+- --start-line N, --end-line M
+- --no-header: interpret slice as no header
+
+Transform options:
+
+- --zscore-min FLOAT, --zscore-max FLOAT
+- --fort INT (input_data_fort)
+- --ignore-resetticks / --use-resetticks
+- --delta-mode {PREVIOUS_CHUNK, FIRST_CHUNK}
+- --exclude-range START,END (repeatable; format YYYYMMDDHHMMSS). Requires a timestamp column parseable to datetime.
+- --verbose-filtering
+- --no-fail-on-invalid-ts (when a timestamp column exists and --exclude-range is not used, you can relax invalid timestamp failures)
+
+Plot options:
+
+- --plot-layers PRESET_OR_FLAGS
+  - Presets: DEFAULT, ALL_OLS, ALL_WLS, ALL_PREDICTION, ALL_COST, MIN_MARKERS_ONLY, EVERYTHING
+  - Or combine atomic flags: DATA_SCATTER+OLS_PRED_LINEAR+LEGEND
+- --x-min, --x-max, --y-min, --y-max
+
+Defaults preview:
+
+- python -m src.main --print-defaults
+- Help with policy-defaults injected:
+  - python -m src.main --help
+
+Example:
+
+- python -m src.main --log-path ./ICScriptHub/log-reset.csv --fort 100 --ignore-resetticks --zscore-min -1.5 --zscore-max 3 --plot-layers DEFAULT
+
+## Input data Schema
+
+Required for core modeling:
+
+- sor#: positive integer in [1..FORT]
+- runticks: per-run time in ticks (milliseconds)
+
+Optional:
+
+- resetticks: time in ticks spent on the Modron reset; if not ignored, it is subtracted from runticks
+- timestamp: optional unless you use --exclude-range; parsing format %Y%m%d%H%M%S (as string or numeric convertible to that string form)
+- ignore: "TRUE"/"FALSE" (case-insensitive); TRUE rows are dropped
+- notes: optional; first row will be filled with <DATA START> if empty
+
+## Modeling details
+
+- OLS linear: adjusted_run_time = const + β1\*sor
+- OLS quadratic: adjusted_run_time = const + β1*sor + β2*sor^2
+- Empirical WLS:
+  - Estimate p̂ from OLS residuals via log(resid^2 + eps) ~ log(sor)
+  - Weights w = 1 / (sor^p̂), median-imputed for non-finite values
+- Robust HC1 covariance fits reported in diagnostics for OLS and WLS variants
+- Predictions span sor ∈ [1..FORT] for cost evaluation
+- Training is performed on the filtered rows you supply (which, by design, exclude the fort effect from the modeling inputs)
+
+## Offline cost estimation
+
+- Summary bins for sor ∈ [1..FORT−1] + degenerate fort row
+- Delta policy (recommended): PREVIOUS_CHUNK
+  offline_cost = mean(fort) − mean(last bin)
+- Alternative: FIRST_CHUNK
+  offline_cost = mean(fort) − mean(first bin)
+- Final offline_cost must be finite; otherwise the pipeline fails with a clear message
+
+## Decision policy and interpretations
+
+- The cost curve is often very flat near the minimum: multiple k around the min can have negligible cost differences
+- Consider using a tolerance band in practice (policy-level; not enforced by code):
+
+  - Pick the smallest k with cost ≤ 1% above the minimum to reduce risk of long online runs
+  - Add hysteresis: only change FORT when the recommended k shifts by ≥ Δk_min (e.g., 5) or when the min cost improves by ≥ 0.5–1.0%
+
+- Model selection guidance:
+
+  - Prefer the simpler model when ΔBIC ≤ 2
+  - Use WLS when p̂ is stable across runs; if unstable, OLS may be more robust
+  - If quadratic curvature implies extreme changes across 1..FORT, fall back to linear
+
+- Offline_cost robustness:
+  - Ensure adequate samples near fort and in the last bin
+  - If bins are sparse, consider adaptive bin merging to hit minimum support thresholds
+
+## Artifacts
+
+- SVG plots using the selected plot layers.
+- Manifest JSON with parameters, counts, and artifact names.
+- Text report to stdout summarizing data, results, summary, and model/FORT comparisons.
+
+## Testing
+
+The tests cover:
+
+- Cleaning and timestamp-range filtering behavior
+- Timestamp parsing diagnostics
+- Regression prediction column order
+- Plot layer parsing and suffix logic
+- Z-score edge cases
+- Regression variants and diagnostics
+
+See tests/ for details.
+
+## FAQ
+
+- Why exclude the fort run from training?
+  Because the fort run includes the offline restart cost; we want to model only the online trending behavior.
+
+- What if z-score standard deviation is zero?
+  The pipeline treats all z-scores as 0, retains only the fort row, and will fail with a “too few rows” error if insufficient data remains.
+
+- Can I switch offline delta policy?
+  Yes; set --delta-mode FIRST_CHUNK to compute offline_cost relative to the first bin mean.
+
+## Roadmap ideas
+
+- Optional adaptive binning for offline_cost stability
+- Spline/GAM model options for flexible yet smooth trends
+- Bootstrap CI for FORT to visualize uncertainty
+- Policy helpers: tolerance band selection and hysteresis built into the report
+
+## License
+
+This project is released under the CC0 1.0 Universal Public Domain Dedication.
+
+- See the local ["LICENSE"](LICENSE) file and the Creative Commons summary: ["CC0 1.0 Universal (summary)"](https://creativecommons.org/publicdomain/zero/1.0/).
