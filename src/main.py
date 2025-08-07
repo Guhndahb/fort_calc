@@ -1258,6 +1258,15 @@ def transform_pipeline(
     - delta_mode: controls how run_time_delta is computed, see DeltaMode and summarize_run_time_by_sor_range().
     - offline_cost: derived later in summarize_and_model() from the final row’s run_time_delta.
     """
+    # Fail fast on required schema: must have both 'sor#' and 'runticks'
+    required_cols = ["sor#", "runticks"]
+    missing = [c for c in required_cols if c not in df_range.columns]
+    if missing:
+        present = list(df_range.columns)
+        raise ValueError(
+            f"Missing required columns: {', '.join(missing)}. Found columns: {present}"
+        )
+
     # Build the pipeline step-by-step so we can fail-fast immediately after timestamp parsing
     df_range = df_range.pipe(
         clean_ignore,
