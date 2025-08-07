@@ -1772,6 +1772,48 @@ def render_outputs(
 # --- Helper extractions to simplify main() ---
 
 
+def render_plots(
+    list_plot_params: List[PlotParams],
+    df_included: pd.DataFrame,
+    summary: SummaryModelOutputs,
+    short_hash: str,
+    df_excluded: Optional[pd.DataFrame] = None,
+) -> list[str]:
+    """
+    Render one or more plots based on a list of PlotParams. Returns artifact paths.
+
+    Filenames:
+      - If len(list_plot_params) == 1:
+            plot-{short_hash}-{suffix}.svg
+      - Else:
+            plot-{short_hash}-{ii}-{suffix}.svg
+        where ii is 0-based, zero-padded to the width of len(list_plot_params)-1 (e.g., 01, 02).
+
+    DATA_SCATTER_EXCLUDED points are rendered only if requested by each PlotParams.
+    """
+    n = len(list_plot_params)
+    pad = max(2, len(str(max(0, n - 1)))) if n > 1 else 0
+    artifact_paths: list[str] = []
+    for idx, pp in enumerate(list_plot_params):
+        flags = pp.plot_layers
+        suffix = _plot_layers_suffix(flags)
+        if n == 1:
+            out_svg = f"plot-{short_hash}-{suffix}.svg"
+        else:
+            out_svg = f"plot-{short_hash}-{str(idx).zfill(pad)}-{suffix}.svg"
+        render_outputs(
+            df_included,
+            summary,
+            output_svg=out_svg,
+            df_excluded=df_excluded
+            if (flags & PlotLayer.DATA_SCATTER_EXCLUDED)
+            else None,
+            plot_params=pp,
+        )
+        artifact_paths.append(out_svg)
+    return artifact_paths
+
+
 def get_default_params() -> tuple[LoadSliceParams, TransformParams, PlotParams]:
     """
     Build default LoadSliceParams, TransformParams, and PlotParams.
@@ -1979,56 +2021,6 @@ def build_model_comparison(diag: dict) -> tuple[str, str]:
     lines.append("")
 
     return best_row.label, "\n".join(lines)
-
-
-def render_plot_presets(
-    df_included: pd.DataFrame,
-    summary: SummaryModelOutputs,
-    short_hash: str,
-    df_excluded: Optional[pd.DataFrame] = None,
-    plot_params: Optional[PlotParams] = None,
-) -> list[str]:
-    """
-    Render a stable set of plot presets and return artifact paths.
-
-    Parameters:
-      - df_included: included rows after filtering (transformed.df_range)
-      - summary: SummaryModelOutputs for df_included
-      - short_hash: suffix used for artifact file names
-      - df_excluded: optional excluded rows (transformed.df_excluded); used only when
-                     PlotLayer.DATA_SCATTER_EXCLUDED is set in a preset
-      - plot_params: Optional PlotParams to thread axis limits to each preset; only
-                     plot_layers from the presets are used for layers, while axis bounds
-                     come from plot_params if provided.
-    """
-    presets_to_render = [
-        PlotLayer.DATA_SCATTER | PlotLayer.ALL_PREDICTION,
-        PlotLayer.ALL_COST | PlotLayer.MIN_MARKERS_ONLY,
-        PlotLayer.ALL_SCATTER,
-    ]
-    artifact_paths: list[str] = []
-    for flags in presets_to_render:
-        layer_suffix = _plot_layers_suffix(flags)
-        out_svg = f"plot-{short_hash}-{layer_suffix}.svg"
-        # Build a per-call PlotParams that uses preset flags with optional bounds
-        pp = plot_params if plot_params is not None else None
-        render_outputs(
-            df_included,
-            summary,
-            output_svg=out_svg,
-            df_excluded=df_excluded,
-            plot_params=PlotParams(
-                plot_layers=flags,
-                x_min=pp.x_min if pp is not None else None,
-                x_max=pp.x_max if pp is not None else None,
-                y_min=pp.y_min if pp is not None else None,
-                y_max=pp.y_max if pp is not None else None,
-            )
-            if pp is not None
-            else PlotParams(plot_layers=flags),
-        )
-        artifact_paths.append(out_svg)
-    return artifact_paths
 
 
 def build_manifest_dict(
@@ -2319,7 +2311,7 @@ def assemble_text_report(
 def _orchestrate(
     params_load: LoadSliceParams,
     params_transform: TransformParams,
-    params_plot: PlotParams,
+    list_plot_params: List[PlotParams],
 ) -> None:
     """
     Orchestrate the full pipeline given explicit parameter objects.
@@ -2335,12 +2327,12 @@ def _orchestrate(
 
     best_label, table_text = build_model_comparison(summary.regression_diagnostics)
 
-    artifact_paths = render_plot_presets(
-        transformed.df_range,
-        summary,
-        short_hash,
+    artifact_paths = render_plots(
+        list_plot_params=list_plot_params,
+        df_included=transformed.df_range,
+        summary=summary,
+        short_hash=short_hash,
         df_excluded=transformed.df_excluded,
-        plot_params=params_plot,
     )
 
     total_input_rows = int(len(df_range))
@@ -2678,7 +2670,8 @@ def main() -> None:
     # Regular flow: parse args (this will require --log-path) and run pipeline.
     args = parser.parse_args(argv)
     params_load, params_transform, params_plot = _args_to_params(args)
-    _orchestrate(params_load, params_transform, params_plot)
+    # Commit 1 bridge: wrap single PlotParams into a list until CLI supports multi-spec
+    _orchestrate(params_load, params_transform, [params_plot])
 
 
 if __name__ == "__main__":
