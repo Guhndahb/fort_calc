@@ -1361,8 +1361,10 @@ def summarize_and_model(
         )
     offline_cost = float(final_delta)
 
+    # Extend prediction sequence to include k == input_data_fort in evaluated curve
+    # while leaving training behavior unchanged inside regression_analysis.
     df_results, regression_diagnostics = regression_analysis(
-        df_range, params.input_data_fort - 1
+        df_range, params.input_data_fort
     )
 
     # Cumulative sums (OLS)
