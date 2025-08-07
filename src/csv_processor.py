@@ -157,21 +157,28 @@ class CSVRangeProcessor:
         try:
             start_line, end_line = self._validate_line_range(start_line, end_line)
 
-            # Calculate skiprows and nrows for efficient reading
-            skip_rows = start_line  # Skip header + (start_line - 1) data rows
+            # Number of data rows to read
             n_rows = end_line - start_line + 1
 
-            # Read only the required range
-            df = pd.read_csv(
-                self.file_path,
-                skiprows=skip_rows if not include_header else skip_rows,
-                nrows=n_rows,
-            )
-
-            # If we need header but skipped it, read it separately
-            if include_header and start_line > 1:
-                header_df = pd.read_csv(self.file_path, nrows=0)
-                df.columns = header_df.columns
+            if include_header:
+                # Preserve header row (line 0). Skip only preceding data rows (1..start_line-1).
+                skiprows = None if start_line <= 1 else range(1, start_line)
+                df = pd.read_csv(
+                    self.file_path,
+                    header=0,
+                    skiprows=skiprows,
+                    nrows=n_rows,
+                )
+            else:
+                # Exclude header. Read raw data without column names.
+                # Skip header (0) plus preceding data rows up to requested start (1..start_line).
+                skiprows = range(0, start_line + 1)
+                df = pd.read_csv(
+                    self.file_path,
+                    header=None,
+                    skiprows=skiprows,
+                    nrows=n_rows,
+                )
 
             return df
 
