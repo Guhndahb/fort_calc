@@ -127,6 +127,52 @@ Example:
 
 - python -m src.main --log-path ./ICScriptHub/log-reset.csv --fort 100 --ignore-resetticks --zscore-min -1.5 --zscore-max 3 --plot-layers DEFAULT
 
+## Plot layer flags reference
+
+Use --plot-layers with either:
+
+- A preset name; or
+- A +-joined list of flags. Matching is case-insensitive.
+
+Presets:
+
+- DEFAULT: data points, OLS predictions (linear and quadratic), OLS cost-per-run curves, OLS min-cost markers, legend
+- EVERYTHING: DEFAULT plus all WLS overlays
+- NONE: no layers (useful when you only want axis limits or a blank canvas)
+- ALL_DATA: only the data points
+- ALL_OLS: all OLS items — predictions, cost curves, min markers, legend
+- ALL_WLS: all WLS items — predictions, cost curves, min markers, legend
+- ALL_PREDICTION: only prediction lines (both OLS and WLS) with legend
+- ALL_COST: only cost-per-run curves (both OLS and WLS) with legend
+- MIN_MARKERS_ONLY: only min-cost vertical markers (both OLS and WLS) with legend
+
+Atomic flags:
+
+- DATA_SCATTER: scatter of included data points
+- DATA_SCATTER_EXCLUDED: scatter of points removed by z-score filtering (red x), shown only if you include this flag and excluded data exists
+- OLS_PRED_LINEAR: OLS linear prediction line
+- OLS_PRED_QUAD: OLS quadratic prediction line
+- OLS_COST_LINEAR: cost-per-run curve from the OLS linear model
+- OLS_COST_QUAD: cost-per-run curve from the OLS quadratic model
+- OLS_MIN_LINEAR: vertical marker at the lowest cost/run for the OLS linear model
+- OLS_MIN_QUAD: vertical marker at the lowest cost/run for the OLS quadratic model
+- WLS_PRED_LINEAR: WLS linear prediction line
+- WLS_PRED_QUAD: WLS quadratic prediction line
+- WLS_COST_LINEAR: cost-per-run curve from the WLS linear model
+- WLS_COST_QUAD: cost-per-run curve from the WLS quadratic model
+- WLS_MIN_LINEAR: vertical marker at the lowest cost/run for the WLS linear model
+- WLS_MIN_QUAD: vertical marker at the lowest cost/run for the WLS quadratic model
+- LEGEND: show the legend
+
+Examples:
+
+- Using a preset:
+  - python -m src.main --log-path ./ICScriptHub/log-reset.csv --plot-layers DEFAULT
+- Combining flags:
+  - python -m src.main --log-path ./ICScriptHub/log-reset.csv --plot-layers DATA_SCATTER+OLS_PRED_LINEAR+LEGEND
+- Showing excluded points:
+  - python -m src.main --log-path ./ICScriptHub/log-reset.csv --plot-layers DATA_SCATTER+DATA_SCATTER_EXCLUDED+ALL_WLS
+
 ## Input data Schema
 
 Required for core modeling:
