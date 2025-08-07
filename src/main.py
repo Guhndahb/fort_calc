@@ -2239,58 +2239,32 @@ def assemble_text_report(
     )
 
     # 4) Render only the four FORT lines in ranked order with dynamic right-edge alignment.
-    # Implementation per specification:
-    # - Two leading spaces before '('
-    # - Normalize labels (no "(empirical)")
-    # - Compute max label len and fixed right-edge column using max_value_width=3
-    # - Ensure at least one space after colon
-    MAX_VALUE_WIDTH = 3
-
+    # Robust alignment strategy:
+    # - Build the exact left segment that will be printed per line: f"  ({idx}) {label}: "
+    # - Compute dynamic max widths for label and value strings.
+    # - Pad so that the right-most digit of each value aligns to the same column.
     def _value_str(val: _Optional[int]) -> str:
-        # Treat '-' as width 1 for missing values
         return "-" if val is None else str(int(val))
 
-    # Prepare label/value pairs
-    pairs: list[tuple[str, str]] = []
-    labels: list[str] = []
+    # Normalize labels and precompute value strings
+    rows_disp: list[tuple[str, str]] = []
     for row in ranked:
-        disp_label = _normalize_label(row.label)
-        val_str = _value_str(row.sor_value)
-        pairs.append((disp_label, val_str))
-        labels.append(disp_label)
+        rows_disp.append((_normalize_label(row.label), _value_str(row.sor_value)))
 
-    # Compute max label length across the four rows
-    max_label_len = max((len(lbl) for lbl in labels), default=0)
-
-    # Precompute common lengths
-    len_prefix_fixed = len("  (")  # two spaces + '('
-    len_close_paren = len(")")  # 1
-    len_colon_space = len(": ")  # 2
-
-    # Determine fixed right-edge column (conceptually)
-    right_edge_col = (
-        len_prefix_fixed
-        + max_label_len
-        + len_close_paren
-        + len_colon_space
-        + MAX_VALUE_WIDTH
-    )
+    max_label_len = max((len(lbl) for lbl, _ in rows_disp), default=0)
+    max_val_width = max((len(v) for _, v in rows_disp), default=1)
 
     parts.append("\nFORTs for lowest cost/run (models ordered by fit quality)")
 
-    # Render each line with spaces so the value's right-most character lands at right_edge_col
-    for idx, (disp_label, val_str) in enumerate(pairs, start=1):
-        # Prefix each line with its 1-based rank "(n) "
-        label_with_rank = f"({idx}) {disp_label}"
-        label_len = len(label_with_rank)
-        value_width = len(val_str)  # "-" => 1, numbers in [1..3]
-        current_prefix_len = (
-            len_prefix_fixed + label_len + len_close_paren + len_colon_space
-        )
-        spaces_needed = right_edge_col - (current_prefix_len + value_width)
-        if spaces_needed < 1:
-            spaces_needed = 1  # ensure at least one space after the colon
-        parts.append(f"  {label_with_rank}:{' ' * spaces_needed}{val_str}")
+    # Render using exact left segment and computed padding
+    for idx, (disp_label, val_str) in enumerate(rows_disp, start=1):
+        left = f"  ({idx}) {disp_label}: "
+        # Base one space is included in 'left' after the colon; we only need to
+        # add extra padding so that the value's right edge aligns.
+        extra_pad = (max_label_len - len(disp_label)) + (max_val_width - len(val_str))
+        if extra_pad < 0:
+            extra_pad = 0
+        parts.append(f"{left}{' ' * extra_pad}{val_str}")
 
     return "\n".join(parts)
 
