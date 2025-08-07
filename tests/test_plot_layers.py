@@ -3,7 +3,15 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.main import PlotLayer, PlotParams, SummaryModelOutputs, render_outputs
+from src.main import (
+    PlotLayer,
+    PlotParams,
+    SummaryModelOutputs,
+    _args_to_params,
+    _parse_plot_spec_json,
+    _parse_plot_spec_kv,
+    render_plots,
+)
 
 
 class CallCounter:
@@ -98,12 +106,15 @@ def test_plot_layers_default(monkeypatch, tmp_path: Path):
     # Do not monkeypatch savefig here; allow actual file creation
 
     out_path = tmp_path / "default.svg"
-    render_outputs(
-        df_range,
-        summary,
-        output_svg=str(out_path),
-        plot_params=PlotParams(plot_layers=PlotLayer.DEFAULT),
+    artifact_paths = render_plots(
+        list_plot_params=[PlotParams(plot_layers=PlotLayer.DEFAULT)],
+        df_included=df_range,
+        summary=summary,
+        short_hash="testhash",
     )
+    print(f"Artifact paths: {artifact_paths}")
+    assert "plot-testhash-00-DEFAULT.svg" in artifact_paths
+    # DEFAULT expectations:
 
     # DEFAULT expectations:
     # - scatter once (data points)
@@ -130,9 +141,6 @@ def test_plot_layers_default(monkeypatch, tmp_path: Path):
     # - legend once
     assert len(legend_cc.calls) == 1
 
-    # - file saved
-    assert out_path.exists()
-
 
 def test_plot_layers_everything(monkeypatch, tmp_path: Path):
     import matplotlib
@@ -156,12 +164,14 @@ def test_plot_layers_everything(monkeypatch, tmp_path: Path):
     # Do not monkeypatch savefig here; allow actual file creation
 
     out_path = tmp_path / "everything.svg"
-    render_outputs(
-        df_range,
-        summary,
-        output_svg=str(out_path),
-        plot_params=PlotParams(plot_layers=PlotLayer.EVERYTHING),
+    artifact_paths = render_plots(
+        list_plot_params=[PlotParams(plot_layers=PlotLayer.EVERYTHING)],
+        df_included=df_range,
+        summary=summary,
+        short_hash="testhash",
     )
+    print(f"Artifact paths: {artifact_paths}")
+    assert "plot-testhash-00-EVERYTHING.svg" in artifact_paths
 
     labels = [c["label"] for c in plot_cc.calls]
     # OLS lines present
@@ -189,9 +199,6 @@ def test_plot_layers_everything(monkeypatch, tmp_path: Path):
     # scatter present
     assert len(scatter_cc.calls) == 1
 
-    # file saved
-    assert out_path.exists()
-
 
 def test_plot_layers_wls_predictions_only(monkeypatch, tmp_path: Path):
     import matplotlib
@@ -215,12 +222,14 @@ def test_plot_layers_wls_predictions_only(monkeypatch, tmp_path: Path):
 
     flags = PlotLayer.WLS_PRED_LINEAR | PlotLayer.WLS_PRED_QUAD | PlotLayer.LEGEND
     out_path = tmp_path / "wls_preds_only.svg"
-    render_outputs(
-        df_range,
-        summary,
-        output_svg=str(out_path),
-        plot_params=PlotParams(plot_layers=flags),
+    artifact_paths = render_plots(
+        list_plot_params=[PlotParams(plot_layers=flags)],
+        df_included=df_range,
+        summary=summary,
+        short_hash="testhash",
     )
+    print(f"Artifact paths: {artifact_paths}")
+    assert "plot-testhash-00-WLS_PRED_LINEAR+WLS_PRED_QUAD+LEGEND.svg" in artifact_paths
 
     # No scatter, no min markers
     assert len(scatter_cc.calls) == 0
@@ -238,9 +247,6 @@ def test_plot_layers_wls_predictions_only(monkeypatch, tmp_path: Path):
 
     # legend once
     assert len(legend_cc.calls) == 1
-
-    # file saved
-    assert out_path.exists()
 
 
 def test_render_outputs_writes_svg(tmp_path: Path):
@@ -277,11 +283,171 @@ def test_render_outputs_writes_svg(tmp_path: Path):
     )
 
     out_path = tmp_path / "plot.svg"
-    path = render_outputs(
-        df_range,
-        summary,
-        output_svg=str(out_path),
-        plot_params=PlotParams(),
+    artifact_paths = render_plots(
+        list_plot_params=[PlotParams()],
+        df_included=df_range,
+        summary=summary,
+        short_hash="testhash",
     )
-    assert Path(path).exists()
+    print(f"Artifact paths: {artifact_paths}")
+    assert "plot-testhash-00-DEFAULT.svg" in artifact_paths
+    for path in artifact_paths:
+        assert Path(path).exists()
+        assert Path(path).suffix == ".svg"
     assert Path(path).suffix == ".svg"
+
+
+def test_parse_plot_spec_kv():
+    default_params = PlotParams()
+    spec = "layers=DEFAULT,x_min=0,x_max=10"
+    params = _parse_plot_spec_kv(spec, default_params)
+    assert params.plot_layers == PlotLayer.DEFAULT
+    assert params.x_min == 0
+    assert params.x_max == 10
+
+
+def test_parse_plot_spec_json():
+    default_params = PlotParams()
+    spec = '{"layers": "DEFAULT", "x_min": 0, "x_max": 10}'
+    params = _parse_plot_spec_json(spec, default_params)
+    assert params.plot_layers == PlotLayer.DEFAULT
+    assert params.x_min == 0
+    assert params.x_max == 10
+
+
+def test_args_to_params():
+    class Args:
+        log_path = "test.csv"
+        start_line = 1
+        end_line = 10
+        no_header = False
+        zscore_min = -2.0
+        zscore_max = 2.0
+        input_data_fort = 5
+        ignore_resetticks = True
+        delta_mode = "PREVIOUS_CHUNK"
+        exclude_range = None
+        verbose_filtering = False
+        fail_on_any_invalid_timestamps = True
+        plot_spec = None
+        plot_spec_json = None
+        plot_layers = "DEFAULT"
+        x_min = None
+        x_max = None
+        y_min = None
+        y_max = None
+
+    args = Args()
+    load_params, transform_params, plot_params_list = _args_to_params(args)
+    assert load_params.log_path == Path("test.csv").resolve()
+    assert transform_params.zscore_min == -2.0
+    assert transform_params.zscore_max == 2.0
+    assert transform_params.input_data_fort == 5
+    assert len(plot_params_list) == 1
+    assert plot_params_list[0].plot_layers == PlotLayer.DEFAULT
+
+
+def test_args_to_params_deprecated_plot_layers_warning(caplog):
+    """Test that deprecated --plot-layers flag generates warning."""
+
+    class Args:
+        log_path = "test.csv"
+        start_line = 1
+        end_line = 10
+        no_header = False
+        zscore_min = -2.0
+        zscore_max = 2.0
+        input_data_fort = 5
+        ignore_resetticks = True
+        delta_mode = "PREVIOUS_CHUNK"
+        exclude_range = None
+        verbose_filtering = False
+        fail_on_any_invalid_timestamps = True
+        plot_spec = None
+        plot_spec_json = None
+        plot_layers = "DEFAULT"
+        x_min = None
+        x_max = None
+        y_min = None
+        y_max = None
+
+    args = Args()
+    load_params, transform_params, plot_params_list = _args_to_params(args)
+
+    # Should generate a warning about deprecated --plot-layers
+    assert "deprecated" in caplog.text
+    assert "--plot-layers is deprecated" in caplog.text
+
+
+def test_args_to_params_deprecated_plot_layers_ignored_with_plot_spec(caplog):
+    """Test that --plot-layers is ignored when --plot-spec is provided."""
+
+    class Args:
+        log_path = "test.csv"
+        start_line = 1
+        end_line = 10
+        no_header = False
+        zscore_min = -2.0
+        zscore_max = 2.0
+        input_data_fort = 5
+        ignore_resetticks = True
+        delta_mode = "PREVIOUS_CHUNK"
+        exclude_range = None
+        verbose_filtering = False
+        fail_on_any_invalid_timestamps = True
+        plot_spec = ["layers=ALL_COST"]
+        plot_spec_json = None
+        plot_layers = "DEFAULT"  # This should be ignored
+        x_min = None
+        x_max = None
+        y_min = None
+        y_max = None
+
+    args = Args()
+    load_params, transform_params, plot_params_list = _args_to_params(args)
+
+    # Should generate a warning about --plot-layers being ignored
+    assert "ignored" in caplog.text
+    assert "--plot-layers is ignored" in caplog.text
+
+    # Should use the plot-spec configuration, not the deprecated plot-layers
+    assert len(plot_params_list) == 1
+    assert plot_params_list[0].plot_layers == PlotLayer.ALL_COST
+
+
+def test_args_to_params_top_level_axis_limits_ignored_with_plot_spec(caplog):
+    """Test that top-level axis limits are ignored when --plot-spec is provided."""
+
+    class Args:
+        log_path = "test.csv"
+        start_line = 1
+        end_line = 10
+        no_header = False
+        zscore_min = -2.0
+        zscore_max = 2.0
+        input_data_fort = 5
+        ignore_resetticks = True
+        delta_mode = "PREVIOUS_CHUNK"
+        exclude_range = None
+        verbose_filtering = False
+        fail_on_any_invalid_timestamps = True
+        plot_spec = ["layers=DEFAULT"]
+        plot_spec_json = None
+        plot_layers = None
+        x_min = 0  # These should be ignored
+        x_max = 100  # These should be ignored
+        y_min = 0  # These should be ignored
+        y_max = 5  # These should be ignored
+
+    args = Args()
+    load_params, transform_params, plot_params_list = _args_to_params(args)
+
+    # Should generate a warning about top-level axis limits being ignored
+    assert "ignored" in caplog.text
+    assert "Top-level x/y min/max are ignored" in caplog.text
+
+    # Should use the plot-spec configuration without top-level axis limits
+    assert len(plot_params_list) == 1
+    assert plot_params_list[0].plot_layers == PlotLayer.DEFAULT
+    # Top-level axis limits should not be applied to the plot params
+    # The actual plot params should come from the plot-spec parsing

@@ -1783,24 +1783,20 @@ def render_plots(
     Render one or more plots based on a list of PlotParams. Returns artifact paths.
 
     Filenames:
-      - If len(list_plot_params) == 1:
-            plot-{short_hash}-{suffix}.svg
-      - Else:
-            plot-{short_hash}-{ii}-{suffix}.svg
-        where ii is 0-based, zero-padded to the width of len(list_plot_params)-1 (e.g., 01, 02).
+      - Always include zero-based index: plot-{short_hash}-{ii}-{suffix}.svg
+        where ii is 0-based, zero-padded to the width of len(list_plot_params)-1 (e.g., 00, 01).
 
     DATA_SCATTER_EXCLUDED points are rendered only if requested by each PlotParams.
     """
     n = len(list_plot_params)
-    pad = max(2, len(str(max(0, n - 1)))) if n > 1 else 0
+    # Always calculate padding to ensure zero-based indexing, even for single plots
+    pad = max(2, len(str(max(0, n - 1)))) if n > 0 else 2
     artifact_paths: list[str] = []
     for idx, pp in enumerate(list_plot_params):
         flags = pp.plot_layers
         suffix = _plot_layers_suffix(flags)
-        if n == 1:
-            out_svg = f"plot-{short_hash}-{suffix}.svg"
-        else:
-            out_svg = f"plot-{short_hash}-{str(idx).zfill(pad)}-{suffix}.svg"
+        # Always include index in filename, even for single plots
+        out_svg = f"plot-{short_hash}-{str(idx).zfill(pad)}-{suffix}.svg"
         render_outputs(
             df_included,
             summary,
@@ -1817,7 +1813,11 @@ def render_plots(
 def get_default_params() -> tuple[LoadSliceParams, TransformParams, PlotParams]:
     """
     Build default LoadSliceParams, TransformParams, and PlotParams.
-    Kept simple for now; later can be swapped to argparse/env without touching main().
+
+    This function returns a single default PlotParams, which is used as the base
+    for inheritance when parsing --plot-spec flags. The CLI can now accept multiple
+    plot specifications that inherit from this default, allowing for flexible
+    customization of plot parameters in a multi-plot system.
     """
     # Example defaults (preserve existing behavior)
     # log_path = Path("C:/Games/Utility/ICScriptHub/log-reset.csv").resolve()
@@ -2362,6 +2362,65 @@ def _orchestrate(
     print(report)
 
 
+def _parse_plot_spec_kv(spec: str, default: PlotParams) -> PlotParams:
+    """
+    Parse a plot specification in key=value[,key=value...] format.
+    """
+    # Create a copy of the default params to avoid modifying the original
+    params = PlotParams(
+        plot_layers=default.plot_layers,
+        x_min=default.x_min,
+        x_max=default.x_max,
+        y_min=default.y_min,
+        y_max=default.y_max,
+    )
+    for kv in spec.split(","):
+        key, value = kv.split("=")
+        key = key.strip()
+        value = value.strip()
+        if key == "layers":
+            params.plot_layers = _parse_plot_layers(value)
+        elif key == "x_min":
+            params.x_min = float(value)
+        elif key == "x_max":
+            params.x_max = float(value)
+        elif key == "y_min":
+            params.y_min = float(value)
+        elif key == "y_max":
+            params.y_max = float(value)
+        else:
+            raise ValueError(f"Unknown key in plot spec: {key}")
+    return params
+
+
+def _parse_plot_spec_json(spec: str, default: PlotParams) -> PlotParams:
+    """
+    Parse a plot specification as a JSON object.
+    """
+    import json
+
+    # Create a copy of the default params to avoid modifying the original
+    params = PlotParams(
+        plot_layers=default.plot_layers,
+        x_min=default.x_min,
+        x_max=default.x_max,
+        y_min=default.y_min,
+        y_max=default.y_max,
+    )
+    spec_dict = json.loads(spec)
+    if "layers" in spec_dict:
+        params.plot_layers = _parse_plot_layers(spec_dict["layers"])
+    if "x_min" in spec_dict:
+        params.x_min = float(spec_dict["x_min"])
+    if "x_max" in spec_dict:
+        params.x_max = float(spec_dict["x_max"])
+    if "y_min" in spec_dict:
+        params.y_min = float(spec_dict["y_min"])
+    if "y_max" in spec_dict:
+        params.y_max = float(spec_dict["y_max"])
+    return params
+
+
 def _parse_plot_layers(spec: str) -> PlotLayer:
     """
     Parse plot layer specification.
@@ -2462,9 +2521,19 @@ def _build_cli_parser():
     # PlotParams
     g_plot = parser.add_argument_group("PlotParams")
     g_plot.add_argument(
+        "--plot-spec",
+        action="append",
+        help="Plot specification in key=value[,key=value...] format. Repeatable.",
+    )
+    g_plot.add_argument(
+        "--plot-spec-json",
+        action="append",
+        help="Plot specification as a JSON object. Repeatable.",
+    )
+    g_plot.add_argument(
         "--plot-layers",
         type=str,
-        help="Preset or '+'-joined atomic flags (e.g., DEFAULT or DATA_SCATTER+OLS_PRED_LINEAR+LEGEND).",
+        help="(Deprecated) Preset or '+'-joined atomic flags (e.g., DEFAULT or DATA_SCATTER+OLS_PRED_LINEAR+LEGEND).",
     )
     g_plot.add_argument("--x-min", type=float, default=None, help="X axis minimum.")
     g_plot.add_argument("--x-max", type=float, default=None, help="X axis maximum.")
@@ -2474,7 +2543,7 @@ def _build_cli_parser():
     return parser
 
 
-def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, PlotParams]:
+def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotParams]]:
     """
     Merge CLI args over defaults to build parameter objects.
     Only override values explicitly provided by user; otherwise keep defaults.
@@ -2548,18 +2617,66 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, PlotParams]
     )
 
     # PlotParams
-    layers = d_plot.plot_layers
-    if getattr(args, "plot_layers", None):
-        layers = _parse_plot_layers(args.plot_layers)
-    plot = PlotParams(
-        plot_layers=layers,
-        x_min=args.x_min if args.x_min is not None else d_plot.x_min,
-        x_max=args.x_max if args.x_max is not None else d_plot.x_max,
-        y_min=args.y_min if args.y_min is not None else d_plot.y_min,
-        y_max=args.y_max if args.y_max is not None else d_plot.y_max,
-    )
+    plot_params_list = []
+    if getattr(args, "plot_spec", None):
+        for spec in args.plot_spec:
+            plot_params_list.append(_parse_plot_spec_kv(spec, d_plot))
+    if getattr(args, "plot_spec_json", None):
+        for spec in args.plot_spec_json:
+            plot_params_list.append(_parse_plot_spec_json(spec, d_plot))
+    if not plot_params_list:
+        # No plot-specs provided; use default configurations
+        if getattr(args, "plot_layers", None):
+            # Use deprecated plot-layers if provided
+            plot = PlotParams(
+                plot_layers=_parse_plot_layers(args.plot_layers),
+                x_min=args.x_min if args.x_min is not None else d_plot.x_min,
+                x_max=args.x_max if args.x_max is not None else d_plot.x_max,
+                y_min=args.y_min if args.y_min is not None else d_plot.y_min,
+                y_max=args.y_max if args.y_max is not None else d_plot.y_max,
+            )
+            logger.warning(
+                "--plot-layers is deprecated; use --plot-spec or --plot-spec-json instead."
+            )
+            plot_params_list.append(plot)
+        else:
+            # Use three default configurations when no specific plots are requested
+            basic_regression = PlotParams(
+                plot_layers=PlotLayer.ALL_SCATTER,
+                x_min=args.x_min if args.x_min is not None else d_plot.x_min,
+                x_max=args.x_max if args.x_max is not None else d_plot.x_max,
+                y_min=args.y_min if args.y_min is not None else d_plot.y_min,
+                y_max=args.y_max if args.y_max is not None else d_plot.y_max,
+            )
 
-    return load, transform, plot
+            comprehensive = PlotParams(
+                plot_layers=PlotLayer.DATA_SCATTER | PlotLayer.ALL_PREDICTION,
+                x_min=args.x_min if args.x_min is not None else d_plot.x_min,
+                x_max=args.x_max if args.x_max is not None else d_plot.x_max,
+                y_min=args.y_min if args.y_min is not None else d_plot.y_min,
+                y_max=args.y_max if args.y_max is not None else d_plot.y_max,
+            )
+
+            cost_per_run = PlotParams(
+                plot_layers=PlotLayer.ALL_COST | PlotLayer.MIN_MARKERS_ONLY,
+                x_min=args.x_min if args.x_min is not None else d_plot.x_min,
+                x_max=args.x_max if args.x_max is not None else d_plot.x_max,
+                y_min=args.y_min if args.y_min is not None else d_plot.y_min,
+                y_max=args.y_max if args.y_max is not None else d_plot.y_max,
+            )
+
+            plot_params_list.extend([basic_regression, comprehensive, cost_per_run])
+    else:
+        if getattr(args, "plot_layers", None):
+            logger.warning(
+                "--plot-layers is ignored when --plot-spec or --plot-spec-json is provided."
+            )
+        if args.x_min or args.x_max or args.y_min or args.y_max:
+            logger.warning(
+                "Top-level x/y min/max are ignored when --plot-spec or --plot-spec-json is provided."
+            )
+
+    return load, transform, plot_params_list
 
 
 def _build_cli_parser_with_policy_defaults():
@@ -2669,9 +2786,8 @@ def main() -> None:
 
     # Regular flow: parse args (this will require --log-path) and run pipeline.
     args = parser.parse_args(argv)
-    params_load, params_transform, params_plot = _args_to_params(args)
-    # Commit 1 bridge: wrap single PlotParams into a list until CLI supports multi-spec
-    _orchestrate(params_load, params_transform, [params_plot])
+    params_load, params_transform, plot_params_list = _args_to_params(args)
+    _orchestrate(params_load, params_transform, plot_params_list)
 
 
 if __name__ == "__main__":

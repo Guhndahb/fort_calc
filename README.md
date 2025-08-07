@@ -66,7 +66,8 @@ When gem farming in Idle Champions of the Forgotten Realms, repeated online runs
 6. Plot and reporting
 
 - Flexible layer flags let you render data, predictions, cost curves, and min markers, in OLS and WLS variants.
-- Multiple plot presets are rendered with stable, descriptive filenames.
+- One or more plots can be generated with customizable configurations.
+- Plot filenames are generated with stable, descriptive names based on their configurations.
 - A manifest JSON is written with parameters, counts, and artifacts.
 - A human-readable text report is printed with data heads/tails, results, summary, and a compact model-comparison table with ranked FORTs.
 
@@ -112,10 +113,17 @@ Transform options:
 
 Plot options:
 
-- --plot-layers PRESET_OR_FLAGS
+- --plot-spec key=value[,key=value...] (repeatable)
+  - layers=PRESET_OR_FLAGS
+  - x_min=FLOAT, x_max=FLOAT, y_min=FLOAT, y_max=FLOAT
+  - Example: --plot-spec layers=DEFAULT,x_min=0,x_max=100
+- --plot-spec-json JSON_OBJECT (repeatable)
+  - JSON object with keys: layers, x_min, x_max, y_min, y_max
+  - Example: --plot-spec-json '{"layers":"ALL_COST","y_min":0}'
+- --plot-layers PRESET_OR_FLAGS (deprecated)
   - Presets: DEFAULT, ALL_OLS, ALL_WLS, ALL_PREDICTION, ALL_COST, MIN_MARKERS_ONLY, EVERYTHING
   - Or combine atomic flags: DATA_SCATTER+OLS_PRED_LINEAR+LEGEND
-- --x-min, --x-max, --y-min, --y-max
+- --x-min, --x-max, --y-min, --y-max (deprecated when using --plot-spec)
 
 Defaults preview:
 
@@ -127,9 +135,14 @@ Example:
 
 - python -m src.main --log-path ./ICScriptHub/log-reset.csv --fort 100 --ignore-resetticks --zscore-min -1.5 --zscore-max 3 --plot-layers DEFAULT
 
+Multi-plot examples:
+
+- python -m src.main --log-path ./ICScriptHub/log-reset.csv --fort 100 --ignore-resetticks --zscore-min -1.5 --zscore-max 3 --plot-spec layers=DEFAULT --plot-spec layers=ALL_COST
+- python -m src.main --log-path ./ICScriptHub/log-reset.csv --fort 100 --ignore-resetticks --zscore-min -1.5 --zscore-max 3 --plot-spec layers=DEFAULT,x_min=0,x_max=100 --plot-spec-json '{"layers":"ALL_COST","y_min":0}'
+
 ## Plot layer flags reference
 
-Use --plot-layers with either:
+Use --plot-spec with layers=PRESET_OR_FLAGS or --plot-spec-json with "layers":"PRESET_OR_FLAGS" or use the deprecated --plot-layers with either:
 
 - A preset name; or
 - A +-joined list of flags. Matching is case-insensitive.
@@ -166,12 +179,18 @@ Atomic flags:
 
 Examples:
 
-- Using a preset:
+- Using a preset with deprecated --plot-layers:
   - python -m src.main --log-path ./ICScriptHub/log-reset.csv --plot-layers DEFAULT
-- Combining flags:
+- Combining flags with deprecated --plot-layers:
   - python -m src.main --log-path ./ICScriptHub/log-reset.csv --plot-layers DATA_SCATTER+OLS_PRED_LINEAR+LEGEND
-- Showing excluded points:
+- Showing excluded points with deprecated --plot-layers:
   - python -m src.main --log-path ./ICScriptHub/log-reset.csv --plot-layers DATA_SCATTER+DATA_SCATTER_EXCLUDED+ALL_WLS
+- Using new --plot-spec with key=value:
+  - python -m src.main --log-path ./ICScriptHub/log-reset.csv --plot-spec layers=DEFAULT
+- Using multiple --plot-spec flags:
+  - python -m src.main --log-path ./ICScriptHub/log-reset.csv --plot-spec layers=DEFAULT --plot-spec layers=ALL_COST,x_min=0
+- Using --plot-spec-json:
+  - python -m src.main --log-path ./ICScriptHub/log-reset.csv --plot-spec-json '{"layers":"ALL_COST","y_min":0}'
 
 ## Input data Schema
 
@@ -227,7 +246,7 @@ Optional:
 
 ## Artifacts
 
-- SVG plots using the selected plot layers.
+- SVG plots using the selected plot layers (one or more plots can be generated).
 - Manifest JSON with parameters, counts, and artifact names.
 - Text report to stdout summarizing data, results, summary, and model/FORT comparisons.
 
@@ -255,12 +274,28 @@ See tests/ for details.
 - Can I switch offline delta policy?
   Yes; set --delta-mode FIRST_CHUNK to compute offline_cost relative to the first bin mean.
 
+- How do I generate multiple plots with different configurations?
+  Use the new --plot-spec or --plot-spec-json flags to specify multiple plot configurations. Each can have its own layers and axis limits.
+
+- Why are --plot-layers and top-level axis limits deprecated?
+  The new --plot-spec and --plot-spec-json flags provide a more flexible and powerful way to configure plots. They allow for multiple plots with different configurations in a single run.
+
 ## Roadmap ideas
 
 - Optional adaptive binning for offline_cost stability
 - Spline/GAM model options for flexible yet smooth trends
 - Bootstrap CI for FORT to visualize uncertainty
 - Policy helpers: tolerance band selection and hysteresis built into the report
+
+## Multi-plot functionality
+
+The multi-plot functionality allows you to generate multiple plots with different configurations in a single run:
+
+- Use --plot-spec key=value[,key=value...] to specify plot parameters in key=value format (repeatable)
+- Use --plot-spec-json JSON_OBJECT to specify plot parameters as a JSON object (repeatable)
+- Each plot specification can have its own layers, axis limits, and other parameters
+- Multiple plots will be generated with descriptive filenames based on their configurations
+- The deprecated --plot-layers flag still works for single plot generation but is no longer recommended
 
 ## License
 
