@@ -1267,13 +1267,15 @@ def transform_pipeline(
     df_range = compute_adjusted_run_time(
         df_range, ignore_resetticks=params.ignore_resetticks
     )
-    # Convert timestamps early, once
-    df_range = convert_timestamp_column_to_datetime(
-        df_range, timestamp_column="timestamp", verbose=params.verbose_filtering
-    )
-    # Fail fast on invalid timestamps immediately after parsing (before any downstream filtering)
+    # Convert timestamps early, once — only when timestamp column exists.
+    # Timestamp is optional unless exclude_timestamp_ranges is provided.
     if "timestamp" in df_range.columns:
-        # Prefer metrics persisted by the converter for robustness against view/copy behavior
+        df_range = convert_timestamp_column_to_datetime(
+            df_range, timestamp_column="timestamp", verbose=params.verbose_filtering
+        )
+        # Fail fast on invalid timestamps only when:
+        #  - caller provided exclude ranges (we need timestamps to filter), or
+        #  - the policy explicitly asks to fail and the column exists.
         persisted_invalid = df_range.attrs.get("invalid_timestamps", None)
         persisted_total = df_range.attrs.get("invalid_timestamps_total_rows", None)
         if persisted_invalid is None:
@@ -1288,11 +1290,22 @@ def transform_pipeline(
             total_rows = int(
                 persisted_total if persisted_total is not None else len(df_range)
             )
-        if params.fail_on_any_invalid_timestamps and invalid_ts_count > 0:
+        # If exclude ranges are provided, invalid timestamps are a hard error (needed to filter).
+        if params.exclude_timestamp_ranges and invalid_ts_count > 0:
+            raise ValueError(
+                f"Invalid timestamps detected after parsing: {invalid_ts_count} of {total_rows} rows are NaT (required for exclude ranges)"
+            )
+        # Otherwise apply fail-fast policy only if explicitly requested (default True), but only matters if column exists.
+        if (
+            (not params.exclude_timestamp_ranges)
+            and params.fail_on_any_invalid_timestamps
+            and invalid_ts_count > 0
+        ):
             raise ValueError(
                 f"Invalid timestamps detected after parsing: {invalid_ts_count} of {total_rows} rows are NaT"
             )
-    # Continue with the rest of the pipeline
+    # Continue with the rest of the pipeline. filter_timestamp_ranges will itself no-op
+    # if no ranges are provided or if timestamp column is missing/not datetime.
     df_range = df_range.pipe(
         filter_timestamp_ranges,
         exclude_timestamp_ranges=params.exclude_timestamp_ranges,
