@@ -813,7 +813,7 @@ class LoadSliceParams:
 class PlotLayer(IntFlag):
     # Data
     DATA_SCATTER = 1 << 0
-    # New: Excluded-by-zscore data points (opt-in only; not included in any presets)
+    # New: Excluded-by-zscore data points
     DATA_SCATTER_EXCLUDED = 1 << 14
 
     # OLS predictions
@@ -846,6 +846,7 @@ class PlotLayer(IntFlag):
     # Presets
     NONE = 0
     ALL_DATA = DATA_SCATTER
+    ALL_SCATTER = DATA_SCATTER | DATA_SCATTER_EXCLUDED
     ALL_OLS = (
         OLS_PRED_LINEAR
         | OLS_PRED_QUAD
@@ -862,6 +863,14 @@ class PlotLayer(IntFlag):
         | WLS_COST_QUAD
         | WLS_MIN_LINEAR
         | WLS_MIN_QUAD
+        | LEGEND
+    )
+    SCATTER_PREDICTION = (
+        ALL_SCATTER
+        | OLS_PRED_LINEAR
+        | OLS_PRED_QUAD
+        | WLS_PRED_LINEAR
+        | WLS_PRED_QUAD
         | LEGEND
     )
     ALL_PREDICTION = (
@@ -1974,14 +1983,9 @@ def render_plot_presets(
                      come from plot_params if provided.
     """
     presets_to_render = [
-        PlotLayer.ALL_OLS,
-        PlotLayer.ALL_WLS,
-        (PlotLayer.ALL_OLS | PlotLayer.ALL_WLS) & ~PlotLayer.MIN_MARKERS_ONLY,
-        PlotLayer.ALL_PREDICTION | PlotLayer.LEGEND,
-        PlotLayer.ALL_WLS
-        | PlotLayer.LEGEND
-        | PlotLayer.DATA_SCATTER
-        | PlotLayer.DATA_SCATTER_EXCLUDED,
+        PlotLayer.DATA_SCATTER | PlotLayer.ALL_PREDICTION,
+        PlotLayer.ALL_COST | PlotLayer.MIN_MARKERS_ONLY,
+        PlotLayer.ALL_SCATTER,
     ]
     artifact_paths: list[str] = []
     for flags in presets_to_render:
