@@ -142,3 +142,5 @@ samples/
 # Manifests
 manifest*.json
 
+# Notes
+notes.md
