@@ -15,7 +15,7 @@ The project is implemented as a pure, functional pipeline in Python with clear, 
 
 ## Why this matters
 
-When gem farming in Idle Champions of the Forgotten Realms, repeated online runs gradually slow down due to internal state or resource fragmentation. A restart (usually an offline Briv stack) resets those degradations but costs a fixed amount of time. You want a cadence that amortizes the restart cost against the increasing online run durations. Because measurements are noisy, we model the online trend with regression, estimate offline restart cost from observed data at the fort boundary, then compute the average cost curve to pick the best FORT.
+When gem farming in Idle Champions of the Forgotten Realms, repeated online runs gradually slow down due to reasons. A restart (usually an offline Briv stack) resets those degradations but costs a fixed amount of time. You want a cadence that amortizes the restart cost against the increasing online run durations. Because measurements are noisy, we model the online trend with regression, estimate offline restart cost from observed data at the fort boundary, then compute the average cost curve to pick the best FORT.
 
 ## How it works
 
