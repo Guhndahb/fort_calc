@@ -130,10 +130,11 @@ class FilterResult:
         self.invalid_ranges.append((start, end, reason))
         logger.warning(f"Invalid timestamp range skipped: {start}-{end} - {reason}")
 
-    def set_skipped(self, reason: str) -> None:
+    def set_skipped(self, reason: str, verbose: bool = False) -> None:
         """Mark the step as skipped with a reason."""
         self.skipped_reason = reason
-        self.add_event(f"Step skipped: {reason}")
+        if verbose:
+            self.add_event(f"Step skipped: {reason}")
 
     def summarize(self) -> str:
         """Produce a concise summary string for diagnostics."""
@@ -467,7 +468,7 @@ def filter_timestamp_ranges(
 
     # Early return for empty ranges
     if not exclude_timestamp_ranges:
-        result.set_skipped("no exclude ranges provided")
+        result.set_skipped("no exclude ranges provided", verbose=verbose)
         result.filtered_rows = len(df)
         result.stop()
         if verbose:
