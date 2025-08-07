@@ -892,7 +892,7 @@ class PlotLayer(IntFlag):
         | OLS_MIN_QUAD
         | LEGEND
     )
-    EVERYTHING = DEFAULT | ALL_WLS
+    EVERYTHING = DEFAULT | ALL_WLS | DATA_SCATTER_EXCLUDED
 
 
 @dataclass
@@ -1593,8 +1593,10 @@ def render_outputs(
         plt.scatter(
             df_range["sor#"],
             df_range["adjusted_run_time"],
-            s=20,
-            color="cyan",
+            s=24,
+            color="#00FFFF",  # cyan (bright) for dark bg
+            edgecolors="#003A3A",  # subtle teal edge for separation
+            linewidths=0.3,
             label="Data Points",
         )
 
@@ -1607,10 +1609,10 @@ def render_outputs(
         plt.scatter(
             df_excluded["sor#"],
             df_excluded["adjusted_run_time"],
-            s=16,
+            s=24,
             marker="x",
-            color="red",
-            alpha=0.85,
+            color="#FF3B30",  # bright red
+            alpha=0.90,
             label="Excluded by Z-score",
         )
 
@@ -1619,14 +1621,16 @@ def render_outputs(
         plt.plot(
             summary.df_results["sor#"],
             summary.df_results["linear_model_output"],
-            color="yellow",
+            color="#FFD60A",  # bright yellow (prediction)
+            linewidth=2.2,
             label="Linear Model (OLS)",
         )
     if effective_flags & PlotLayer.OLS_PRED_QUAD:
         plt.plot(
             summary.df_results["sor#"],
             summary.df_results["quadratic_model_output"],
-            color="magenta",
+            color="#FF2DFF",  # fuchsia/magenta (prediction)
+            linewidth=2.2,
             label="Quadratic Model (OLS)",
         )
 
@@ -1637,8 +1641,9 @@ def render_outputs(
         plt.plot(
             summary.df_results["sor#"],
             summary.df_results["linear_model_output_wls"],
-            color="orange",
+            color="#FF9F0A",  # orange/amber (prediction)
             linestyle="-.",
+            linewidth=2.0,
             label="Linear Model (WLS)",
         )
     if (effective_flags & PlotLayer.WLS_PRED_QUAD) and (
@@ -1647,38 +1652,48 @@ def render_outputs(
         plt.plot(
             summary.df_results["sor#"],
             summary.df_results["quadratic_model_output_wls"],
-            color="violet",
+            color="#BF5AF2",  # violet (prediction)
             linestyle="-.",
+            linewidth=2.0,
             label="Quadratic Model (WLS)",
         )
 
-    # OLS cost per run curves
+    # Cost per run curves (solid; distinct palette from prediction lines)
+    # Define dedicated colors for cost curves to avoid overlap with prediction hues.
+    _c_cost_lin_ols = "#00FFA2"  # neon mint (distinct from yellow/orange/blue/violet)
+    _c_cost_quad_ols = "#00B3FF"  # azure
+    _c_cost_lin_wls = "#F6FF00"  # neon yellow-green
+    _c_cost_quad_wls = "#FF6BD6"  # pink
+
     if effective_flags & PlotLayer.OLS_COST_LINEAR:
         plt.plot(
             summary.df_results["sor#"],
             summary.df_results["cost_per_run_at_fort_lin"],
-            color="green",
-            linestyle="--",
+            color=_c_cost_lin_ols,
+            linestyle="-",  # solid per request
+            linewidth=2.2,
             label="Cost/Run @ FORT (Linear, OLS)",
         )
     if effective_flags & PlotLayer.OLS_COST_QUAD:
         plt.plot(
             summary.df_results["sor#"],
             summary.df_results["cost_per_run_at_fort_quad"],
-            color="blue",
-            linestyle="--",
+            color=_c_cost_quad_ols,
+            linestyle="-",  # solid per request
+            linewidth=2.2,
             label="Cost/Run @ FORT (Quadratic, OLS)",
         )
 
-    # WLS cost-per-run curves
+    # WLS cost-per-run curves (solid)
     if (effective_flags & PlotLayer.WLS_COST_LINEAR) and (
         "cost_per_run_at_fort_lin_wls" in summary.df_results.columns
     ):
         plt.plot(
             summary.df_results["sor#"],
             summary.df_results["cost_per_run_at_fort_lin_wls"],
-            color="lime",
-            linestyle=":",
+            color=_c_cost_lin_wls,
+            linestyle="-",  # solid per request
+            linewidth=2.2,
             label="Cost/Run @ FORT (Linear, WLS)",
         )
     if (effective_flags & PlotLayer.WLS_COST_QUAD) and (
@@ -1687,35 +1702,38 @@ def render_outputs(
         plt.plot(
             summary.df_results["sor#"],
             summary.df_results["cost_per_run_at_fort_quad_wls"],
-            color="cyan",
-            linestyle=":",
+            color=_c_cost_quad_wls,
+            linestyle="-",  # solid per request
+            linewidth=2.2,
             label="Cost/Run @ FORT (Quadratic, WLS)",
         )
 
-    # Min cost verticals (OLS)
+    # Min cost verticals: dotted lines using the SAME colors as their corresponding cost curves
     if effective_flags & PlotLayer.OLS_MIN_LINEAR:
         plt.axvline(
             x=summary.sor_min_cost_lin,
-            color="green",
-            linestyle="--",
+            color=_c_cost_lin_ols,
+            linestyle=":",  # dotted per request
+            linewidth=2.0,
             label="Min Cost (Linear, OLS)",
         )
     if effective_flags & PlotLayer.OLS_MIN_QUAD:
         plt.axvline(
             x=summary.sor_min_cost_quad,
-            color="blue",
-            linestyle="--",
+            color=_c_cost_quad_ols,
+            linestyle=":",  # dotted per request
+            linewidth=2.0,
             label="Min Cost (Quadratic, OLS)",
         )
 
-    # Min cost verticals (WLS) if present
     if (effective_flags & PlotLayer.WLS_MIN_LINEAR) and (
         summary.sor_min_cost_lin_wls is not None
     ):
         plt.axvline(
             x=summary.sor_min_cost_lin_wls,
-            color="lime",
-            linestyle=":",
+            color=_c_cost_lin_wls,
+            linestyle=":",  # dotted per request
+            linewidth=2.0,
             label="Min Cost (Linear, WLS)",
         )
     if (effective_flags & PlotLayer.WLS_MIN_QUAD) and (
@@ -1723,8 +1741,9 @@ def render_outputs(
     ):
         plt.axvline(
             x=summary.sor_min_cost_quad_wls,
-            color="cyan",
-            linestyle=":",
+            color=_c_cost_quad_wls,
+            linestyle=":",  # dotted per request
+            linewidth=2.0,
             label="Min Cost (Quadratic, WLS)",
         )
 
