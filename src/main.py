@@ -1725,10 +1725,10 @@ def get_default_params() -> tuple[LoadSliceParams, TransformParams, PlotParams]:
     Kept simple for now; later can be swapped to argparse/env without touching main().
     """
     # Example defaults (preserve existing behavior)
-    log_path = Path("C:/Games/Utility/ICScriptHub/log-reset.csv").resolve()
+    # log_path = Path("C:/Games/Utility/ICScriptHub/log-reset.csv").resolve()
     load = LoadSliceParams(
-        log_path=log_path,
-        start_line=4883,
+        log_path=None,
+        start_line=None,
         end_line=None,
         include_header=True,
     )
@@ -2374,6 +2374,7 @@ def _build_cli_parser():
     parser = argparse.ArgumentParser(
         prog="fort-calc",
         description="FORT Calculator pipeline (load -> transform -> model -> plot).",
+        # Keep formatter; defaults we inject will be shown when building a help-only parser.
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -2388,12 +2389,9 @@ def _build_cli_parser():
     g_load.add_argument(
         "--log-path", type=str, required=True, help="Path to CSV log file (required)."
     )
-    g_load.add_argument(
-        "--start-line", type=int, default=None, help="1-based inclusive start line."
-    )
-    g_load.add_argument(
-        "--end-line", type=int, default=None, help="1-based inclusive end line."
-    )
+    # Do not specify default at definition-time; we inject for help rendering only.
+    g_load.add_argument("--start-line", type=int, help="1-based inclusive start line.")
+    g_load.add_argument("--end-line", type=int, help="1-based inclusive end line.")
     g_load.add_argument(
         "--no-header",
         action="store_true",
@@ -2402,6 +2400,7 @@ def _build_cli_parser():
 
     # TransformParams
     g_tr = parser.add_argument_group("TransformParams")
+    # Do not set defaults here; we will inject for help display.
     g_tr.add_argument("--zscore-min", type=float, help="Minimum z-score bound.")
     g_tr.add_argument("--zscore-max", type=float, help="Maximum z-score bound.")
     g_tr.add_argument(
@@ -2549,66 +2548,109 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, PlotParams]
     return load, transform, plot
 
 
+def _build_cli_parser_with_policy_defaults():
+    """
+    Build a display-only parser whose defaults are injected from get_default_params()
+    so that -h/--help shows values synchronized with policy defaults. This parser is
+    used ONLY for help rendering; normal execution uses the undecorated parser
+    combined with _args_to_params() merging over get_default_params().
+    """
+    # Start from a fresh parser
+    parser = _build_cli_parser()
+
+    # Pull policy defaults
+    d_load, d_trans, d_plot = get_default_params()
+
+    # Map: CLI dest name -> default value to display
+    injected_defaults = {
+        # LoadSliceParams
+        "log_path": str(d_load.log_path),
+        "start_line": d_load.start_line,
+        "end_line": d_load.end_line,
+        "no_header": (not d_load.include_header),
+        # TransformParams
+        "zscore_min": d_trans.zscore_min,
+        "zscore_max": d_trans.zscore_max,
+        "input_data_fort": d_trans.input_data_fort,
+        "ignore_resetticks": d_trans.ignore_resetticks,
+        "delta_mode": d_trans.delta_mode.name,
+        "exclude_range": None,  # remains unset by default
+        "verbose_filtering": d_trans.verbose_filtering,
+        "fail_on_any_invalid_timestamps": d_trans.fail_on_any_invalid_timestamps,
+        # PlotParams
+        "plot_layers": _plot_layers_suffix(d_plot.plot_layers),
+        "x_min": d_plot.x_min,
+        "x_max": d_plot.x_max,
+        "y_min": d_plot.y_min,
+        "y_max": d_plot.y_max,
+        # Utility
+        "print_defaults": False,
+    }
+
+    # Apply to each action so ArgumentDefaultsHelpFormatter displays them
+    for action in parser._actions:
+        if action.dest in injected_defaults:
+            action.default = injected_defaults[action.dest]
+
+    return parser
+
+
 def main() -> None:
     """
     CLI entry point. Parses arguments, builds parameter objects, then orchestrates.
     With no CLI args, defaults from get_default_params() are used.
-
-    Behavior change:
-    - --print-defaults now works without requiring --log-path (or any other args).
-    - -h/--help remains available without other args.
-    - All other operations still require --log-path (as defined in the parser).
     """
-    # First, build a parser that DOES NOT enforce required arguments when only asking for help/defaults.
-    parser = _build_cli_parser()
-
     import sys
 
-    # Lightweight pre-scan to detect if the invocation is ONLY for help or print-defaults.
-    # If argv contains --print-defaults (and not -h/--help), we will execute that path
-    # before parse_args() enforces required options like --log-path.
     argv = sys.argv[1:]
 
-    # If user asked for help, let argparse handle it normally (it doesn't require other args).
-    if any(x in ("-h", "--help") for x in argv):
-        parser.parse_args(argv)  # triggers help and exit
+    # Help path: render help with a parser whose defaults mirror policy
+    # Accept common mistyped long forms as help, but do NOT partially match other options.
+    help_aliases = {"-h", "--help", "--he", "--hel", "--h"}
+    if any(x in help_aliases for x in argv):
+        parser_for_help = _build_cli_parser_with_policy_defaults()
+        # Print help directly to ensure ArgumentDefaultsHelpFormatter uses injected defaults
+        parser_for_help.print_help()
         return
+
+    # Build the execution parser (no injected defaults for behavior)
+    parser = _build_cli_parser()
 
     # If user requested --print-defaults, honor it without requiring --log-path.
     if "--print-defaults" in argv:
         import json
 
         d_load, d_trans, d_plot = get_default_params()
-        print(
-            json.dumps(
-                {
-                    "LoadSliceParams": {
-                        "log_path": str(d_load.log_path),
-                        "start_line": d_load.start_line,
-                        "end_line": d_load.end_line,
-                        "include_header": d_load.include_header,
-                    },
-                    "TransformParams": {
-                        "zscore_min": d_trans.zscore_min,
-                        "zscore_max": d_trans.zscore_max,
-                        "input_data_fort": d_trans.input_data_fort,
-                        "ignore_resetticks": d_trans.ignore_resetticks,
-                        "delta_mode": d_trans.delta_mode.name,
-                        "exclude_timestamp_ranges": d_trans.exclude_timestamp_ranges,
-                        "verbose_filtering": d_trans.verbose_filtering,
-                        "fail_on_any_invalid_timestamps": d_trans.fail_on_any_invalid_timestamps,
-                    },
-                    "PlotParams": {
-                        "plot_layers": _plot_layers_suffix(d_plot.plot_layers),
-                        "x_min": d_plot.x_min,
-                        "x_max": d_plot.x_max,
-                        "y_min": d_plot.y_min,
-                        "y_max": d_plot.y_max,
-                    },
-                },
-                indent=2,
-            )
-        )
+
+        # Preserve JSON types: only stringify Path when present; keep None as None (-> null)
+        log_path_json = None if d_load.log_path is None else str(d_load.log_path)
+
+        payload = {
+            "LoadSliceParams": {
+                "log_path": log_path_json,
+                "start_line": d_load.start_line,
+                "end_line": d_load.end_line,
+                "include_header": d_load.include_header,
+            },
+            "TransformParams": {
+                "zscore_min": d_trans.zscore_min,
+                "zscore_max": d_trans.zscore_max,
+                "input_data_fort": d_trans.input_data_fort,
+                "ignore_resetticks": d_trans.ignore_resetticks,
+                "delta_mode": d_trans.delta_mode.name,
+                "exclude_timestamp_ranges": d_trans.exclude_timestamp_ranges,
+                "verbose_filtering": d_trans.verbose_filtering,
+                "fail_on_any_invalid_timestamps": d_trans.fail_on_any_invalid_timestamps,
+            },
+            "PlotParams": {
+                "plot_layers": _plot_layers_suffix(d_plot.plot_layers),
+                "x_min": d_plot.x_min,
+                "x_max": d_plot.x_max,
+                "y_min": d_plot.y_min,
+                "y_max": d_plot.y_max,
+            },
+        }
+        print(json.dumps(payload, indent=2))
         return
 
     # Regular flow: parse args (this will require --log-path) and run pipeline.
