@@ -13,6 +13,7 @@ global state mutation. Logging kept for internal diagnostics but functions are p
 """
 
 import logging
+import os
 from dataclasses import dataclass, field
 from enum import Enum, IntFlag, auto
 from pathlib import Path
@@ -2614,6 +2615,11 @@ def _build_cli_parser():
         action="store_true",
         help="Print default parameter values and exit.",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show full tracebacks for debugging (also FORT_CALC_DEBUG=1).",
+    )
 
     # LoadSliceParams
     g_load = parser.add_argument_group("LoadSliceParams")
@@ -2971,8 +2977,34 @@ def main() -> None:
 
     # Regular flow: parse args (this will require --log-path) and run pipeline.
     args = parser.parse_args(argv)
+    # Enable debug mode via --debug flag or environment variable FORT_CALC_DEBUG=1
+    debug_mode = bool(
+        getattr(args, "debug", False) or os.getenv("FORT_CALC_DEBUG", "") == "1"
+    )
     params_load, params_transform, plot_params_list = _args_to_params(args)
-    _orchestrate(params_load, params_transform, plot_params_list)
+
+    if debug_mode:
+        logger.setLevel(logging.DEBUG)
+
+    try:
+        _orchestrate(params_load, params_transform, plot_params_list)
+    except (FileNotFoundError, ValueError, TypeError) as e:
+        # Concise, user-facing errors for common/user-correctable problems.
+        logger.info("User-facing error: %s", e)
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(2)
+    except Exception as e:
+        # Unexpected/internal errors: log full exception. Show traceback only when debugging.
+        logger.exception("Unhandled exception during execution")
+        if debug_mode:
+            traceback.print_exc()
+        else:
+            print(f"Unexpected error: {e}", file=sys.stderr)
+            print(
+                "Run with --debug or set FORT_CALC_DEBUG=1 to see the full traceback.",
+                file=sys.stderr,
+            )
+        sys.exit(1)
 
 
 if __name__ == "__main__":
