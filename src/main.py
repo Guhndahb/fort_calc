@@ -262,6 +262,13 @@ def fill_first_note_if_empty(df: pd.DataFrame, verbose: bool = False) -> pd.Data
             logger.info(result.summarize())
         return df
 
+    # Ensure the 'notes' column is string-like to avoid pandas dtype-conflict warnings
+    # when assigning a Python string into a column that may currently be numeric.
+    # Perform the cast only if the column is not already string-like.
+    if not pd.api.types.is_string_dtype(df["notes"]):
+        # Use pandas' nullable StringDtype for consistent text/missing semantics.
+        df["notes"] = df["notes"].astype("string")
+
     # Mutate in place only when needed
     df.at[first_idx, "notes"] = "<DATA START>"
     result.filtered_rows = len(df)
