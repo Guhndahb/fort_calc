@@ -2702,14 +2702,6 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
         else:
             # Use three default configurations when no specific plots are requested
             default_plot_0 = PlotParams(
-                plot_layers=PlotLayer.ALL_SCATTER,
-                x_min=args.x_min if args.x_min is not None else d_plot.x_min,
-                x_max=args.x_max if args.x_max is not None else d_plot.x_max,
-                y_min=args.y_min if args.y_min is not None else d_plot.y_min,
-                y_max=args.y_max if args.y_max is not None else d_plot.y_max,
-            )
-
-            default_plot_1 = PlotParams(
                 plot_layers=PlotLayer.DATA_SCATTER | PlotLayer.ALL_PREDICTION,
                 x_min=args.x_min if args.x_min is not None else d_plot.x_min,
                 x_max="OMIT_FORT",
@@ -2717,8 +2709,16 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
                 y_max=args.y_max if args.y_max is not None else d_plot.y_max,
             )
 
-            default_plot_2 = PlotParams(
+            default_plot_1 = PlotParams(
                 plot_layers=PlotLayer.ALL_COST | PlotLayer.MIN_MARKERS_ONLY,
+                x_min=args.x_min if args.x_min is not None else d_plot.x_min,
+                x_max=args.x_max if args.x_max is not None else d_plot.x_max,
+                y_min=args.y_min if args.y_min is not None else d_plot.y_min,
+                y_max=args.y_max if args.y_max is not None else d_plot.y_max,
+            )
+
+            default_plot_2 = PlotParams(
+                plot_layers=PlotLayer.ALL_SCATTER,
                 x_min=args.x_min if args.x_min is not None else d_plot.x_min,
                 x_max=args.x_max if args.x_max is not None else d_plot.x_max,
                 y_min=args.y_min if args.y_min is not None else d_plot.y_min,
