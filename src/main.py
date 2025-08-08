@@ -1996,7 +1996,7 @@ def get_default_params() -> tuple[LoadSliceParams, TransformParams, PlotParams]:
         ignore_resetticks=True,
         delta_mode=DeltaMode.PREVIOUS_CHUNK,
         exclude_timestamp_ranges=None,  # [("20250801124409", "20250805165454")],
-        verbose_filtering=True,
+        verbose_filtering=False,
     )
     plotp = PlotParams(
         plot_layers=PlotLayer.DEFAULT,

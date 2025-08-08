@@ -58,6 +58,7 @@ def _run_pipeline(
     zscore_max: float,
     input_data_fort: int,
     ignore_resetticks: bool,
+    verbose_filtering: bool,
     delta_mode: str,
 ):
     """
@@ -95,7 +96,7 @@ def _run_pipeline(
         ignore_resetticks=bool(ignore_resetticks),
         delta_mode=delta_mode_enum,
         exclude_timestamp_ranges=d_trans.exclude_timestamp_ranges,
-        verbose_filtering=False,
+        verbose_filtering=bool(verbose_filtering),
         fail_on_any_invalid_timestamps=d_trans.fail_on_any_invalid_timestamps,
     )
 
@@ -175,7 +176,9 @@ def _run_pipeline(
 
 def _build_ui():
     with gr.Blocks() as demo:
-        gr.Markdown("### FORT Calculator GUI")
+        gr.Markdown(
+            "### FORT Calculator GUI -- [GitHub repository](https://github.com/Guhndahb/fort_calc)"
+        )
         gr.HTML("""
 <style>
   /* Style the report textbox to use a popular monospace stack and allow vertical resize */
@@ -213,6 +216,7 @@ def _build_ui():
                 label="ignore_resetticks",
                 value=get_default_params()[1].ignore_resetticks,
             )
+            verbose = gr.Checkbox(label="verbose_filtering", value=False)
         with gr.Row():
             delta = gr.Radio(
                 label="delta_mode",
@@ -226,7 +230,17 @@ def _build_ui():
         output_html = gr.HTML(label="Plots")
         output_zip = gr.File(label="Download ZIP")
 
-        def _click(file_obj, s_line, e_line, zmin_v, zmax_v, fort_v, ignore_v, delta_v):
+        def _click(
+            file_obj,
+            s_line,
+            e_line,
+            zmin_v,
+            zmax_v,
+            fort_v,
+            ignore_v,
+            verbose_v,
+            delta_v,
+        ):
             # gr.File returns a dict with "name" and "tmp_path" in some versions; accept both
             path = None
             if file_obj is None:
@@ -248,6 +262,7 @@ def _build_ui():
                 zmax_v,
                 int(fort_v) if fort_v is not None else None,
                 ignore_v,
+                verbose_v,
                 delta_v,
             )
             # gr.File accepts None to indicate no file available
@@ -257,7 +272,17 @@ def _build_ui():
 
         run_button.click(
             _click,
-            inputs=[file_input, start_line, end_line, zmin, zmax, fort, ignore, delta],
+            inputs=[
+                file_input,
+                start_line,
+                end_line,
+                zmin,
+                zmax,
+                fort,
+                ignore,
+                verbose,
+                delta,
+            ],
             outputs=[output_html, output_zip, report_code],
         )
 
