@@ -146,7 +146,7 @@ manifest*.json
 notes.md
 
 # Gradio output
-gradio_runs/*
+gradio_runs**
 tmp_repro.py
 tmp_run_pipeline.py
 tmp_run_with_specs.py

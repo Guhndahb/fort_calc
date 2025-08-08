@@ -212,6 +212,51 @@ def parse_plot_specs(raw: Optional[str], default_plot: PlotParams) -> List[PlotP
     return parsed
 
 
+def _prune_old_runs(run_root: Path, keep: Optional[int] = None) -> None:
+    """
+    Retention helper: keep only the newest `keep` subdirectories under `run_root`
+    (ordered by modification time) and delete older ones.
+
+    Configuration:
+      - FORT_GRADIO_RETENTION_KEEP: optional environment variable to override default keep count.
+        If unset or invalid, defaults to 10.
+
+    Safety:
+      - Only operates inside the provided run_root directory and only removes directories.
+      - Exceptions are caught and logged to stdout as lightweight debug messages so this helper
+        never raises during the normal Gradio request flow.
+    """
+    try:
+        # Resolve keep from env if not explicitly provided
+        if keep is None:
+            try:
+                keep = int(os.getenv("FORT_GRADIO_RETENTION_KEEP", "10"))
+            except Exception:
+                keep = 10
+        if keep <= 0:
+            print(f"[DEBUG] retention keep <=0 ({keep}) -> skipping prune")
+            return
+
+        if not run_root.exists() or not run_root.is_dir():
+            return
+
+        # Collect subdirectories only
+        subdirs = [p for p in run_root.iterdir() if p.is_dir()]
+        # Sort by mtime (newest first)
+        subdirs_sorted = sorted(subdirs, key=lambda p: p.stat().st_mtime, reverse=True)
+        to_delete = subdirs_sorted[keep:]
+
+        for d in to_delete:
+            try:
+                shutil.rmtree(d)
+                print(f"[DEBUG] Pruned old run dir: {d}")
+            except Exception as e:
+                print(f"[DEBUG] Failed to prune {d}: {e}")
+
+    except Exception as e:
+        print(f"[DEBUG] Prune old runs unexpected error: {e}")
+
+
 def _run_pipeline(
     uploaded_file_path: Optional[str],
     start_line: Optional[float],
@@ -364,6 +409,15 @@ def _run_pipeline(
                 shutil.move(str(src), str(dst))
                 saved_svgs.append(dst)
         print(f"[DEBUG {_short_ts(time.time())}] Saved svgs: {saved_svgs}")
+
+        # Prune older run directories according to retention policy so public-facing UI
+        # doesn't accumulate unlimited artifacts. The helper reads FORT_GRADIO_RETENTION_KEEP
+        # (default 10) to determine how many most-recent run dirs to keep.
+        try:
+            _prune_old_runs(Path("gradio_runs"))
+        except Exception as _e_prune:
+            # Never fail the request because pruning had an issue; log lightweight debug info.
+            print(f"[DEBUG {_short_ts(time.time())}] Prune old runs error: {_e_prune}")
 
         # Create zip archive inside run_dir: plots-{short_hash}.zip
         # To avoid blocking the Gradio worker (which appeared to hang for some users),
