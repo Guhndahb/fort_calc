@@ -13,7 +13,7 @@ global state mutation. Logging kept for internal diagnostics but functions are p
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, IntFlag, auto
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -809,6 +809,9 @@ class LoadSliceParams:
     start_line: Optional[int]
     end_line: Optional[int]
     include_header: bool = True
+    # Mapping of input header name -> canonical target name.
+    # Populated from the CLI via --header-map OLD:NEW (repeatable).
+    header_map: dict[str, str] = field(default_factory=dict)
 
 
 class PlotLayer(IntFlag):
@@ -1225,6 +1228,28 @@ def load_and_slice_csv(params: LoadSliceParams) -> pd.DataFrame:
             end_line=params.end_line,
             include_header=params.include_header,
         )
+
+    # Apply optional header mapping (case-insensitive best-effort).
+    # We only rename columns that are present in the loaded frame; we warn about keys not found.
+    if getattr(params, "header_map", None):
+        original_columns = list(df_range.columns)
+        # Build lowercase lookup for provided keys
+        lower_map = {k.lower(): v for k, v in params.header_map.items()}
+        remap: dict[str, str] = {}
+        for col in original_columns:
+            mapped = lower_map.get(col.lower())
+            if mapped:
+                remap[col] = mapped
+        if remap:
+            df_range = df_range.rename(columns=remap)
+            logger.info(f"Applied header mappings: {remap}")
+        # Report any user-provided keys that did not match any column (helpful warning)
+        provided_keys = list(params.header_map.keys())
+        found_lower = {c.lower() for c in original_columns}
+        missing = [k for k in provided_keys if k.lower() not in found_lower]
+        if missing:
+            logger.warning(f"Header map keys not found in CSV columns: {missing}")
+
     if df_range.empty:
         raise ValueError("No data found in the specified range")
     return df_range
@@ -2525,6 +2550,12 @@ def _build_cli_parser():
     # Do not specify default at definition-time; we inject for help rendering only.
     g_load.add_argument("--start-line", type=int, help="1-based inclusive start line.")
     g_load.add_argument("--end-line", type=int, help="1-based inclusive end line.")
+    g_load.add_argument(
+        "--header-map",
+        action="append",
+        metavar="OLD:NEW",
+        help="Map input header OLD to canonical NEW. Repeatable; format OLD:NEW.",
+    )
     # Headers are required, let's not give users a parameter that just breaks the entire program
     # g_load.add_argument(
     #     "--no-header",
@@ -2620,6 +2651,25 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
     include_header = d_load.include_header
     if hasattr(args, "no_header") and args.no_header:
         include_header = False
+
+    # Parse header_map if provided as repeatable --header-map OLD:NEW
+    header_map: dict[str, str] = {}
+    if getattr(args, "header_map", None):
+        for item in args.header_map:
+            try:
+                old, new = item.split(":", 1)
+            except ValueError:
+                raise ValueError(
+                    f"Invalid --header-map value: '{item}'. Expected OLD:NEW"
+                )
+            old = old.strip()
+            new = new.strip()
+            if not old or not new:
+                raise ValueError(
+                    f"Invalid --header-map value: '{item}'. OLD and NEW must be non-empty"
+                )
+            header_map[old] = new
+
     load = LoadSliceParams(
         log_path=log_path,
         start_line=args.start_line
@@ -2627,6 +2677,7 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
         else d_load.start_line,
         end_line=args.end_line if args.end_line is not None else d_load.end_line,
         include_header=include_header,
+        header_map=header_map,
     )
 
     # TransformParams
