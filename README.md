@@ -75,12 +75,14 @@ When gem farming in Idle Champions of the Forgotten Realms, repeated online runs
 
 Python 3.10+ recommended.
 
-- Install dependencies (see pyproject.toml):
-  - pandas, numpy, matplotlib, statsmodels
+- Clone repo
+- Change directory into local repo
 - Recommended: use a virtual environment:
   - python -m venv .venv
-  - .venv\Scripts\activate (Windows) or source .venv/bin/activate (Unix)
-  - pip install -e .
+  - `.venv\Scripts\activate` (Windows) or `source .venv/bin/activate` (Unix)
+  - `pip install -e .`
+- Required dependencies (already completed if `pip install -e .` was performed):
+  - pandas, numpy, matplotlib, statsmodels
 
 Run tests:
 
