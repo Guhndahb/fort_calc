@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
+from matplotlib.lines import Line2D
 
 # Support both package and script execution modes
 try:
@@ -1543,6 +1544,50 @@ class PlotParams:
     y_max: Optional[float] = None
 
 
+def add_legend_extra_line(text, color=None, **legend_kwargs):
+    """
+    Add an extra text line at the end of the current Matplotlib legend without a marker.
+
+    This function appends a new, invisible legend handle with the specified text label,
+    allowing you to add custom notes or information below existing legend entries.
+    The extra line's text color can be customized.
+
+    Parameters:
+        text (str): The string to display as an additional legend entry.
+        color (str or tuple, optional): Color specification for the extra legend text.
+            If None (default), uses the default legend text color.
+        **legend_kwargs: Additional keyword arguments passed to plt.legend().
+            Useful for controlling legend appearance (e.g., handlelength, handletextpad).
+
+    Returns:
+        matplotlib.legend.Legend: The updated legend instance.
+    """
+    ax = plt.gca()
+    handles, labels = ax.get_legend_handles_labels()
+
+    # Create an invisible Line2D handle (no line, no marker)
+    invisible_handle = Line2D([], [], linestyle="None", marker=None, label=text)
+
+    handles.append(invisible_handle)
+    labels.append(text)
+
+    legend = ax.legend(handles=handles, labels=labels, **legend_kwargs)
+
+    if color:
+        legend.get_texts()[-1].set_color(color)
+
+    return legend
+
+
+def filter_omit_fort(df):
+    """
+    Return a filtered view of df excluding max 'sor#'
+    """
+    if df is None or df.empty or "sor#" not in df.columns:
+        return df
+    return df.loc[df["sor#"] != df["sor#"].max()]
+
+
 def render_outputs(
     df_range: pd.DataFrame,
     summary: SummaryModelOutputs,
@@ -1588,47 +1633,60 @@ def render_outputs(
     plt.style.use("dark_background")
     plt.figure(figsize=(10, 6))
 
+    if plot_params.x_max == "OMIT_FORT":
+        omit_fort = True
+        plot_params.x_max = None
+        df_range_filtered = filter_omit_fort(df_range)
+        df_excluded_filtered = filter_omit_fort(df_excluded)
+        df_summary_filtered = filter_omit_fort(summary.df_results)
+    else:
+        omit_fort = False
+        df_range_filtered = df_range
+        df_excluded_filtered = df_excluded
+        df_summary_filtered = summary.df_results
+
     # Data points
     if effective_flags & PlotLayer.DATA_SCATTER:
         plt.scatter(
-            df_range["sor#"],
-            df_range["adjusted_run_time"],
-            s=24,
+            df_range_filtered["sor#"],
+            df_range_filtered["adjusted_run_time"],
+            s=20,
             color="#00FFFF",  # cyan (bright) for dark bg
             edgecolors="#003A3A",  # subtle teal edge for separation
             linewidths=0.3,
             label="Data Points",
+            alpha=0.2 if omit_fort else 0.5,
         )
 
     # Excluded-by-zscore points (optional)
     if (
         (effective_flags & PlotLayer.DATA_SCATTER_EXCLUDED)
-        and (df_excluded is not None)
-        and (not df_excluded.empty)
+        and (df_excluded_filtered is not None)
+        and (not df_excluded_filtered.empty)
     ):
         plt.scatter(
-            df_excluded["sor#"],
-            df_excluded["adjusted_run_time"],
+            df_excluded_filtered["sor#"],
+            df_excluded_filtered["adjusted_run_time"],
             s=24,
             marker="x",
             color="#FF3B30",  # bright red
-            alpha=0.90,
             label="Excluded by Z-score",
+            alpha=0.70 if omit_fort else 0.90,
         )
 
     # OLS predictions
     if effective_flags & PlotLayer.OLS_PRED_LINEAR:
         plt.plot(
-            summary.df_results["sor#"],
-            summary.df_results["linear_model_output"],
+            df_summary_filtered["sor#"],
+            df_summary_filtered["linear_model_output"],
             color="#FFD60A",  # bright yellow (prediction)
             linewidth=2.2,
             label="Linear Model (OLS)",
         )
     if effective_flags & PlotLayer.OLS_PRED_QUAD:
         plt.plot(
-            summary.df_results["sor#"],
-            summary.df_results["quadratic_model_output"],
+            df_summary_filtered["sor#"],
+            df_summary_filtered["quadratic_model_output"],
             color="#FF2DFF",  # fuchsia/magenta (prediction)
             linewidth=2.2,
             label="Quadratic Model (OLS)",
@@ -1639,8 +1697,8 @@ def render_outputs(
         "linear_model_output_wls" in summary.df_results.columns
     ):
         plt.plot(
-            summary.df_results["sor#"],
-            summary.df_results["linear_model_output_wls"],
+            df_summary_filtered["sor#"],
+            df_summary_filtered["linear_model_output_wls"],
             color="#FF9F0A",  # orange/amber (prediction)
             linestyle="-.",
             linewidth=2.0,
@@ -1650,8 +1708,8 @@ def render_outputs(
         "quadratic_model_output_wls" in summary.df_results.columns
     ):
         plt.plot(
-            summary.df_results["sor#"],
-            summary.df_results["quadratic_model_output_wls"],
+            df_summary_filtered["sor#"],
+            df_summary_filtered["quadratic_model_output_wls"],
             color="#BF5AF2",  # violet (prediction)
             linestyle="-.",
             linewidth=2.0,
@@ -1667,8 +1725,8 @@ def render_outputs(
 
     if effective_flags & PlotLayer.OLS_COST_LINEAR:
         plt.plot(
-            summary.df_results["sor#"],
-            summary.df_results["cost_per_run_at_fort_lin"],
+            df_summary_filtered["sor#"],
+            df_summary_filtered["cost_per_run_at_fort_lin"],
             color=_c_cost_lin_ols,
             linestyle="-",  # solid per request
             linewidth=2.2,
@@ -1676,8 +1734,8 @@ def render_outputs(
         )
     if effective_flags & PlotLayer.OLS_COST_QUAD:
         plt.plot(
-            summary.df_results["sor#"],
-            summary.df_results["cost_per_run_at_fort_quad"],
+            df_summary_filtered["sor#"],
+            df_summary_filtered["cost_per_run_at_fort_quad"],
             color=_c_cost_quad_ols,
             linestyle="-",  # solid per request
             linewidth=2.2,
@@ -1689,8 +1747,8 @@ def render_outputs(
         "cost_per_run_at_fort_lin_wls" in summary.df_results.columns
     ):
         plt.plot(
-            summary.df_results["sor#"],
-            summary.df_results["cost_per_run_at_fort_lin_wls"],
+            df_summary_filtered["sor#"],
+            df_summary_filtered["cost_per_run_at_fort_lin_wls"],
             color=_c_cost_lin_wls,
             linestyle="-",  # solid per request
             linewidth=2.2,
@@ -1700,8 +1758,8 @@ def render_outputs(
         "cost_per_run_at_fort_quad_wls" in summary.df_results.columns
     ):
         plt.plot(
-            summary.df_results["sor#"],
-            summary.df_results["cost_per_run_at_fort_quad_wls"],
+            df_summary_filtered["sor#"],
+            df_summary_filtered["cost_per_run_at_fort_quad_wls"],
             color=_c_cost_quad_wls,
             linestyle="-",  # solid per request
             linewidth=2.2,
@@ -1753,6 +1811,8 @@ def render_outputs(
 
     if effective_flags & PlotLayer.LEGEND:
         plt.legend()
+        if omit_fort:
+            add_legend_extra_line("SOR# = FORT omitted", color="red")
 
     # Apply axis limits from PlotParams; support one-sided bounds
     plt.xlim(
@@ -2641,7 +2701,7 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
             plot_params_list.append(plot)
         else:
             # Use three default configurations when no specific plots are requested
-            basic_regression = PlotParams(
+            default_plot_0 = PlotParams(
                 plot_layers=PlotLayer.ALL_SCATTER,
                 x_min=args.x_min if args.x_min is not None else d_plot.x_min,
                 x_max=args.x_max if args.x_max is not None else d_plot.x_max,
@@ -2649,15 +2709,15 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
                 y_max=args.y_max if args.y_max is not None else d_plot.y_max,
             )
 
-            comprehensive = PlotParams(
+            default_plot_1 = PlotParams(
                 plot_layers=PlotLayer.DATA_SCATTER | PlotLayer.ALL_PREDICTION,
                 x_min=args.x_min if args.x_min is not None else d_plot.x_min,
-                x_max=args.x_max if args.x_max is not None else d_plot.x_max,
+                x_max="OMIT_FORT",
                 y_min=args.y_min if args.y_min is not None else d_plot.y_min,
                 y_max=args.y_max if args.y_max is not None else d_plot.y_max,
             )
 
-            cost_per_run = PlotParams(
+            default_plot_2 = PlotParams(
                 plot_layers=PlotLayer.ALL_COST | PlotLayer.MIN_MARKERS_ONLY,
                 x_min=args.x_min if args.x_min is not None else d_plot.x_min,
                 x_max=args.x_max if args.x_max is not None else d_plot.x_max,
@@ -2665,7 +2725,7 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
                 y_max=args.y_max if args.y_max is not None else d_plot.y_max,
             )
 
-            plot_params_list.extend([basic_regression, comprehensive, cost_per_run])
+            plot_params_list.extend([default_plot_0, default_plot_1, default_plot_2])
     else:
         if getattr(args, "plot_layers", None):
             logger.warning(
