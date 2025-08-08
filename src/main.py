@@ -805,6 +805,21 @@ def summarize_run_time_by_sor_range(
 
 @dataclass
 class LoadSliceParams:
+    """
+    Parameters used when loading a slice of the CSV.
+
+    Attributes:
+        log_path: Path to the CSV file to read.
+        start_line: 1-based inclusive start line (data rows, header excluded) or None to start at first row.
+        end_line: 1-based inclusive end line (data rows) or None to read to the end.
+        include_header: Whether to preserve the header row when reading.
+        header_map: Optional mapping of input header name -> canonical target name.
+            - Populated from the CLI via repeatable --header-map OLD:NEW flags.
+            - Matching is case-insensitive and applied after the CSV is loaded.
+            - Collision checks are performed before rename (conflicting targets or
+              rename-induced duplicate column names raise ValueError).
+    """
+
     log_path: Path
     start_line: Optional[int]
     end_line: Optional[int]
@@ -1229,21 +1244,71 @@ def load_and_slice_csv(params: LoadSliceParams) -> pd.DataFrame:
             include_header=params.include_header,
         )
 
-    # Apply optional header mapping (case-insensitive best-effort).
+    # Apply optional header mapping (case-insensitive best-effort) with collision detection.
     # We only rename columns that are present in the loaded frame; we warn about keys not found.
     if getattr(params, "header_map", None):
         original_columns = list(df_range.columns)
+
+        # 1) Detect conflicting targets among provided mappings (two OLD -> same NEW).
+        provided_value_to_keys: dict[str, list[str]] = {}
+        for k, v in params.header_map.items():
+            provided_value_to_keys.setdefault(v, []).append(k)
+        duplicate_provided_targets = {
+            tgt: keys for tgt, keys in provided_value_to_keys.items() if len(keys) > 1
+        }
+        if duplicate_provided_targets:
+            parts = [
+                f"target '{tgt}' specified by keys {keys}"
+                for tgt, keys in duplicate_provided_targets.items()
+            ]
+            raise ValueError(
+                "Conflicting --header-map targets specified (multiple OLD map to same NEW): "
+                + "; ".join(parts)
+            )
+
         # Build lowercase lookup for provided keys
         lower_map = {k.lower(): v for k, v in params.header_map.items()}
+
+        # 2) Build remap for columns actually present (case-insensitive match)
         remap: dict[str, str] = {}
         for col in original_columns:
             mapped = lower_map.get(col.lower())
             if mapped:
                 remap[col] = mapped
+
+        # 3) Predict resulting column names after rename and detect duplicates
+        new_names = [remap.get(col, col) for col in original_columns]
+        # Find any names that would be duplicated
+        seen: set[str] = set()
+        dup_targets: set[str] = set()
+        for name in new_names:
+            if name in seen:
+                dup_targets.add(name)
+            else:
+                seen.add(name)
+        if dup_targets:
+            # Build conflict details: which original columns would produce each duplicate target
+            conflicts: dict[str, list[str]] = {}
+            for col in original_columns:
+                target = remap.get(col, col)
+                if target in dup_targets:
+                    conflicts.setdefault(target, []).append(col)
+            msg_parts = [
+                f"'{tgt}' <= columns {cols}" for tgt, cols in conflicts.items()
+            ]
+            raise ValueError(
+                "Header mapping would produce duplicate column names after rename: "
+                + "; ".join(msg_parts)
+            )
+
+        # Safe to rename
         if remap:
             df_range = df_range.rename(columns=remap)
             logger.info(f"Applied header mappings: {remap}")
-        # Report any user-provided keys that did not match any column (helpful warning)
+        else:
+            logger.info("No header mappings matched CSV columns; nothing renamed.")
+
+        # Warn about any user-provided keys that did not match any column (helpful warning)
         provided_keys = list(params.header_map.keys())
         found_lower = {c.lower() for c in original_columns}
         missing = [k for k in provided_keys if k.lower() not in found_lower]
