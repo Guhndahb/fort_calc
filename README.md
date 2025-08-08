@@ -281,9 +281,10 @@ See tests/ for details.
 
 ## Roadmap ideas
 
+- IQR-based outlier filtering as an alternative to z-score: add an option to filter points outside a configurable multiple of the interquartile range (IQR). This is more robust to skewed distributions than z-score filtering, should always preserve the fort row, and include flags/doc examples for choosing between IQR and z-score methods.
 - Optional adaptive binning for offline_cost stability
 - Spline/GAM model options for flexible yet smooth trends
-- Bootstrap CI for FORT to visualize uncertainty
+- Bootstrap CI for FORT: add a bootstrap resampling workflow to produce confidence intervals for recommended FORT and plot uncertainty bands around cost curves / Monte Carlo simulations
 - Policy helpers: tolerance band selection and hysteresis built into the report
 
 ## Multi-plot functionality
