@@ -15,11 +15,11 @@ from typing import List, Optional
 
 try:
     from .main import (
+        OMIT_FORT,
         LoadSliceParams,
         PlotParams,
         TransformParams,
-        _parse_plot_spec_json,
-        _parse_plot_spec_kv,
+        _parse_plot_layers,
         assemble_text_report,
         build_model_comparison,
         build_run_identity,
@@ -31,11 +31,11 @@ try:
     )
 except Exception:
     from main import (  # type: ignore
+        OMIT_FORT,
         LoadSliceParams,
         PlotParams,
         TransformParams,
-        _parse_plot_spec_json,
-        _parse_plot_spec_kv,
+        _parse_plot_layers,
         assemble_text_report,
         build_model_comparison,
         build_run_identity,
@@ -81,6 +81,8 @@ def parse_plot_specs(raw: Optional[str], default_plot: PlotParams) -> List[PlotP
     logging is intentionally lightweight and will be removed once the root cause
     is identified.
     """
+    import json
+
     # Lightweight file-based tracing to avoid stdout capture issues within Gradio workers
     try:
         with open("gradio_debug.log", "a", encoding="utf-8") as fh:
@@ -106,10 +108,89 @@ def parse_plot_specs(raw: Optional[str], default_plot: PlotParams) -> List[PlotP
             except Exception:
                 pass
 
+            # JSON-style spec
             if ln and ln[0] in ("{", "["):
-                parsed.append(_parse_plot_spec_json(ln, default_plot))
+                try:
+                    spec_dict = json.loads(ln)
+                except Exception as e:
+                    raise ValueError(f"Invalid JSON in plot spec: {e}") from e
+                params = PlotParams(
+                    plot_layers=default_plot.plot_layers,
+                    x_min=default_plot.x_min,
+                    x_max=default_plot.x_max,
+                    y_min=default_plot.y_min,
+                    y_max=default_plot.y_max,
+                )
+                if "layers" in spec_dict:
+                    params.plot_layers = _parse_plot_layers(spec_dict["layers"])
+                # x_min
+                if "x_min" in spec_dict:
+                    if spec_dict["x_min"] is None:
+                        params.x_min = None
+                    else:
+                        params.x_min = float(spec_dict["x_min"])
+                # x_max supports the OMIT_FORT sentinel string
+                if "x_max" in spec_dict:
+                    v = spec_dict["x_max"]
+                    if v is None:
+                        params.x_max = None
+                    elif isinstance(v, str) and str(v).strip().upper() == OMIT_FORT:
+                        params.x_max = OMIT_FORT
+                    else:
+                        params.x_max = float(v)
+                # y_min / y_max
+                if "y_min" in spec_dict:
+                    if spec_dict["y_min"] is None:
+                        params.y_min = None
+                    else:
+                        params.y_min = float(spec_dict["y_min"])
+                if "y_max" in spec_dict:
+                    if spec_dict["y_max"] is None:
+                        params.y_max = None
+                    else:
+                        params.y_max = float(spec_dict["y_max"])
+                parsed.append(params)
             else:
-                parsed.append(_parse_plot_spec_kv(ln, default_plot))
+                # key=value[,key=value...] style
+                params = PlotParams(
+                    plot_layers=default_plot.plot_layers,
+                    x_min=default_plot.x_min,
+                    x_max=default_plot.x_max,
+                    y_min=default_plot.y_min,
+                    y_max=default_plot.y_max,
+                )
+                # Split on commas but allow values containing '=' after the first
+                for kv in [k.strip() for k in ln.split(",") if k.strip()]:
+                    if "=" not in kv:
+                        raise ValueError(f"Invalid key=value pair: {kv!r}")
+                    key, value = kv.split("=", 1)
+                    key = key.strip()
+                    val = value.strip()
+                    # Strip surrounding quotes if present
+                    if (val.startswith('"') and val.endswith('"')) or (
+                        val.startswith("'") and val.endswith("'")
+                    ):
+                        val_unq = val[1:-1].strip()
+                    else:
+                        val_unq = val
+                    if key == "layers":
+                        params.plot_layers = _parse_plot_layers(val_unq)
+                    elif key == "x_min":
+                        params.x_min = float(val_unq)
+                    elif key == "x_max":
+                        # accept sentinel text (case-insensitive)
+                        if val_unq.upper() == OMIT_FORT:
+                            params.x_max = OMIT_FORT
+                        else:
+                            params.x_max = float(val_unq)
+                    elif key == "y_min":
+                        params.y_min = float(val_unq)
+                    elif key == "y_max":
+                        params.y_max = float(val_unq)
+                    else:
+                        raise ValueError(f"Unknown key in plot spec: {key}")
+                parsed.append(params)
+
             try:
                 with open("gradio_debug.log", "a", encoding="utf-8") as fh:
                     fh.write(f"[parse_plot_specs] parsed line OK -> {parsed[-1]!r}\n")
@@ -345,7 +426,7 @@ def _run_pipeline(
 def _build_ui():
     with gr.Blocks() as demo:
         gr.Markdown(
-            "### FORT Calculator GUI -- [GitHub repository](https://github.com/Guhndahb/fort_calc)"
+            "### FORT Calculator GUI — [GitHub repository](https://github.com/Guhndahb/fort_calc)"
         )
         gr.HTML("""
 <style>
