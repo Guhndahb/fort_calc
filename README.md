@@ -99,6 +99,7 @@ Required:
 Slice options:
 
 - --start-line N, --end-line M
+- --header-map OLD:NEW (repeatable)
 
 Transform options:
 
@@ -132,7 +133,8 @@ Defaults preview:
 
 Example:
 
-- python -m src.main --log-path ./ICScriptHub/log-reset.csv --fort 100 --ignore-resetticks --zscore-min -1.5 --zscore-max 3 --plot-layers DEFAULT
+- python -m src.main --log-path ./ICScriptHub/log-reset.csv --fort 100 --ignore-resetticks --zscore-min -1.5 --zscore-max 3
+- python -m src.main --log-path ./ICScriptHub/log-reset.csv --fort 50 --ignore-resetticks --header-map run:sor# --header-map "duration ms:runticks"
 
 Multi-plot examples:
 

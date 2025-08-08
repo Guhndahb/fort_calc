@@ -1273,13 +1273,14 @@ def load_and_slice_csv(params: LoadSliceParams) -> pd.DataFrame:
                 + "; ".join(parts)
             )
 
-        # Build lowercase lookup for provided keys
-        lower_map = {k.lower(): v for k, v in params.header_map.items()}
+        # Build normalized lookup for provided keys (strip + lower) and normalized targets (strip)
+        lower_map = {k.strip().lower(): v.strip() for k, v in params.header_map.items()}
 
-        # 2) Build remap for columns actually present (case-insensitive match)
+        # 2) Build remap for columns actually present (case-insensitive + trim match)
         remap: dict[str, str] = {}
         for col in original_columns:
-            mapped = lower_map.get(col.lower())
+            normalized_col = col.strip().lower()
+            mapped = lower_map.get(normalized_col)
             if mapped:
                 remap[col] = mapped
 
@@ -1317,8 +1318,8 @@ def load_and_slice_csv(params: LoadSliceParams) -> pd.DataFrame:
 
         # Warn about any user-provided keys that did not match any column (helpful warning)
         provided_keys = list(params.header_map.keys())
-        found_lower = {c.lower() for c in original_columns}
-        missing = [k for k in provided_keys if k.lower() not in found_lower]
+        found_lower = {c.strip().lower() for c in original_columns}
+        missing = [k for k in provided_keys if k.strip().lower() not in found_lower]
         if missing:
             logger.warning(f"Header map keys not found in CSV columns: {missing}")
 
