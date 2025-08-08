@@ -79,7 +79,7 @@ Python 3.10+ recommended.
 - Change directory into local repo
 - Recommended: use a virtual environment:
   - python -m venv .venv
-  - `.venv\Scripts\activate` (Windows) or `source .venv/bin/activate` (Unix)
+  - `.venv\Scripts\activate` (Windows) or `source .venv/bin/activate` (Unix) or `.\.venv\Scripts\Activate.ps1` (Powershell - requires execution policy)
   - `pip install -e .`
 - Required dependencies (already completed if `pip install -e .` was performed):
   - pandas, numpy, matplotlib, statsmodels
