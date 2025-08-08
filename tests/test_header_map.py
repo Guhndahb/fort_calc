@@ -119,5 +119,5 @@ def test_cli_parsing_builds_header_map(tmp_path: Path):
             "Baz:qux",
         ]
     )
-    load, trans, plots = _args_to_params(args)
+    load, _, _ = _args_to_params(args)
     assert load.header_map == {"Foo": "bar", "Baz": "qux"}
