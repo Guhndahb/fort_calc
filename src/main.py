@@ -19,6 +19,12 @@ from enum import Enum, IntFlag, auto
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+# Ensure a non-interactive Matplotlib backend is selected early to prevent GUI-backend
+# selection/hangs in headless environments. We set the backend here before importing
+# pyplot so that any later imports of matplotlib.pyplot will pick up the enforced backend.
+import matplotlib
+
+matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -2572,13 +2578,14 @@ def _parse_plot_spec_json(spec: str, default: PlotParams) -> PlotParams:
     spec_dict = json.loads(spec)
     if "layers" in spec_dict:
         params.plot_layers = _parse_plot_layers(spec_dict["layers"])
-    if "x_min" in spec_dict:
+    # Only coerce numeric bounds when JSON value is not null. Preserve None to mean "no limit".
+    if "x_min" in spec_dict and spec_dict["x_min"] is not None:
         params.x_min = float(spec_dict["x_min"])
-    if "x_max" in spec_dict:
+    if "x_max" in spec_dict and spec_dict["x_max"] is not None:
         params.x_max = float(spec_dict["x_max"])
-    if "y_min" in spec_dict:
+    if "y_min" in spec_dict and spec_dict["y_min"] is not None:
         params.y_min = float(spec_dict["y_min"])
-    if "y_max" in spec_dict:
+    if "y_max" in spec_dict and spec_dict["y_max"] is not None:
         params.y_max = float(spec_dict["y_max"])
     return params
 
