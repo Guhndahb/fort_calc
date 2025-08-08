@@ -17,7 +17,7 @@ import os
 from dataclasses import dataclass, field
 from enum import Enum, IntFlag, auto
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -52,6 +52,11 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Module-level sentinel for plots that should omit the final FORT point.
+# Use a named constant instead of a string literal to avoid typos and to make
+# intent explicit: compare against OMIT_FORT rather than the raw string.
+OMIT_FORT: str = "OMIT_FORT"
 
 
 class DeltaMode(Enum):
@@ -1638,7 +1643,7 @@ class PlotParams:
 
     plot_layers: PlotLayer = PlotLayer.DEFAULT
     x_min: Optional[float] = None
-    x_max: Optional[float] = None
+    x_max: Optional[Union[float, str]] = None
     y_min: Optional[float] = None
     y_max: Optional[float] = None
 
@@ -1732,7 +1737,7 @@ def render_outputs(
     plt.style.use("dark_background")
     plt.figure(figsize=(10, 6))
 
-    if plot_params.x_max == "OMIT_FORT":
+    if plot_params.x_max == OMIT_FORT:
         omit_fort = True
         plot_params.x_max = None
         df_range_filtered = filter_omit_fort(df_range)
@@ -1799,7 +1804,6 @@ def render_outputs(
             df_summary_filtered["sor#"],
             df_summary_filtered["linear_model_output_wls"],
             color="#FF9F0A",  # orange/amber (prediction)
-            linestyle="-.",
             linewidth=2.0,
             label="Linear Model (WLS)",
         )
@@ -1810,7 +1814,6 @@ def render_outputs(
             df_summary_filtered["sor#"],
             df_summary_filtered["quadratic_model_output_wls"],
             color="#BF5AF2",  # violet (prediction)
-            linestyle="-.",
             linewidth=2.0,
             label="Quadratic Model (WLS)",
         )
@@ -2835,7 +2838,7 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
             default_plot_0 = PlotParams(
                 plot_layers=PlotLayer.DATA_SCATTER | PlotLayer.ALL_PREDICTION,
                 x_min=args.x_min if args.x_min is not None else d_plot.x_min,
-                x_max="OMIT_FORT",
+                x_max=OMIT_FORT,
                 y_min=args.y_min if args.y_min is not None else d_plot.y_min,
                 y_max=args.y_max if args.y_max is not None else d_plot.y_max,
             )
@@ -2997,6 +3000,11 @@ def main() -> None:
         # Unexpected/internal errors: log full exception. Show traceback only when debugging.
         logger.exception("Unhandled exception during execution")
         if debug_mode:
+            # Local import to avoid top-level unused import while fixing the undefined name
+            # reported by linters (Ruff / Pylance). Local import keeps the scope tight and
+            # only incurs cost when debug output is requested.
+            import traceback
+
             traceback.print_exc()
         else:
             print(f"Unexpected error: {e}", file=sys.stderr)
