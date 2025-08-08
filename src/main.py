@@ -2525,11 +2525,12 @@ def _build_cli_parser():
     # Do not specify default at definition-time; we inject for help rendering only.
     g_load.add_argument("--start-line", type=int, help="1-based inclusive start line.")
     g_load.add_argument("--end-line", type=int, help="1-based inclusive end line.")
-    g_load.add_argument(
-        "--no-header",
-        action="store_true",
-        help="Slice has no header (include_header=False).",
-    )
+    # Headers are required, let's not give users a parameter that just breaks the entire program
+    # g_load.add_argument(
+    #     "--no-header",
+    #     action="store_true",
+    #     help="Slice has no header (include_header=False).",
+    # )
 
     # TransformParams
     g_tr = parser.add_argument_group("TransformParams")

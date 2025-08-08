@@ -99,7 +99,6 @@ Required:
 Slice options:
 
 - --start-line N, --end-line M
-- --no-header: interpret slice as no header
 
 Transform options:
 
