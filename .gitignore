@@ -144,3 +144,6 @@ manifest*.json
 
 # Notes
 notes.md
+
+# Gradio output
+gradio_runs/*
