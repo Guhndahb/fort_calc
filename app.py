@@ -2,12 +2,12 @@
 """
 app.py - Hugging Face Spaces entrypoint for the fort_calc Gradio demo.
 
-Spaces expects a top-level variable referencing the Gradio app. This file
-imports the builder from src/gradio_ui.py and exposes it as `demo` so the
-platform can serve it. Do NOT call demo.launch() here.
+This file builds the Gradio demo and launches it immediately. Spaces and the
+Gradio example in the docs sometimes call demo.launch() directly from app.py.
 """
 
 from src.gradio_ui import _build_ui
 
-# Build and expose the Gradio demo for Hugging Face Spaces
+# Build and launch the Gradio demo immediately on import
 demo = _build_ui()
+demo.launch()
