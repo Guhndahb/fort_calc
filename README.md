@@ -1,3 +1,16 @@
+---
+title: Fort Calc
+emoji: 🐨
+colorFrom: yellow
+colorTo: blue
+sdk: gradio
+sdk_version: 5.42.0
+app_file: app.py
+pinned: false
+license: cc0-1.0
+short_description: Idle Champions Optimal FORT Calculator
+---
+
 # Idle Champions Optimal FORT Calculator
 
 Estimate the optimal number of online runs before performing a restart (FORT) to minimize average time per run in a repeated process whose run-time tends to grow with continued online runs. The system uses regression to smooth noisy run durations, estimates the offline restart cost from data, and selects the FORT that minimizes:
