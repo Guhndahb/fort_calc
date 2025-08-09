@@ -11,7 +11,7 @@ license: cc0-1.0
 short_description: Idle Champions Optimal FORT Calculator
 ---
 
-<small>Ignore the table above</small>
+Ignore the table above
 
 # Idle Champions Optimal FORT Calculator
 
