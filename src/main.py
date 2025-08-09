@@ -1914,8 +1914,8 @@ def render_outputs(
         )
 
     plt.xlabel("Sequential Online Run #")
-    plt.ylabel("Adjusted Run Time")
-    plt.title("FORT Regression Models")
+    plt.ylabel("Run Time")
+    # plt.title("FORT Regression Models")
 
     if effective_flags & PlotLayer.LEGEND:
         plt.legend()
