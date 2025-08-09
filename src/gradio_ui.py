@@ -529,6 +529,9 @@ def _build_ui():
         plot_specs = gr.Textbox(
             label="Plot specs (optional) - one per line (key=value,... or JSON)",
             placeholder='layers=DEFAULT\nlayers=DATA_SCATTER+OLS_PRED_LINEAR,x_max=200\n{"layers":"ALL_COST","x_max":null}',
+            value="layers=DATA_SCATTER+ALL_PREDICTION,x_max=OMIT_FORT\n"
+            "layers=ALL_COST+MIN_MARKERS_ONLY\n"
+            "layers=ALL_SCATTER",
             lines=6,
         )
         run_button = gr.Button("Run")
