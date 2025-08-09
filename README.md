@@ -1,6 +1,6 @@
 ---
-title: Fort Calc
-emoji: 🐨
+title: fort_calc
+emoji: 📈
 colorFrom: yellow
 colorTo: blue
 sdk: gradio
