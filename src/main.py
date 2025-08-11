@@ -1036,6 +1036,8 @@ class PlotLayer(IntFlag):
 
     # Legend visibility
     LEGEND = 1 << 13
+    # Draw per-plot filtering legend label (IQR / Z-score)
+    LEGEND_FILTERING = 1 << 15
 
     # Presets
     NONE = 0
@@ -1610,6 +1612,19 @@ def transform_pipeline(
             df_range, params.zscore_min, params.zscore_max, params.input_data_fort
         )
 
+    # Record z-score bounds on frames for renderer to reference when drawing filtering legend.
+    # Only do this for z-score mode; IQR metadata continues to be set inside the IQR filter function.
+    if not params.use_iqr_filtering:
+        try:
+            df_included.attrs["zscore_min"] = float(params.zscore_min)
+            df_included.attrs["zscore_max"] = float(params.zscore_max)
+            if df_excluded is not None:
+                df_excluded.attrs["zscore_min"] = float(params.zscore_min)
+                df_excluded.attrs["zscore_max"] = float(params.zscore_max)
+        except Exception:
+            # Best-effort only; do not fail the pipeline for metadata bookkeeping
+            pass
+
     if len(df_included) < 5:
         raise ValueError(
             f"Too few rows remaining after filtering (found {len(df_included)}, need at least 5)"
@@ -1791,6 +1806,7 @@ def _plot_layers_suffix(flags: PlotLayer) -> str:
         "WLS_COST_QUAD",
         "WLS_MIN_LINEAR",
         "WLS_MIN_QUAD",
+        "LEGEND_FILTERING",
         "LEGEND",
     ]
     tokens: list[str] = []
@@ -2096,6 +2112,40 @@ def render_outputs(
         bottom=plot_params.y_min if plot_params.y_min is not None else None,
         top=plot_params.y_max if plot_params.y_max is not None else None,
     )
+
+    # Standalone filtering legend: show which filter and parameter values were applied.
+    if effective_flags & PlotLayer.LEGEND_FILTERING:
+        # Read metadata from the original input frame attrs (df_range).
+        iqr_k_low = df_range.attrs.get("iqr_k_low", None)
+        iqr_k_high = df_range.attrs.get("iqr_k_high", None)
+        zscore_min = df_range.attrs.get("zscore_min", None)
+        zscore_max = df_range.attrs.get("zscore_max", None)
+
+        if (iqr_k_low is not None) and (iqr_k_high is not None):
+            try:
+                text = f"IQR filter (kₗ={float(iqr_k_low):.2f}, kₕ={float(iqr_k_high):.2f})"
+            except Exception:
+                text = "IQR filter (params invalid)"
+        elif (zscore_min is not None) and (zscore_max is not None):
+            try:
+                text = f"Z-score filter (zₗ={float(zscore_min):.2f}, zₕ={float(zscore_max):.2f})"
+            except Exception:
+                text = "Z-score filter (params invalid)"
+        else:
+            text = "Filter: unknown"
+
+        ax = plt.gca()
+        ax.text(
+            0.01,
+            0.98,
+            text,
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+            fontsize=10,
+            color="white",
+            bbox=dict(facecolor="black", alpha=0.55, pad=4),
+        )
 
     plt.savefig(output_svg, format="svg")
     plt.close()
@@ -3049,7 +3099,7 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
             )
 
             default_plot_2 = PlotParams(
-                plot_layers=PlotLayer.ALL_SCATTER,
+                plot_layers=PlotLayer.ALL_SCATTER | PlotLayer.LEGEND_FILTERING,
                 x_min=args.x_min if args.x_min is not None else d_plot.x_min,
                 x_max=args.x_max if args.x_max is not None else d_plot.x_max,
                 y_min=args.y_min if args.y_min is not None else d_plot.y_min,
