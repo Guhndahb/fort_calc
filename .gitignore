@@ -151,3 +151,6 @@ tmp_repro.py
 tmp_run_pipeline.py
 tmp_run_with_specs.py
 test_small.csv
+
+# Design documents
+design**

@@ -267,6 +267,9 @@ def _run_pipeline(
     ignore_resetticks: bool,
     verbose_filtering: bool,
     delta_mode: str,
+    iqr_k_low: Optional[float],
+    iqr_k_high: Optional[float],
+    use_iqr_filtering: bool,
     plot_specs_raw: Optional[str] = None,
 ):
     """
@@ -315,6 +318,9 @@ def _run_pipeline(
         exclude_timestamp_ranges=d_trans.exclude_timestamp_ranges,
         verbose_filtering=bool(verbose_filtering),
         fail_on_any_invalid_timestamps=d_trans.fail_on_any_invalid_timestamps,
+        iqr_k_low=iqr_k_low if iqr_k_low is not None else d_trans.iqr_k_low,
+        iqr_k_high=iqr_k_high if iqr_k_high is not None else d_trans.iqr_k_high,
+        use_iqr_filtering=use_iqr_filtering,
     )
     print(f"[DEBUG {_short_ts(time.time())}] Built TransformParams -> {tp}")
 
@@ -521,6 +527,19 @@ def _build_ui():
             )
             verbose = gr.Checkbox(label="verbose_filtering", value=False)
         with gr.Row():
+            iqr_k_low = gr.Number(
+                label="iqr_k_low",
+                value=get_default_params()[1].iqr_k_low,
+            )
+            iqr_k_high = gr.Number(
+                label="iqr_k_high",
+                value=get_default_params()[1].iqr_k_high,
+            )
+            use_iqr = gr.Checkbox(
+                label="use_iqr_filtering",
+                value=get_default_params()[1].use_iqr_filtering,
+            )
+        with gr.Row():
             delta = gr.Radio(
                 label="delta_mode",
                 choices=["PREVIOUS_CHUNK", "FIRST_CHUNK"],
@@ -550,6 +569,9 @@ def _build_ui():
             fort_v,
             ignore_v,
             verbose_v,
+            iqr_k_low_v,
+            iqr_k_high_v,
+            use_iqr_v,
             delta_v,
             plot_specs_raw,
         ):
@@ -575,6 +597,9 @@ def _build_ui():
                 int(fort_v) if fort_v is not None else None,
                 ignore_v,
                 verbose_v,
+                iqr_k_low_v,
+                iqr_k_high_v,
+                use_iqr_v,
                 delta_v,
                 plot_specs_raw,
             )
@@ -594,6 +619,9 @@ def _build_ui():
                 fort,
                 ignore,
                 verbose,
+                iqr_k_low,
+                iqr_k_high,
+                use_iqr,
                 delta,
                 plot_specs,
             ],

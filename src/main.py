@@ -649,6 +649,70 @@ def filter_by_adjusted_run_time_zscore(
     return df_filtered, df_excluded
 
 
+def filter_by_adjusted_run_time_iqr(
+    df: pd.DataFrame, iqr_k_low: float, iqr_k_high: float, input_data_fort: int
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Filter rows using an IQR-based rule on 'adjusted_run_time'.
+
+    Behavior:
+    - Compute Q1/Q3 and IQR on df['adjusted_run_time'].
+    - Lower bound = Q1 - iqr_k_low * IQR
+    - Upper bound = Q3 + iqr_k_high * IQR
+    - If IQR is 0 or not finite (degenerate), degrade to "keep only fort row" behavior
+      (same conservative fallback as z-score degenerate case).
+    - Always keep rows where sor# == input_data_fort.
+
+    Returns:
+      (df_filtered, df_excluded) as copies.
+    """
+    df = df.copy()
+
+    # Guard: column must exist
+    if "adjusted_run_time" not in df.columns:
+        # Nothing to filter; return inputs as-is (excluded empty)
+        return df.copy(), df.iloc[0:0].copy()
+
+    # Compute quartiles robustly
+    q1 = df["adjusted_run_time"].quantile(0.25)
+    q3 = df["adjusted_run_time"].quantile(0.75)
+    iqr = q3 - q1
+
+    # Degenerate IQR handling: fall back to keep-only-fort behaviour
+    if not np.isfinite(iqr) or iqr == 0:
+        # Tag for diagnostics; set a column but keep semantics conservative
+        df["iqr_flag"] = False
+        mask_iqr = pd.Series(False, index=df.index)
+    else:
+        lower = q1 - float(iqr_k_low) * float(iqr)
+        upper = q3 + float(iqr_k_high) * float(iqr)
+        df["iqr_flag"] = (df["adjusted_run_time"] >= lower) & (
+            df["adjusted_run_time"] <= upper
+        )
+        mask_iqr = df["iqr_flag"]
+
+    # Always preserve fort row(s)
+    mask_keep_sor = df["sor#"] == input_data_fort
+    mask = mask_iqr | mask_keep_sor
+
+    df_filtered = df[mask].copy()
+    df_excluded = df[~mask].copy()
+
+    # Provide some lightweight diagnostics on the frames as attributes
+    try:
+        df_filtered.attrs["iqr_q1"] = float(q1) if np.isfinite(q1) else None
+        df_filtered.attrs["iqr_q3"] = float(q3) if np.isfinite(q3) else None
+        df_filtered.attrs["iqr"] = float(iqr) if np.isfinite(iqr) else None
+        df_filtered.attrs["iqr_k_low"] = float(iqr_k_low)
+        df_filtered.attrs["iqr_k_high"] = float(iqr_k_high)
+        df_filtered.attrs["iqr_excluded_count"] = int(len(df_excluded))
+    except Exception:
+        # Best-effort only; do not fail the pipeline for metadata bookkeeping
+        pass
+
+    return df_filtered, df_excluded
+
+
 # Recalculate output assuming df_range and input_data_fort are still in memory
 def summarize_run_time_by_sor_range(
     df_range: pd.DataFrame,
@@ -944,6 +1008,10 @@ class TransformParams:
     verbose_filtering: bool = False
     # Fail fast if any timestamps fail to parse (simple and strict by default)
     fail_on_any_invalid_timestamps: bool = True
+    # IQR filtering parameters
+    iqr_k_low: float = 0.75  # Multiplier for lower bound (more aggressive filtering)
+    iqr_k_high: float = 1.5  # Multiplier for upper bound (standard IQR)
+    use_iqr_filtering: bool = True  # IQR filtering is the new default
 
 
 @dataclass
@@ -1441,9 +1509,14 @@ def transform_pipeline(
         verbose=params.verbose_filtering,
     ).pipe(fill_first_note_if_empty, verbose=params.verbose_filtering)
 
-    df_included, df_excluded = filter_by_adjusted_run_time_zscore(
-        df_range, params.zscore_min, params.zscore_max, params.input_data_fort
-    )
+    if params.use_iqr_filtering:
+        df_included, df_excluded = filter_by_adjusted_run_time_iqr(
+            df_range, params.iqr_k_low, params.iqr_k_high, params.input_data_fort
+        )
+    else:
+        df_included, df_excluded = filter_by_adjusted_run_time_zscore(
+            df_range, params.zscore_min, params.zscore_max, params.input_data_fort
+        )
 
     if len(df_included) < 5:
         raise ValueError(
@@ -2693,6 +2766,24 @@ def _build_cli_parser():
         help="Enable verbose diagnostics during filtering.",
     )
     g_tr.add_argument(
+        "--iqr-k-low", type=float, help="IQR lower multiplier (iqr_k_low)."
+    )
+    g_tr.add_argument(
+        "--iqr-k-high", type=float, help="IQR upper multiplier (iqr_k_high)."
+    )
+    g_tr.add_argument(
+        "--use-iqr-filtering",
+        dest="use_iqr_filtering",
+        action="store_true",
+        help="Use IQR-based filtering instead of z-score filtering.",
+    )
+    g_tr.add_argument(
+        "--use-zscore-filtering",
+        dest="use_iqr_filtering",
+        action="store_false",
+        help="Use z-score filtering instead of IQR filtering.",
+    )
+    g_tr.add_argument(
         "--no-fail-on-invalid-ts",
         dest="fail_on_any_invalid_timestamps",
         action="store_false",
@@ -2798,23 +2889,30 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
     ):
         fail_on_invalid = args.fail_on_any_invalid_timestamps
 
+    def get_arg_or_default(arg_name, default):
+        # Return the attribute from args if present and not None, otherwise return default
+        return (
+            getattr(args, arg_name, None)
+            if getattr(args, arg_name, None) is not None
+            else default
+        )
+
     transform = TransformParams(
-        zscore_min=args.zscore_min
-        if args.zscore_min is not None
-        else d_trans.zscore_min,
-        zscore_max=args.zscore_max
-        if args.zscore_max is not None
-        else d_trans.zscore_max,
-        input_data_fort=args.input_data_fort
-        if args.input_data_fort is not None
-        else d_trans.input_data_fort,
+        zscore_min=get_arg_or_default("zscore_min", d_trans.zscore_min),
+        zscore_max=get_arg_or_default("zscore_max", d_trans.zscore_max),
+        input_data_fort=get_arg_or_default("input_data_fort", d_trans.input_data_fort),
         ignore_resetticks=ignore_resetticks,
         delta_mode=delta_mode,
         exclude_timestamp_ranges=exclude_ranges,
-        verbose_filtering=bool(
-            getattr(args, "verbose_filtering", d_trans.verbose_filtering)
+        verbose_filtering=get_arg_or_default(
+            "verbose_filtering", d_trans.verbose_filtering
         ),
         fail_on_any_invalid_timestamps=fail_on_invalid,
+        iqr_k_low=get_arg_or_default("iqr_k_low", d_trans.iqr_k_low),
+        iqr_k_high=get_arg_or_default("iqr_k_high", d_trans.iqr_k_high),
+        use_iqr_filtering=get_arg_or_default(
+            "use_iqr_filtering", d_trans.use_iqr_filtering
+        ),
     )
 
     # PlotParams
@@ -2909,6 +3007,9 @@ def _build_cli_parser_with_policy_defaults():
         "exclude_range": None,  # remains unset by default
         "verbose_filtering": d_trans.verbose_filtering,
         "fail_on_any_invalid_timestamps": d_trans.fail_on_any_invalid_timestamps,
+        "iqr_k_low": d_trans.iqr_k_low,
+        "iqr_k_high": d_trans.iqr_k_high,
+        "use_iqr_filtering": d_trans.use_iqr_filtering,
         # PlotParams
         "plot_layers": _plot_layers_suffix(d_plot.plot_layers),
         "x_min": d_plot.x_min,
@@ -2973,6 +3074,9 @@ def main() -> None:
                 "exclude_timestamp_ranges": d_trans.exclude_timestamp_ranges,
                 "verbose_filtering": d_trans.verbose_filtering,
                 "fail_on_any_invalid_timestamps": d_trans.fail_on_any_invalid_timestamps,
+                "iqr_k_low": d_trans.iqr_k_low,
+                "iqr_k_high": d_trans.iqr_k_high,
+                "use_iqr_filtering": d_trans.use_iqr_filtering,
             },
             "PlotParams": {
                 "plot_layers": _plot_layers_suffix(d_plot.plot_layers),

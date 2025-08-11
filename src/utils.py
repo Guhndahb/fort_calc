@@ -82,6 +82,9 @@ def build_effective_parameters(load: Any, transform: Any) -> dict[str, Any]:
         "fail_on_any_invalid_timestamps": _normalize_value(
             transform.fail_on_any_invalid_timestamps
         ),
+        "iqr_k_low": _normalize_value(transform.iqr_k_low),
+        "iqr_k_high": _normalize_value(transform.iqr_k_high),
+        "use_iqr_filtering": _normalize_value(transform.use_iqr_filtering),
     }
     return {"load": load_dict, "transform": transform_dict}
 

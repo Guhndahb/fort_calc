@@ -64,11 +64,13 @@ Slice options:
 
 Transform options:
 
-- --zscore-min FLOAT, --zscore-max FLOAT
 - --fort INT (input_data_fort)
 - --ignore-resetticks / --use-resetticks
 - --delta-mode {PREVIOUS_CHUNK, FIRST_CHUNK}
 - --exclude-range START,END (repeatable; format YYYYMMDDHHMMSS). Requires a timestamp column parseable to datetime.
+- --iqr-k-low FLOAT, --iqr-k-high FLOAT
+- --use-zscore-filtering
+- --zscore-min FLOAT, --zscore-max FLOAT
 - --verbose-filtering
 - --no-fail-on-invalid-ts (when a timestamp column exists and --exclude-range is not used, you can relax invalid timestamp failures)
 
@@ -124,7 +126,7 @@ Presets:
 Atomic flags:
 
 - DATA_SCATTER: scatter of included data points
-- DATA_SCATTER_EXCLUDED: scatter of points removed by z-score filtering (red x), shown only if you include this flag and excluded data exists
+- DATA_SCATTER_EXCLUDED: scatter of points removed by outlier filtering (red x), shown only if you include this flag and excluded data exists. Points may be excluded by either z-score or IQR filtering depending on the selected method.
 - OLS_PRED_LINEAR: OLS linear prediction line
 - OLS_PRED_QUAD: OLS quadratic prediction line
 - OLS_COST_LINEAR: cost-per-run curve from the OLS linear model
@@ -183,7 +185,8 @@ Note: Column headers can be remapped via CLI
 - If a timestamp column is present, parse to datetime with metrics for invalid timestamps.
 - Optionally remove timestamp ranges when --exclude-range is provided; valid parsed timestamps are required for this step.
 - Ensure the first notes value is present.
-- Remove outliers by z-score on adjusted_run_time while always keeping the fort row. Degenerate variance is auto-handled.
+- Remove outliers by IQR-based filtering. Points below Q1 - iqr_k_low*IQR or above Q3 + iqr_k_high*IQR are filtered out, while the fort row is always preserved.
+- Alternatively, when --use-zscore-filtering is specified, remove outliers by z-score on adjusted_run_time while always keeping the fort row. Degenerate variance is auto-handled.
 - Enforce that at least 5 rows remain after filtering; otherwise fail early.
 
 3. Summarize and estimate offline_cost
@@ -300,7 +303,6 @@ See tests/ for details.
 ## Roadmap ideas
 
 - Add CLI option for output directory for artifacts (plots, manifest)
-- IQR-based outlier filtering as an alternative to z-score: add an option to filter points outside a configurable multiple of the interquartile range (IQR). This is more robust to skewed distributions than z-score filtering, should always preserve the fort row, and include flags/doc examples for choosing between IQR and z-score methods.
 - Optional adaptive binning for offline_cost stability
 - Spline/GAM model options for flexible yet smooth trends
 - Bootstrap CI for FORT: add a bootstrap resampling workflow to produce confidence intervals for recommended FORT and plot uncertainty bands around cost curves / Monte Carlo simulations
