@@ -347,13 +347,56 @@ def compute_adjusted_run_time(
         df["resetticks"] = pd.to_numeric(df["resetticks"], errors="coerce").fillna(0)
         df["adjusted_run_time"] = (df["runticks"] - df["resetticks"]) / 1000.0
 
-    # Diagnostics on results
-    nan_count = df["adjusted_run_time"].isna().sum()
-    neg_count = (df["adjusted_run_time"] < 0).sum()
+    # --- Sanitization & removal of invalid adjusted_run_time values ---
+    #
+    # Policy decision (explicit and auditable):
+    # - Convert any non-finite adjusted_run_time values (±inf, -inf, NaN) to NaN,
+    #   record the count, and then DROP rows with NaN adjusted_run_time.
+    #
+    # Rationale:
+    # - Invalid rows should not be used for later
+    #   outlier detection (z-score / IQR) or modeling. Performing conversion +
+    #   removal immediately after computing adjusted_run_time centralizes the
+    #   sanitization, avoids passing infinities into numpy/pandas statistical
+    #   functions (which can raise runtime warnings or produce undefined results),
+    #   and records the action for later auditing.
+    #
+    # Note: This will remove rows including a fort row if its adjusted_run_time
+    # is invalid. This matches the requested policy to treat invalid rows as
+    # unusable for downstream processing.
+    nonfinite_mask = ~np.isfinite(df["adjusted_run_time"])
+    nonfinite_count = int(nonfinite_mask.sum())
+    if nonfinite_count > 0:
+        # Convert non-finite (±inf) -> NaN so the subsequent drop is explicit.
+        df.loc[nonfinite_mask, "adjusted_run_time"] = np.nan
+        result.add_metric("nonfinite_adjusted_values", int(nonfinite_count))
+        result.add_warning(
+            f"Found {nonfinite_count} non-finite adjusted_run_time values; converting to NaN and dropping them per policy"
+        )
+
+    # Now drop any rows with NaN adjusted_run_time (explicit removal per policy)
+    before_drop = len(df)
+    df = df.dropna(subset=["adjusted_run_time"]).copy()
+    dropped = before_drop - len(df)
+    if dropped > 0:
+        result.add_metric("dropped_invalid_adjusted_values", int(dropped))
+        result.add_warning(f"Dropped {dropped} rows with invalid adjusted_run_time")
+
+    # Diagnostics on results (recompute after sanitization + drop)
+    nan_count = (
+        int(df["adjusted_run_time"].isna().sum())
+        if "adjusted_run_time" in df.columns
+        else 0
+    )
+    neg_count = (
+        int((df["adjusted_run_time"] < 0).sum())
+        if "adjusted_run_time" in df.columns
+        else 0
+    )
 
     if nan_count > 0:
         result.add_warning(
-            f"{nan_count} NaN adjusted_run_time values after computation"
+            f"{nan_count} NaN adjusted_run_time values after computation/sanitization"
         )
     if neg_count > 0:
         result.add_warning(
@@ -618,29 +661,55 @@ def filter_by_adjusted_run_time_zscore(
     Filter rows by z-score bounds with robust handling for degenerate variance.
 
     Behavior:
-    - Compute std = df['adjusted_run_time'].std(ddof=1)
-    - If std is 0 or not finite (NaN/inf), set zscores = 0 for all rows and
-      effectively skip z-score filtering, keeping only rows where sor# == input_data_fort.
-      That is, mask_zscore becomes all True (zscores==0 within any reasonable bounds),
-      but we explicitly set mask_zscore to False to force the "keep only fort row" behavior.
-    - Otherwise compute standard zscores and filter by [zscore_min, zscore_max], always
-      keeping sor# == input_data_fort.
+    - Compute std/mean using only rows where sor# != input_data_fort (non-fort).
+    - If non-fort set is empty or std is 0 or not finite (NaN/inf), treat as degenerate:
+      set zscores = 0 for diagnostics and fall back to the conservative behavior of
+      keeping only the fort row(s).
+    - Otherwise compute z-scores using non-fort mean/std and apply the bounds to all rows
+      (fort rows are always preserved via mask_keep_sor).
     """
     df = df.copy()
 
-    mean_val = df["adjusted_run_time"].mean()
-    std_val = df["adjusted_run_time"].std(ddof=1)
+    # Defensive normalization: convert any non-finite adjusted_run_time values (±inf) to NaN.
+    # Rationale: filters are public API and may be called directly with un-sanitized frames.
+    # Coerce to numeric first to avoid np.isfinite TypeError when series has object dtype
+    # (e.g., empty frames or mixed types). Then convert non-finite -> NaN to keep results tidy.
+    if "adjusted_run_time" in df.columns:
+        df["adjusted_run_time"] = pd.to_numeric(
+            df["adjusted_run_time"], errors="coerce"
+        )
+        df["adjusted_run_time"] = df["adjusted_run_time"].where(
+            np.isfinite(df["adjusted_run_time"]), np.nan
+        )
 
-    if not np.isfinite(std_val) or std_val == 0:
-        # Degenerate variance case: set zscores to 0 but skip z filtering,
-        # keep only the fort row.
+    # Guard: need the adjusted_run_time column
+    if "adjusted_run_time" not in df.columns:
+        return df.copy(), df.iloc[0:0].copy()
+
+    # Build mask for non-fort rows and collect their finite adjusted_run_time values
+    mask_non_fort = df["sor#"] != input_data_fort
+    vals_non_fort = df.loc[mask_non_fort, "adjusted_run_time"].dropna()
+
+    # Default degenerate handling: set zscore column and produce mask that will keep only fort
+    if vals_non_fort.empty:
         df["zscore"] = 0.0
         mask_zscore = pd.Series(False, index=df.index)
     else:
-        zscores = (df["adjusted_run_time"] - mean_val) / std_val
-        df["zscore"] = zscores
-        mask_zscore = (zscores >= zscore_min) & (zscores <= zscore_max)
+        mean_val = float(vals_non_fort.mean())
+        std_val = float(vals_non_fort.std(ddof=1))
 
+        if not np.isfinite(std_val) or std_val == 0:
+            # Degenerate variance case: set zscores to 0 for diagnostics and keep only fort
+            df["zscore"] = 0.0
+            mask_zscore = pd.Series(False, index=df.index)
+        else:
+            # Compute z-scores using non-fort mean/std but apply to entire frame for diagnostics.
+            zscores = (df["adjusted_run_time"] - mean_val) / std_val
+            df["zscore"] = zscores
+            # Rows with NaN adjusted_run_time will produce NaN zscores -> treated as excluded by mask
+            mask_zscore = (zscores >= zscore_min) & (zscores <= zscore_max)
+
+    # Always preserve fort row(s)
     mask_keep_sor = df["sor#"] == input_data_fort
     mask = mask_zscore | mask_keep_sor
 
@@ -656,11 +725,11 @@ def filter_by_adjusted_run_time_iqr(
     Filter rows using an IQR-based rule on 'adjusted_run_time'.
 
     Behavior:
-    - Compute Q1/Q3 and IQR on df['adjusted_run_time'].
+    - Compute Q1/Q3 and IQR using only rows where sor# != input_data_fort (non-fort).
     - Lower bound = Q1 - iqr_k_low * IQR
     - Upper bound = Q3 + iqr_k_high * IQR
-    - If IQR is 0 or not finite (degenerate), degrade to "keep only fort row" behavior
-      (same conservative fallback as z-score degenerate case).
+    - If IQR is 0 or not finite (degenerate), or no non-fort rows exist, degrade to
+      "keep only fort row" behavior (same conservative fallback as z-score).
     - Always keep rows where sor# == input_data_fort.
 
     Returns:
@@ -673,23 +742,46 @@ def filter_by_adjusted_run_time_iqr(
         # Nothing to filter; return inputs as-is (excluded empty)
         return df.copy(), df.iloc[0:0].copy()
 
-    # Compute quartiles robustly
-    q1 = df["adjusted_run_time"].quantile(0.25)
-    q3 = df["adjusted_run_time"].quantile(0.75)
-    iqr = q3 - q1
+    # Defensive normalization: convert any non-finite adjusted_run_time values (±inf) to NaN.
+    # Coerce to numeric first to avoid np.isfinite TypeError on object/empty series.
+    if "adjusted_run_time" in df.columns:
+        df["adjusted_run_time"] = pd.to_numeric(
+            df["adjusted_run_time"], errors="coerce"
+        )
+        df["adjusted_run_time"] = df["adjusted_run_time"].where(
+            np.isfinite(df["adjusted_run_time"]), np.nan
+        )
 
-    # Degenerate IQR handling: fall back to keep-only-fort behaviour
-    if not np.isfinite(iqr) or iqr == 0:
-        # Tag for diagnostics; set a column but keep semantics conservative
+    # Compute quartiles on non-fort values only (drop NaN)
+    mask_non_fort = df["sor#"] != input_data_fort
+    vals_non_fort = df.loc[mask_non_fort, "adjusted_run_time"].dropna()
+
+    if vals_non_fort.empty:
+        # Degenerate: no non-fort values to compute IQR -> conservative fallback
         df["iqr_flag"] = False
         mask_iqr = pd.Series(False, index=df.index)
+        q1 = q3 = iqr = float("nan")
     else:
-        lower = q1 - float(iqr_k_low) * float(iqr)
-        upper = q3 + float(iqr_k_high) * float(iqr)
-        df["iqr_flag"] = (df["adjusted_run_time"] >= lower) & (
-            df["adjusted_run_time"] <= upper
-        )
-        mask_iqr = df["iqr_flag"]
+        # Compute quartiles robustly on non-fort values
+        q1 = float(vals_non_fort.quantile(0.25))
+        q3 = float(vals_non_fort.quantile(0.75))
+        iqr = q3 - q1
+
+        # Treat extremely small IQR as degenerate to avoid numerical instability.
+        # This guards against near-constant sequences (e.g., variation on the order of 1e-10).
+        IQR_DEGENERATE_THRESHOLD = 1e-9
+
+        # Degenerate IQR handling: fall back to keep-only-fort behaviour
+        if not np.isfinite(iqr) or iqr == 0 or abs(iqr) < IQR_DEGENERATE_THRESHOLD:
+            df["iqr_flag"] = False
+            mask_iqr = pd.Series(False, index=df.index)
+        else:
+            lower = q1 - float(iqr_k_low) * float(iqr)
+            upper = q3 + float(iqr_k_high) * float(iqr)
+            df["iqr_flag"] = (df["adjusted_run_time"] >= lower) & (
+                df["adjusted_run_time"] <= upper
+            )
+            mask_iqr = df["iqr_flag"]
 
     # Always preserve fort row(s)
     mask_keep_sor = df["sor#"] == input_data_fort
