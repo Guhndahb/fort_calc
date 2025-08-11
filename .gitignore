@@ -154,4 +154,6 @@ test_small.csv
 
 # Design documents
 design**
+
+# Filter comparison output
 compare_filters/**
