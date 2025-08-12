@@ -2209,6 +2209,7 @@ def get_default_params() -> tuple[LoadSliceParams, TransformParams, PlotParams]:
         start_line=None,
         end_line=None,
         include_header=True,
+        header_map=None,
     )
     trans = TransformParams(
         zscore_min=-1.5,
