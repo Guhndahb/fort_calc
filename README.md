@@ -61,6 +61,8 @@ Slice options:
 
 - --start-line N, --end-line M
 - --header-map OLD:NEW (repeatable)
+- --col-sor INT (optional): zero-based column index to use for sor# (overrides header mapping)
+- --col-ticks INT (optional): zero-based column index to use for runticks (overrides header mapping)
 
 Transform options:
 
@@ -163,7 +165,7 @@ Optional:
 - timestamp: optional unless you use --exclude-range; parsing format %Y%m%d%H%M%S (as string or numeric convertible to that string form)
 - ignore: "TRUE"/"FALSE" (case-insensitive); TRUE rows are dropped
 
-Note: Column headers can be remapped via CLI
+Note: Column headers can be remapped via CLI. Alternatively, sor# and runticks may be selected by zero-based column index using the CLI flags --col-sor INT and --col-ticks INT (these override header-based remapping).
 
 ## How it works
 

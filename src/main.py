@@ -988,9 +988,12 @@ class LoadSliceParams:
         start_line: 1-based inclusive start line (data rows, header excluded) or None to start at first row.
         end_line: 1-based inclusive end line (data rows) or None to read to the end.
         include_header: Whether to preserve the header row when reading.
+        col_sor: zero-based unsigned integer index of the column to use for `sor#`. When provided, it will cause the column at that index to be treated as `sor#`.
+        col_ticks: zero-based unsigned integer index of the column to use for `runticks`. Same semantics for `runticks`.
         header_map: Optional mapping of input header name -> canonical target name.
             - Populated from the CLI via repeatable --header-map OLD:NEW flags.
             - Matching is case-insensitive and applied after the CSV is loaded.
+            - Numeric column-index mappings (col_sor/col_ticks) are applied before header_map processing and will take precedence.
             - Collision checks are performed before rename (conflicting targets or
               rename-induced duplicate column names raise ValueError).
     """
@@ -999,6 +1002,9 @@ class LoadSliceParams:
     start_line: Optional[int]
     end_line: Optional[int]
     include_header: bool = True
+    # Zero-based column index mappings. When provided, these numeric mappings override header_map.
+    col_sor: Optional[int] = None
+    col_ticks: Optional[int] = None
     # Mapping of input header name -> canonical target name.
     # Populated from the CLI via --header-map OLD:NEW (repeatable).
     header_map: dict[str, str] = field(default_factory=dict)
@@ -1425,30 +1431,111 @@ def load_and_slice_csv(params: LoadSliceParams) -> pd.DataFrame:
             include_header=params.include_header,
         )
 
+    # Numeric-index column mapping override (takes precedence over header_map).
+    # Build a local effective header map that begins with numeric-index mandated entries
+    # and then merges user-provided header_map entries without overriding numeric entries.
+    effective_header_map: dict[str, str] = {}
+    if (
+        getattr(params, "col_sor", None) is not None
+        or getattr(params, "col_ticks", None) is not None
+    ):
+        # Defensive check: identical indices are not allowed
+        if (
+            (params.col_sor is not None)
+            and (params.col_ticks is not None)
+            and (params.col_sor == params.col_ticks)
+        ):
+            raise ValueError("col-sor and col-ticks cannot be the same index")
+        cols_list = list(df_range.columns)
+        ncols = len(cols_list)
+
+        # Helper to validate an index and produce mapping
+        if params.col_sor is not None:
+            idx = params.col_sor
+            if idx < 0 or idx >= ncols:
+                raise ValueError(
+                    f"--col-sor index {idx} out of range for CSV with {ncols} columns"
+                )
+            actual_name = cols_list[idx]
+            # If canonical 'sor#' already exists at a different index, that's a conflict
+            if "sor#" in cols_list:
+                existing_idx = cols_list.index("sor#")
+                if existing_idx != idx:
+                    raise ValueError(
+                        f"Column 'sor#' already exists at index {existing_idx} which does not match requested --col-sor {idx}"
+                    )
+            effective_header_map[actual_name] = "sor#"
+
+        if params.col_ticks is not None:
+            idx = params.col_ticks
+            if idx < 0 or idx >= ncols:
+                raise ValueError(
+                    f"--col-ticks index {idx} out of range for CSV with {ncols} columns"
+                )
+            actual_name = cols_list[idx]
+            # If canonical 'runticks' already exists at a different index, that's a conflict
+            if "runticks" in cols_list:
+                existing_idx = cols_list.index("runticks")
+                if existing_idx != idx:
+                    raise ValueError(
+                        f"Column 'runticks' already exists at index {existing_idx} which does not match requested --col-ticks {idx}"
+                    )
+            # Prevent a numeric mapping from conflicting with an earlier numeric mapping to a different canonical name
+            if (
+                actual_name in effective_header_map
+                and effective_header_map[actual_name] != "runticks"
+            ):
+                raise ValueError(
+                    f"Column '{actual_name}' already mapped to '{effective_header_map[actual_name]}' which conflicts with requested --col-ticks {idx}"
+                )
+            effective_header_map[actual_name] = "runticks"
+
+    # Build the header_map that will be applied to the frame: numeric entries first, then user-provided entries (without overriding numeric entries).
+    if effective_header_map:
+        header_map_to_apply: dict[str, str] = {}
+        # numeric-mandated entries first (keys are exact original column names)
+        for k, v in effective_header_map.items():
+            header_map_to_apply[k] = v
+        # merge user-provided header_map without allowing user keys to override numeric-mandated entries
+        if getattr(params, "header_map", None):
+            for k, v in params.header_map.items():
+                if k not in header_map_to_apply:
+                    header_map_to_apply[k] = v
+    else:
+        header_map_to_apply = (
+            params.header_map if getattr(params, "header_map", None) else {}
+        )
+
     # Apply optional header mapping (case-insensitive best-effort) with collision detection.
     # We only rename columns that are present in the loaded frame; we warn about keys not found.
-    if getattr(params, "header_map", None):
+    # Note: conflict checks on user-provided mappings (duplicate targets) are still based on the original user header_map.
+    if header_map_to_apply:
         original_columns = list(df_range.columns)
 
-        # 1) Detect conflicting targets among provided mappings (two OLD -> same NEW).
-        provided_value_to_keys: dict[str, list[str]] = {}
-        for k, v in params.header_map.items():
-            provided_value_to_keys.setdefault(v, []).append(k)
-        duplicate_provided_targets = {
-            tgt: keys for tgt, keys in provided_value_to_keys.items() if len(keys) > 1
-        }
-        if duplicate_provided_targets:
-            parts = [
-                f"target '{tgt}' specified by keys {keys}"
-                for tgt, keys in duplicate_provided_targets.items()
-            ]
-            raise ValueError(
-                "Conflicting --header-map targets specified (multiple OLD map to same NEW): "
-                + "; ".join(parts)
-            )
+        # 1) Detect conflicting targets among provided mappings (two OLD -> same NEW) using user-provided mappings only.
+        if getattr(params, "header_map", None):
+            provided_value_to_keys: dict[str, list[str]] = {}
+            for k, v in params.header_map.items():
+                provided_value_to_keys.setdefault(v, []).append(k)
+            duplicate_provided_targets = {
+                tgt: keys
+                for tgt, keys in provided_value_to_keys.items()
+                if len(keys) > 1
+            }
+            if duplicate_provided_targets:
+                parts = [
+                    f"target '{tgt}' specified by keys {keys}"
+                    for tgt, keys in duplicate_provided_targets.items()
+                ]
+                raise ValueError(
+                    "Conflicting --header-map targets specified (multiple OLD map to same NEW): "
+                    + "; ".join(parts)
+                )
 
         # Build normalized lookup for provided keys (strip + lower) and normalized targets (strip)
-        lower_map = {k.strip().lower(): v.strip() for k, v in params.header_map.items()}
+        lower_map = {
+            k.strip().lower(): v.strip() for k, v in header_map_to_apply.items()
+        }
 
         # 2) Build remap for columns actually present (case-insensitive + trim match)
         remap: dict[str, str] = {}
@@ -1491,7 +1578,11 @@ def load_and_slice_csv(params: LoadSliceParams) -> pd.DataFrame:
             logger.info("No header mappings matched CSV columns; nothing renamed.")
 
         # Warn about any user-provided keys that did not match any column (helpful warning)
-        provided_keys = list(params.header_map.keys())
+        provided_keys = (
+            list(params.header_map.keys())
+            if getattr(params, "header_map", None)
+            else []
+        )
         found_lower = {c.strip().lower() for c in original_columns}
         missing = [k for k in provided_keys if k.strip().lower() not in found_lower]
         if missing:
@@ -2209,6 +2300,8 @@ def get_default_params() -> tuple[LoadSliceParams, TransformParams, PlotParams]:
         start_line=None,
         end_line=None,
         include_header=True,
+        col_sor=None,
+        col_ticks=None,
         header_map=None,
     )
     trans = TransformParams(
@@ -2861,6 +2954,16 @@ def _build_cli_parser():
         metavar="OLD:NEW",
         help="Map input header OLD to canonical NEW. Repeatable; format OLD:NEW.",
     )
+    g_load.add_argument(
+        "--col-sor",
+        type=int,
+        help="Zero-based column index to use for 'sor#' (overrides header mapping).",
+    )
+    g_load.add_argument(
+        "--col-ticks",
+        type=int,
+        help="Zero-based column index to use for 'runticks' (overrides header mapping).",
+    )
     # Headers are required, let's not give users a parameter that just breaks the entire program
     # g_load.add_argument(
     #     "--no-header",
@@ -2993,6 +3096,20 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
                 )
             header_map[old] = new
 
+    # Validate numeric column index flags (if provided)
+    col_sor_arg = getattr(args, "col_sor", None)
+    col_ticks_arg = getattr(args, "col_ticks", None)
+    if col_sor_arg is not None and col_sor_arg < 0:
+        raise ValueError("Invalid --col-sor: must be a non-negative integer")
+    if col_ticks_arg is not None and col_ticks_arg < 0:
+        raise ValueError("Invalid --col-ticks: must be a non-negative integer")
+    if (
+        (col_sor_arg is not None)
+        and (col_ticks_arg is not None)
+        and (col_sor_arg == col_ticks_arg)
+    ):
+        raise ValueError("col-sor and col-ticks cannot be the same index")
+
     load = LoadSliceParams(
         log_path=log_path,
         start_line=args.start_line
@@ -3000,6 +3117,8 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
         else d_load.start_line,
         end_line=args.end_line if args.end_line is not None else d_load.end_line,
         include_header=include_header,
+        col_sor=col_sor_arg,
+        col_ticks=col_ticks_arg,
         header_map=header_map,
     )
 
