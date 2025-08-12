@@ -521,59 +521,87 @@ def _build_ui():
                 label="start_line (optional)",
                 value=d_load.start_line,
                 precision=0,
-                placeholder="leave blank to use default",
+                placeholder="leave blank to read from start of file",
             )
             end_line = gr.Number(
                 label="end_line (optional)",
                 value=d_load.end_line,
                 precision=0,
-                placeholder="leave blank to use default",
+                placeholder="leave blank to read to end of file",
             )
             col_sor = gr.Number(
-                label="col_sor (optional, zero-based index for sor#)",
+                label="col_sor (optional, 0-based column for sor#)",
                 value=d_load.col_sor,
                 precision=0,
-                placeholder="leave blank to use default",
+                placeholder="leave blank to disable - sor# column will be required in original data",
             )
             col_ticks = gr.Number(
-                label="col_ticks (optional, zero-based index for runticks)",
+                label="col_ticks (optional, 0-based column for runticks)",
                 value=d_load.col_ticks,
                 precision=0,
-                placeholder="leave blank to use default",
+                placeholder="leave blank to disable - runticks column will be required in original data",
             )
         with gr.Row():
-            zmin = gr.Number(label="zscore_min", value=d_trans.zscore_min)
-            zmax = gr.Number(label="zscore_max", value=d_trans.zscore_max)
-        with gr.Row():
             fort = gr.Number(
-                label="input_data_fort",
+                label="input_data_fort (critical)",
                 value=d_trans.input_data_fort,
                 precision=0,
+                placeholder="this must match the FORT used in data collection - all data processed must have the same FORT",
             )
             ignore = gr.Checkbox(
                 label="ignore_resetticks",
                 value=d_trans.ignore_resetticks,
             )
-            verbose = gr.Checkbox(label="verbose_filtering", value=False)
-        with gr.Row():
-            iqr_k_low = gr.Number(
-                label="iqr_k_low",
-                value=d_trans.iqr_k_low,
-            )
-            iqr_k_high = gr.Number(
-                label="iqr_k_high",
-                value=d_trans.iqr_k_high,
-            )
-            use_iqr = gr.Checkbox(
-                label="use_iqr_filtering",
-                value=d_trans.use_iqr_filtering,
-            )
-        with gr.Row():
             delta = gr.Radio(
                 label="delta_mode",
                 choices=["PREVIOUS_CHUNK", "FIRST_CHUNK"],
                 value=d_trans.delta_mode.name,
             )
+            verbose = gr.Checkbox(label="verbose_filtering", value=False)
+        with gr.Row():
+            use_iqr = gr.Checkbox(
+                label="use_iqr_filtering",
+                value=d_trans.use_iqr_filtering,
+            )
+            iqr_k_low = gr.Number(
+                label="iqr_k_low",
+                value=d_trans.iqr_k_low,
+                visible=d_trans.use_iqr_filtering,
+            )
+            iqr_k_high = gr.Number(
+                label="iqr_k_high",
+                value=d_trans.iqr_k_high,
+                visible=d_trans.use_iqr_filtering,
+            )
+            zmin = gr.Number(
+                label="zscore_min",
+                value=d_trans.zscore_min,
+                visible=not d_trans.use_iqr_filtering,
+            )
+            zmax = gr.Number(
+                label="zscore_max",
+                value=d_trans.zscore_max,
+                visible=not d_trans.use_iqr_filtering,
+            )
+
+        # Callback to toggle visibility of IQR vs zscore controls based on checkbox.
+        def _toggle_iqr_visibility(use_iqr_val):
+            # When use_iqr_val is True: show iqr_k_low/iqr_k_high, hide zmin/zmax
+            # When False: hide iqr_k_low/iqr_k_high, show zmin/zmax
+            return (
+                gr.update(visible=use_iqr_val),
+                gr.update(visible=use_iqr_val),
+                gr.update(visible=not use_iqr_val),
+                gr.update(visible=not use_iqr_val),
+            )
+
+        # Wire checkbox change to visibility toggle (placed before run_button click)
+        use_iqr.change(
+            _toggle_iqr_visibility,
+            inputs=[use_iqr],
+            outputs=[iqr_k_low, iqr_k_high, zmin, zmax],
+        )
+
         # Build a default multiline plot-spec value from the canonical default plot list
         plot_default_lines: list[str] = []
         for pp in d_plots:
