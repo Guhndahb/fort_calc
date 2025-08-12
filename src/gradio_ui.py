@@ -61,10 +61,14 @@ def _parse_optional_int(val: Optional[float]) -> Optional[int]:
     if val is None:
         return None
     try:
-        # Treat 0 as "no value"
-        if int(val) == 0:
-            return None
-        return int(val)
+        # Accept 0 as a valid index. Treat empty strings or unparseable values as None.
+        s = val
+        if isinstance(val, str):
+            s = val.strip()
+            if s == "":
+                return None
+        # Convert via float to accept numeric inputs from Gradio (which may provide floats)
+        return int(float(s))
     except Exception:
         return None
 
@@ -270,6 +274,8 @@ def _run_pipeline(
     iqr_k_low: Optional[float],
     iqr_k_high: Optional[float],
     use_iqr_filtering: bool,
+    col_sor: Optional[int] = None,
+    col_ticks: Optional[int] = None,
     plot_specs_raw: Optional[str] = None,
 ):
     """
@@ -296,6 +302,8 @@ def _run_pipeline(
         start_line=_parse_optional_int(start_line),
         end_line=_parse_optional_int(end_line),
         include_header=True,
+        col_sor=_parse_optional_int(col_sor),
+        col_ticks=_parse_optional_int(col_ticks),
     )
     print(f"[DEBUG {_short_ts(time.time())}] Built LoadSliceParams -> {lp}")
 
@@ -485,6 +493,7 @@ def _run_pipeline(
 
 def _build_ui():
     with gr.Blocks() as demo:
+        d_load, d_trans, d_plot = get_default_params()
         gr.Markdown(
             "### FORT Calculator GUI — [GitHub repository](https://github.com/Guhndahb/fort_calc)"
         )
@@ -505,45 +514,61 @@ def _build_ui():
             file_input = gr.File(label="Upload CSV file", file_types=[".csv"])
         with gr.Row():
             start_line = gr.Number(
-                label="start_line (optional)", value=None, precision=0
+                label="start_line (optional)",
+                value=d_load.start_line,
+                precision=0,
+                placeholder="leave blank to use default",
             )
-            end_line = gr.Number(label="end_line (optional)", value=None, precision=0)
+            end_line = gr.Number(
+                label="end_line (optional)",
+                value=d_load.end_line,
+                precision=0,
+                placeholder="leave blank to use default",
+            )
+            col_sor = gr.Number(
+                label="col_sor (optional, zero-based index for sor#)",
+                value=d_load.col_sor,
+                precision=0,
+                placeholder="leave blank to use default",
+            )
+            col_ticks = gr.Number(
+                label="col_ticks (optional, zero-based index for runticks)",
+                value=d_load.col_ticks,
+                precision=0,
+                placeholder="leave blank to use default",
+            )
         with gr.Row():
-            zmin = gr.Number(
-                label="zscore_min", value=get_default_params()[1].zscore_min
-            )
-            zmax = gr.Number(
-                label="zscore_max", value=get_default_params()[1].zscore_max
-            )
+            zmin = gr.Number(label="zscore_min", value=d_trans.zscore_min)
+            zmax = gr.Number(label="zscore_max", value=d_trans.zscore_max)
         with gr.Row():
             fort = gr.Number(
                 label="input_data_fort",
-                value=get_default_params()[1].input_data_fort,
+                value=d_trans.input_data_fort,
                 precision=0,
             )
             ignore = gr.Checkbox(
                 label="ignore_resetticks",
-                value=get_default_params()[1].ignore_resetticks,
+                value=d_trans.ignore_resetticks,
             )
             verbose = gr.Checkbox(label="verbose_filtering", value=False)
         with gr.Row():
             iqr_k_low = gr.Number(
                 label="iqr_k_low",
-                value=get_default_params()[1].iqr_k_low,
+                value=d_trans.iqr_k_low,
             )
             iqr_k_high = gr.Number(
                 label="iqr_k_high",
-                value=get_default_params()[1].iqr_k_high,
+                value=d_trans.iqr_k_high,
             )
             use_iqr = gr.Checkbox(
                 label="use_iqr_filtering",
-                value=get_default_params()[1].use_iqr_filtering,
+                value=d_trans.use_iqr_filtering,
             )
         with gr.Row():
             delta = gr.Radio(
                 label="delta_mode",
                 choices=["PREVIOUS_CHUNK", "FIRST_CHUNK"],
-                value=get_default_params()[1].delta_mode.name,
+                value=d_trans.delta_mode.name,
             )
         plot_specs = gr.Textbox(
             label="Plot specs (optional) - one per line (key=value,... or JSON)",
@@ -564,6 +589,8 @@ def _build_ui():
             file_obj,
             s_line,
             e_line,
+            col_sor_v,
+            col_ticks_v,
             zmin_v,
             zmax_v,
             fort_v,
@@ -597,10 +624,12 @@ def _build_ui():
                 int(fort_v) if fort_v is not None else None,
                 ignore_v,
                 verbose_v,
+                delta_v,
                 iqr_k_low_v,
                 iqr_k_high_v,
                 use_iqr_v,
-                delta_v,
+                col_sor_v,
+                col_ticks_v,
                 plot_specs_raw,
             )
             # gr.File accepts None to indicate no file available
@@ -614,6 +643,8 @@ def _build_ui():
                 file_input,
                 start_line,
                 end_line,
+                col_sor,
+                col_ticks,
                 zmin,
                 zmax,
                 fort,
