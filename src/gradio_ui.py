@@ -20,6 +20,7 @@ try:
         PlotParams,
         TransformParams,
         _parse_plot_layers,
+        _plot_layers_suffix,
         assemble_text_report,
         build_model_comparison,
         build_run_identity,
@@ -36,6 +37,7 @@ except Exception:
         PlotParams,
         TransformParams,
         _parse_plot_layers,
+        _plot_layers_suffix,
         assemble_text_report,
         build_model_comparison,
         build_run_identity,
@@ -572,12 +574,30 @@ def _build_ui():
                 choices=["PREVIOUS_CHUNK", "FIRST_CHUNK"],
                 value=d_trans.delta_mode.name,
             )
+        # Build a default multiline plot-spec value from the canonical default plot list
+        plot_default_lines: list[str] = []
+        for pp in d_plots:
+            layers_token = _plot_layers_suffix(pp.plot_layers)
+            parts: list[str] = [f"layers={layers_token}"]
+            if pp.x_min is not None:
+                parts.append(f"x_min={pp.x_min}")
+            if pp.x_max is not None:
+                parts.append(
+                    f"x_max={OMIT_FORT}"
+                    if pp.x_max == OMIT_FORT
+                    else f"x_max={pp.x_max}"
+                )
+            if pp.y_min is not None:
+                parts.append(f"y_min={pp.y_min}")
+            if pp.y_max is not None:
+                parts.append(f"y_max={pp.y_max}")
+            plot_default_lines.append(",".join(parts))
+        plot_defaults_value = "\n".join(plot_default_lines)
+
         plot_specs = gr.Textbox(
             label="Plot specs (optional) - one per line (key=value,... or JSON)",
             placeholder='layers=DEFAULT\nlayers=DATA_SCATTER+OLS_PRED_LINEAR,x_max=200\n{"layers":"ALL_COST","x_max":null}',
-            value="layers=DATA_SCATTER+ALL_PREDICTION,x_max=OMIT_FORT\n"
-            "layers=ALL_COST+MIN_MARKERS_ONLY\n"
-            "layers=ALL_SCATTER",
+            value=plot_defaults_value,
             lines=6,
         )
         run_button = gr.Button("Run")
