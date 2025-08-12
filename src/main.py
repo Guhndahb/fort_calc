@@ -2284,17 +2284,18 @@ def render_plots(
     return artifact_paths
 
 
-def get_default_params() -> tuple[LoadSliceParams, TransformParams, PlotParams]:
+def get_default_params() -> tuple[LoadSliceParams, TransformParams, List[PlotParams]]:
     """
-    Build default LoadSliceParams, TransformParams, and PlotParams.
+    Build default LoadSliceParams, TransformParams, and the canonical list of PlotParams.
 
-    This function returns a single default PlotParams, which is used as the base
-    for inheritance when parsing --plot-spec flags. The CLI can now accept multiple
-    plot specifications that inherit from this default, allowing for flexible
-    customization of plot parameters in a multi-plot system.
+    NOTE: Historically this returned a single PlotParams used as a base for plot-spec
+    parsing. Policy has changed: the canonical defaults are a list of PlotParams
+    (typically three) that will be produced when the user does not provide any
+    --plot-spec / --plot-spec-json flags. Callers that previously expected a single
+    default for parsing may use the first element of the returned list as the
+    inheritance base.
     """
-    # Example defaults (preserve existing behavior)
-    # log_path = Path("C:/Games/Utility/ICScriptHub/log-reset.csv").resolve()
+    # Example defaults (policy-level defaults)
     load = LoadSliceParams(
         log_path=None,
         start_line=None,
@@ -2310,17 +2311,48 @@ def get_default_params() -> tuple[LoadSliceParams, TransformParams, PlotParams]:
         input_data_fort=100,
         ignore_resetticks=True,
         delta_mode=DeltaMode.PREVIOUS_CHUNK,
-        exclude_timestamp_ranges=None,  # [("20250801124409", "20250805165454")],
+        exclude_timestamp_ranges=None,
         verbose_filtering=False,
     )
-    plotp = PlotParams(
-        plot_layers=PlotLayer.DEFAULT,
-        x_min=None,
-        x_max=None,
-        y_min=None,
-        y_max=None,
+
+    # Canonical default plot list (policy): three plot configurations used when
+    # no --plot-spec is provided. These are the authoritative defaults.
+    plot_defaults: List[PlotParams] = []
+
+    # Default 0: data scatter + prediction overlays, omit final FORT point by default
+    plot_defaults.append(
+        PlotParams(
+            plot_layers=PlotLayer.DATA_SCATTER | PlotLayer.ALL_PREDICTION,
+            x_min=None,
+            x_max=OMIT_FORT,  # sentinel indicating the renderer should omit FORT for this plot
+            y_min=None,
+            y_max=None,
+        )
     )
-    return load, trans, plotp
+
+    # Default 1: cost curves + min markers only
+    plot_defaults.append(
+        PlotParams(
+            plot_layers=PlotLayer.ALL_COST | PlotLayer.MIN_MARKERS_ONLY,
+            x_min=None,
+            x_max=None,
+            y_min=None,
+            y_max=None,
+        )
+    )
+
+    # Default 2: all scatter (including excluded) with filtering legend
+    plot_defaults.append(
+        PlotParams(
+            plot_layers=PlotLayer.ALL_SCATTER | PlotLayer.LEGEND_FILTERING,
+            x_min=None,
+            x_max=None,
+            y_min=None,
+            y_max=None,
+        )
+    )
+
+    return load, trans, plot_defaults
 
 
 def build_run_identity(
@@ -3048,15 +3080,6 @@ def _build_cli_parser():
         action="append",
         help="Plot specification as a JSON object. Repeatable.",
     )
-    g_plot.add_argument(
-        "--plot-layers",
-        type=str,
-        help="(Deprecated) Preset or '+'-joined atomic flags (e.g., DEFAULT or DATA_SCATTER+OLS_PRED_LINEAR+LEGEND).",
-    )
-    g_plot.add_argument("--x-min", type=float, default=None, help="X axis minimum.")
-    g_plot.add_argument("--x-max", type=float, default=None, help="X axis maximum.")
-    g_plot.add_argument("--y-min", type=float, default=None, help="Y axis minimum.")
-    g_plot.add_argument("--y-max", type=float, default=None, help="Y axis maximum.")
 
     return parser
 
@@ -3066,7 +3089,7 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
     Merge CLI args over defaults to build parameter objects.
     Only override values explicitly provided by user; otherwise keep defaults.
     """
-    d_load, d_trans, d_plot = get_default_params()
+    d_load, d_trans, d_plots = get_default_params()
 
     # LoadSliceParams
     log_path = (
@@ -3181,60 +3204,28 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
     plot_params_list = []
     if getattr(args, "plot_spec", None):
         for spec in args.plot_spec:
-            plot_params_list.append(_parse_plot_spec_kv(spec, d_plot))
+            # Use the first canonical plot as the parsing inheritance base
+            plot_params_list.append(_parse_plot_spec_kv(spec, d_plots[0]))
     if getattr(args, "plot_spec_json", None):
         for spec in args.plot_spec_json:
-            plot_params_list.append(_parse_plot_spec_json(spec, d_plot))
+            plot_params_list.append(_parse_plot_spec_json(spec, d_plots[0]))
     if not plot_params_list:
         # No plot-specs provided; use default configurations
-        if getattr(args, "plot_layers", None):
-            # Use deprecated plot-layers if provided
-            plot = PlotParams(
-                plot_layers=_parse_plot_layers(args.plot_layers),
-                x_min=args.x_min if args.x_min is not None else d_plot.x_min,
-                x_max=args.x_max if args.x_max is not None else d_plot.x_max,
-                y_min=args.y_min if args.y_min is not None else d_plot.y_min,
-                y_max=args.y_max if args.y_max is not None else d_plot.y_max,
-            )
-            logger.warning(
-                "--plot-layers is deprecated; use --plot-spec or --plot-spec-json instead."
-            )
-            plot_params_list.append(plot)
-        else:
-            # Use three default configurations when no specific plots are requested
-            default_plot_0 = PlotParams(
-                plot_layers=PlotLayer.DATA_SCATTER | PlotLayer.ALL_PREDICTION,
-                x_min=args.x_min if args.x_min is not None else d_plot.x_min,
-                x_max=OMIT_FORT,
-                y_min=args.y_min if args.y_min is not None else d_plot.y_min,
-                y_max=args.y_max if args.y_max is not None else d_plot.y_max,
-            )
-
-            default_plot_1 = PlotParams(
-                plot_layers=PlotLayer.ALL_COST | PlotLayer.MIN_MARKERS_ONLY,
-                x_min=args.x_min if args.x_min is not None else d_plot.x_min,
-                x_max=args.x_max if args.x_max is not None else d_plot.x_max,
-                y_min=args.y_min if args.y_min is not None else d_plot.y_min,
-                y_max=args.y_max if args.y_max is not None else d_plot.y_max,
-            )
-
-            default_plot_2 = PlotParams(
-                plot_layers=PlotLayer.ALL_SCATTER | PlotLayer.LEGEND_FILTERING,
-                x_min=args.x_min if args.x_min is not None else d_plot.x_min,
-                x_max=args.x_max if args.x_max is not None else d_plot.x_max,
-                y_min=args.y_min if args.y_min is not None else d_plot.y_min,
-                y_max=args.y_max if args.y_max is not None else d_plot.y_max,
-            )
-
-            plot_params_list.extend([default_plot_0, default_plot_1, default_plot_2])
-    else:
-        if getattr(args, "plot_layers", None):
-            logger.warning(
-                "--plot-layers is ignored when --plot-spec or --plot-spec-json is provided."
-            )
-        if args.x_min or args.x_max or args.y_min or args.y_max:
-            logger.warning(
-                "Top-level x/y min/max are ignored when --plot-spec or --plot-spec-json is provided."
+        # Deprecated top-level plotting flags (--plot-layers / --x-min / --x-max / --y-min / --y-max)
+        # have been removed in favor of explicit --plot-spec / --plot-spec-json or the canonical
+        # list returned by get_default_params(). If the user passed --plot-layers we still support
+        # it for backward compatibility by using it to build a single PlotParams based on the
+        # first canonical default.
+        # Use canonical list of defaults from get_default_params()
+        for base_pp in d_plots:
+            plot_params_list.append(
+                PlotParams(
+                    plot_layers=base_pp.plot_layers,
+                    x_min=base_pp.x_min,
+                    x_max=base_pp.x_max,
+                    y_min=base_pp.y_min,
+                    y_max=base_pp.y_max,
+                )
             )
 
     return load, transform, plot_params_list
@@ -3251,7 +3242,7 @@ def _build_cli_parser_with_policy_defaults():
     parser = _build_cli_parser()
 
     # Pull policy defaults
-    d_load, d_trans, d_plot = get_default_params()
+    d_load, d_trans, d_plots = get_default_params()
 
     # Map: CLI dest name -> default value to display
     injected_defaults = {
@@ -3273,11 +3264,12 @@ def _build_cli_parser_with_policy_defaults():
         "iqr_k_high": d_trans.iqr_k_high,
         "use_iqr_filtering": d_trans.use_iqr_filtering,
         # PlotParams
-        "plot_layers": _plot_layers_suffix(d_plot.plot_layers),
-        "x_min": d_plot.x_min,
-        "x_max": d_plot.x_max,
-        "y_min": d_plot.y_min,
-        "y_max": d_plot.y_max,
+        # Display only the first canonical plot's layers/limits in help output
+        "plot_layers": _plot_layers_suffix(d_plots[0].plot_layers),
+        "x_min": d_plots[0].x_min,
+        "x_max": d_plots[0].x_max,
+        "y_min": d_plots[0].y_min,
+        "y_max": d_plots[0].y_max,
         # Utility
         "print_defaults": False,
     }
@@ -3315,7 +3307,7 @@ def main() -> None:
     if "--print-defaults" in argv:
         import json
 
-        d_load, d_trans, d_plot = get_default_params()
+        d_load, d_trans, d_plots = get_default_params()
 
         # Preserve JSON types: only stringify Path when present; keep None as None (-> null)
         log_path_json = None if d_load.log_path is None else str(d_load.log_path)
@@ -3340,13 +3332,16 @@ def main() -> None:
                 "iqr_k_high": d_trans.iqr_k_high,
                 "use_iqr_filtering": d_trans.use_iqr_filtering,
             },
-            "PlotParams": {
-                "plot_layers": _plot_layers_suffix(d_plot.plot_layers),
-                "x_min": d_plot.x_min,
-                "x_max": d_plot.x_max,
-                "y_min": d_plot.y_min,
-                "y_max": d_plot.y_max,
-            },
+            "PlotParams": [
+                {
+                    "plot_layers": _plot_layers_suffix(pp.plot_layers),
+                    "x_min": pp.x_min,
+                    "x_max": pp.x_max,
+                    "y_min": pp.y_min,
+                    "y_max": pp.y_max,
+                }
+                for pp in d_plots
+            ],
         }
         print(json.dumps(payload, indent=2))
         return

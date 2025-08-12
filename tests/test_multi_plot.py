@@ -338,7 +338,7 @@ def test_args_to_params_with_mixed_plot_specs():
 
 
 def test_deprecated_plot_layers_warning(caplog):
-    """Test that deprecated --plot-layers flag generates warning."""
+    """The deprecated top-level --plot-layers flag has been removed; canonical defaults are returned."""
 
     class Args:
         log_path = "test.csv"
@@ -364,13 +364,16 @@ def test_deprecated_plot_layers_warning(caplog):
     args = Args()
     load_params, transform_params, plot_params_list = _args_to_params(args)
 
-    # Should generate a warning about deprecated --plot-layers
-    assert "deprecated" in caplog.text
-    assert "--plot-layers is deprecated" in caplog.text
+    # Canonical defaults are returned as a list (3 policy defaults)
+    assert len(plot_params_list) == 3
+    # First canonical default is DATA_SCATTER + ALL_PREDICTION (matches policy defaults)
+    assert plot_params_list[0].plot_layers == (
+        PlotLayer.DATA_SCATTER | PlotLayer.ALL_PREDICTION
+    )
 
 
 def test_deprecated_plot_layers_ignored_with_plot_spec(caplog):
-    """Test that --plot-layers is ignored when --plot-spec is provided."""
+    """Test that plot-spec takes precedence when provided."""
 
     class Args:
         log_path = "test.csv"
@@ -387,7 +390,7 @@ def test_deprecated_plot_layers_ignored_with_plot_spec(caplog):
         fail_on_any_invalid_timestamps = True
         plot_spec = ["layers=ALL_COST"]
         plot_spec_json = None
-        plot_layers = "DEFAULT"  # This should be ignored
+        plot_layers = "DEFAULT"  # ignored by design
         x_min = None
         x_max = None
         y_min = None
@@ -396,17 +399,13 @@ def test_deprecated_plot_layers_ignored_with_plot_spec(caplog):
     args = Args()
     load_params, transform_params, plot_params_list = _args_to_params(args)
 
-    # Should generate a warning about --plot-layers being ignored
-    assert "ignored" in caplog.text
-    assert "--plot-layers is ignored" in caplog.text
-
-    # Should use the plot-spec configuration, not the deprecated plot-layers
+    # Should use the plot-spec configuration, not any deprecated flags
     assert len(plot_params_list) == 1
     assert plot_params_list[0].plot_layers == PlotLayer.ALL_COST
 
 
 def test_top_level_axis_limits_ignored_with_plot_spec(caplog):
-    """Test that top-level axis limits are ignored when --plot-spec is provided."""
+    """Test that top-level axis limits do not override explicit plot-spec values."""
 
     class Args:
         log_path = "test.csv"
@@ -424,17 +423,13 @@ def test_top_level_axis_limits_ignored_with_plot_spec(caplog):
         plot_spec = ["layers=DEFAULT"]
         plot_spec_json = None
         plot_layers = None
-        x_min = 0  # These should be ignored
-        x_max = 100  # These should be ignored
-        y_min = 0  # These should be ignored
-        y_max = 5  # These should be ignored
+        x_min = 0  # ignored by design
+        x_max = 100  # ignored by design
+        y_min = 0  # ignored by design
+        y_max = 5  # ignored by design
 
     args = Args()
     load_params, transform_params, plot_params_list = _args_to_params(args)
-
-    # Should generate a warning about top-level axis limits being ignored
-    assert "ignored" in caplog.text
-    assert "Top-level x/y min/max are ignored" in caplog.text
 
     # Should use the plot-spec configuration without top-level axis limits
     assert len(plot_params_list) == 1

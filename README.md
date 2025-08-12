@@ -85,12 +85,8 @@ Plot options:
 - --plot-spec-json JSON_OBJECT (repeatable)
   - JSON object with keys: layers, x_min, x_max, y_min, y_max
   - Example: --plot-spec-json '{"layers":"ALL_COST","y_min":0}'
-- --plot-layers PRESET_OR_FLAGS (deprecated)
-  - Presets: DEFAULT, ALL_OLS, ALL_WLS, ALL_PREDICTION, ALL_COST, MIN_MARKERS_ONLY, EVERYTHING
-  - Or combine atomic flags: DATA_SCATTER+OLS_PRED_LINEAR+LEGEND
-- --x-min, --x-max, --y-min, --y-max (deprecated when using --plot-spec)
 
-Defaults preview:
+Defaults preview
 
 - python -m src.main --print-defaults
 - Help with policy-defaults injected:
@@ -318,7 +314,7 @@ The multi-plot functionality allows you to generate multiple plots with differen
 - Use --plot-spec-json JSON_OBJECT to specify plot parameters as a JSON object (repeatable)
 - Each plot specification can have its own layers, axis limits, and other parameters
 - Multiple plots will be generated with descriptive filenames based on their configurations
-- The deprecated --plot-layers flag still works for single plot generation but is no longer recommended
+- Deprecated top-level flags such as --plot-layers and standalone --x-min/--x-max/--y-min/--y-max have been removed. Use --plot-spec / --plot-spec-json for explicit plot configurations.
 
 ## License
 

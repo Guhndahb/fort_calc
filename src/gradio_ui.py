@@ -293,7 +293,8 @@ def _run_pipeline(
         return msg, None, msg
 
     # Load defaults and overlay UI params
-    d_load, d_trans, d_plot = get_default_params()
+    d_load, d_trans, d_plots = get_default_params()
+    d_plot = d_plots[0]
     print(f"[DEBUG {_short_ts(time.time())}] Loaded default params")
 
     # Build LoadSliceParams
@@ -382,7 +383,7 @@ def _run_pipeline(
             print(
                 f"[DEBUG {_short_ts(time.time())}] Parsing plot specs (raw={plot_specs_raw!r})"
             )
-            parsed_list = parse_plot_specs(plot_specs_raw, d_plot)
+            parsed_list = parse_plot_specs(plot_specs_raw, d_plots[0])
             print(
                 f"[DEBUG {_short_ts(time.time())}] parse_plot_specs returned {len(parsed_list)} entries"
             )
@@ -395,8 +396,8 @@ def _run_pipeline(
         if parsed_list:
             list_plot_params = parsed_list
         else:
-            # Use default single plot param (preserve defaults)
-            list_plot_params = [d_plot]
+            # Use canonical default plot list
+            list_plot_params = d_plots
         print(
             f"[DEBUG {_short_ts(time.time())}] Will render {len(list_plot_params)} plot(s)"
         )
@@ -493,7 +494,8 @@ def _run_pipeline(
 
 def _build_ui():
     with gr.Blocks() as demo:
-        d_load, d_trans, d_plot = get_default_params()
+        d_load, d_trans, d_plots = get_default_params()
+        d_plot = d_plots[0]
         gr.Markdown(
             "### FORT Calculator GUI — [GitHub repository](https://github.com/Guhndahb/fort_calc)"
         )

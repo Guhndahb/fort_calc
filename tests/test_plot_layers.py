@@ -343,8 +343,11 @@ def test_args_to_params():
     assert transform_params.zscore_min == -2.0
     assert transform_params.zscore_max == 2.0
     assert transform_params.input_data_fort == 5
-    assert len(plot_params_list) == 1
-    assert plot_params_list[0].plot_layers == PlotLayer.DEFAULT
+    # Canonical defaults now return a list of policy PlotParams
+    assert len(plot_params_list) == 3
+    assert plot_params_list[0].plot_layers == (
+        PlotLayer.DATA_SCATTER | PlotLayer.ALL_PREDICTION
+    )
 
 
 def test_args_to_params_deprecated_plot_layers_warning(caplog):
@@ -374,9 +377,11 @@ def test_args_to_params_deprecated_plot_layers_warning(caplog):
     args = Args()
     load_params, transform_params, plot_params_list = _args_to_params(args)
 
-    # Should generate a warning about deprecated --plot-layers
-    assert "deprecated" in caplog.text
-    assert "--plot-layers is deprecated" in caplog.text
+    # Deprecated top-level flags removed; canonical defaults are returned
+    assert len(plot_params_list) == 3
+    assert plot_params_list[0].plot_layers == (
+        PlotLayer.DATA_SCATTER | PlotLayer.ALL_PREDICTION
+    )
 
 
 def test_args_to_params_deprecated_plot_layers_ignored_with_plot_spec(caplog):
@@ -406,11 +411,7 @@ def test_args_to_params_deprecated_plot_layers_ignored_with_plot_spec(caplog):
     args = Args()
     load_params, transform_params, plot_params_list = _args_to_params(args)
 
-    # Should generate a warning about --plot-layers being ignored
-    assert "ignored" in caplog.text
-    assert "--plot-layers is ignored" in caplog.text
-
-    # Should use the plot-spec configuration, not the deprecated plot-layers
+    # Should use the plot-spec configuration, not any deprecated flags
     assert len(plot_params_list) == 1
     assert plot_params_list[0].plot_layers == PlotLayer.ALL_COST
 
@@ -441,10 +442,6 @@ def test_args_to_params_top_level_axis_limits_ignored_with_plot_spec(caplog):
 
     args = Args()
     load_params, transform_params, plot_params_list = _args_to_params(args)
-
-    # Should generate a warning about top-level axis limits being ignored
-    assert "ignored" in caplog.text
-    assert "Top-level x/y min/max are ignored" in caplog.text
 
     # Should use the plot-spec configuration without top-level axis limits
     assert len(plot_params_list) == 1

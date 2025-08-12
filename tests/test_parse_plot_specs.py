@@ -12,8 +12,9 @@ def _elapsed_ok(func, *args, max_seconds=2, **kwargs):
 
 
 def test_parse_blank_and_simple_specs():
-    # Get default plot params from the module helper
-    _, _, default_plot = gradio_ui.get_default_params()
+    # Get default plot params from the module helper (now returns a list of PlotParams)
+    _, _, default_plots = gradio_ui.get_default_params()
+    default_plot = default_plots[0]
 
     # a) None / blank string -> []
     r = _elapsed_ok(gradio_ui.parse_plot_specs, None, default_plot)
@@ -34,7 +35,8 @@ def test_parse_blank_and_simple_specs():
 
 
 def test_parse_multiline_example():
-    _, _, default_plot = gradio_ui.get_default_params()
+    _, _, default_plots = gradio_ui.get_default_params()
+    default_plot = default_plots[0]
     multi = """layers=DEFAULT
 layers=DATA_SCATTER+OLS_PRED_LINEAR,x_max=200
 {"layers":"ALL_COST","x_max":null}
