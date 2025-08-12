@@ -372,7 +372,7 @@ def _run_pipeline(
                 summary.regression_diagnostics
             )
             report_text = assemble_text_report(
-                df, transformed, summary, table_text, best_label
+                df, transformed, summary, table_text, best_label, tp.verbose_filtering
             )
             print(f"[DEBUG {_short_ts(time.time())}] Assembled textual report")
         except Exception:

@@ -2574,9 +2574,14 @@ def assemble_text_report(
     summary: SummaryModelOutputs,
     table_text: str,
     best_label: str,
+    verbose_filtering: bool = False,
 ) -> str:
     """
     Create a concise, readable report. Keeps current information content but in one place.
+
+    Parameters:
+      - verbose_filtering: when True, render the full excluded DataFrame
+        (transformed.df_excluded) instead of a head/tail summary.
     """
     # 1) Prepare base sections (input head/tail, filtered head/tail)
     parts: list[str] = []
@@ -2601,9 +2606,23 @@ def assemble_text_report(
         f"Filtered data (head/tail):\n{_fmt_head_tail(transformed.df_range, n=5)}"
     )
     parts.append("\n")
-    parts.append(
-        f"Excluded data (head/tail):\n{_fmt_head_tail(transformed.df_excluded, n=5)}"
-    )
+    # Excluded data: show full excluded DataFrame when verbose_filtering is enabled,
+    # otherwise preserve previous head/tail behavior.
+    if verbose_filtering:
+        if transformed.df_excluded is None or transformed.df_excluded.empty:
+            parts.append("Excluded data (full):\n(no rows)")
+        else:
+            with pd.option_context(
+                "display.max_rows", None, "display.max_columns", None
+            ):
+                parts.append(
+                    "Excluded data (full):\n"
+                    + transformed.df_excluded.to_string(index=False)
+                )
+    else:
+        parts.append(
+            f"Excluded data (head/tail):\n{_fmt_head_tail(transformed.df_excluded, n=5)}"
+        )
     parts.append("\n")
 
     # 1.5) Insert model results preview (head and tail) with shortened headers
@@ -2875,7 +2894,12 @@ def _orchestrate(
     write_manifest(f"manifest-{short_hash}.json", manifest)
 
     report = assemble_text_report(
-        df_range, transformed, summary, table_text, best_label
+        df_range,
+        transformed,
+        summary,
+        table_text,
+        best_label,
+        params_transform.verbose_filtering,
     )
     print(report)
 
