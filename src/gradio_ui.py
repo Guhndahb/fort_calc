@@ -565,22 +565,38 @@ def _build_ui():
             )
             iqr_k_low = gr.Number(
                 label="iqr_k_low",
-                value=d_trans.iqr_k_low,
+                value=(
+                    None if d_trans.iqr_k_low is None else round(d_trans.iqr_k_low, 2)
+                ),
+                precision=2,
+                step=0.25,
                 visible=d_trans.use_iqr_filtering,
             )
             iqr_k_high = gr.Number(
                 label="iqr_k_high",
-                value=d_trans.iqr_k_high,
+                value=(
+                    None if d_trans.iqr_k_high is None else round(d_trans.iqr_k_high, 2)
+                ),
+                precision=2,
+                step=0.25,
                 visible=d_trans.use_iqr_filtering,
             )
             zmin = gr.Number(
                 label="zscore_min",
-                value=d_trans.zscore_min,
+                value=(
+                    None if d_trans.zscore_min is None else round(d_trans.zscore_min, 2)
+                ),
+                precision=2,
+                step=0.25,
                 visible=not d_trans.use_iqr_filtering,
             )
             zmax = gr.Number(
                 label="zscore_max",
-                value=d_trans.zscore_max,
+                value=(
+                    None if d_trans.zscore_max is None else round(d_trans.zscore_max, 2)
+                ),
+                precision=2,
+                step=0.25,
                 visible=not d_trans.use_iqr_filtering,
             )
 

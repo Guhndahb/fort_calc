@@ -19,6 +19,9 @@ def make_base_params():
         exclude_timestamp_ranges=None,
         verbose_filtering=False,
         fail_on_any_invalid_timestamps=True,
+        iqr_k_low=0.75,
+        iqr_k_high=1.5,
+        use_iqr_filtering=True,
     )
 
 

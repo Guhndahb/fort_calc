@@ -1105,13 +1105,13 @@ class TransformParams:
     ignore_resetticks: bool
     delta_mode: DeltaMode
     exclude_timestamp_ranges: Optional[List[Tuple[str, str]]]
-    verbose_filtering: bool = False
+    verbose_filtering: bool
     # Fail fast if any timestamps fail to parse (simple and strict by default)
-    fail_on_any_invalid_timestamps: bool = True
+    fail_on_any_invalid_timestamps: bool
     # IQR filtering parameters
-    iqr_k_low: float = 0.75  # Multiplier for lower bound (more aggressive filtering)
-    iqr_k_high: float = 1.5  # Multiplier for upper bound (standard IQR)
-    use_iqr_filtering: bool = True  # IQR filtering is the new default
+    iqr_k_low: float
+    iqr_k_high: float
+    use_iqr_filtering: bool
 
 
 @dataclass
@@ -1618,6 +1618,11 @@ def transform_pipeline(
         ...     ignore_resetticks=True,  # if False, resetticks will be subtracted from runticks
         ...     delta_mode=DeltaMode.PREVIOUS_CHUNK,
         ...     exclude_timestamp_ranges=None,
+        ...     verbose_filtering=False,
+        ...     fail_on_any_invalid_timestamps=True,
+        ...     iqr_k_low=0.75,
+        ...     iqr_k_high=1.5,
+        ...     use_iqr_filtering=True,
         ... )
         >>> out = transform_pipeline(df, params)
         >>> out.df_range.columns  # doctest: +ELLIPSIS
@@ -2303,16 +2308,20 @@ def get_default_params() -> tuple[LoadSliceParams, TransformParams, List[PlotPar
         include_header=True,
         col_sor=None,
         col_ticks=None,
-        header_map=None,
+        header_map={},  # default to empty dict rather than None
     )
     trans = TransformParams(
-        zscore_min=-1.5,
-        zscore_max=3,
+        zscore_min=-1.75,
+        zscore_max=2.5,
         input_data_fort=100,
         ignore_resetticks=True,
         delta_mode=DeltaMode.PREVIOUS_CHUNK,
         exclude_timestamp_ranges=None,
         verbose_filtering=False,
+        fail_on_any_invalid_timestamps=True,
+        iqr_k_low=1.0,
+        iqr_k_high=2.0,
+        use_iqr_filtering=True,
     )
 
     # Canonical default plot list (policy): three plot configurations used when

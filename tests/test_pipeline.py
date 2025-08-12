@@ -79,6 +79,10 @@ def test_transform_pipeline_filters_and_returns_contract():
         delta_mode=DeltaMode.PREVIOUS_CHUNK,
         exclude_timestamp_ranges=None,
         verbose_filtering=False,
+        fail_on_any_invalid_timestamps=True,
+        iqr_k_low=0.75,
+        iqr_k_high=1.5,
+        use_iqr_filtering=True,
     )
 
     out: TransformOutputs = transform_pipeline(df, params)
@@ -109,6 +113,10 @@ def test_summarize_and_model_contract():
         delta_mode=DeltaMode.PREVIOUS_CHUNK,
         exclude_timestamp_ranges=None,
         verbose_filtering=False,
+        fail_on_any_invalid_timestamps=True,
+        iqr_k_low=0.75,
+        iqr_k_high=1.5,
+        use_iqr_filtering=True,
     )
 
     # Suppress statsmodels/scipy normality warnings due to small n in unit tests
@@ -170,6 +178,10 @@ def test_regression_analysis_does_not_mutate_df_range_columns():
         delta_mode=DeltaMode.PREVIOUS_CHUNK,
         exclude_timestamp_ranges=None,
         verbose_filtering=False,
+        fail_on_any_invalid_timestamps=True,
+        iqr_k_low=0.75,
+        iqr_k_high=1.5,
+        use_iqr_filtering=True,
     )
     # Suppress statsmodels/scipy normality warnings due to small n in unit tests
     import warnings
