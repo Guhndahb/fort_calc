@@ -50,11 +50,11 @@ except Exception:
 
 import logging
 import time
-
-logger = logging.getLogger(__name__)
 import traceback
 
 import gradio as gr
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_optional_int(val: Optional[float]) -> Optional[int]:
@@ -198,17 +198,12 @@ def parse_plot_specs(raw: Optional[str], default_plot: PlotParams) -> List[PlotP
 
 def _prune_old_runs(run_root: Path, keep: Optional[int] = None) -> None:
     """
-    Retention helper: keep only the newest `keep` subdirectories under `run_root`
-    (ordered by modification time) and delete older ones.
+    Retention helper: keep only the newest `keep` subdirectories under `run_root`.
 
-    Configuration:
-      - FORT_GRADIO_RETENTION_KEEP: optional environment variable to override default keep count.
-        If unset or invalid, defaults to 10.
-
-    Safety:
-      - Only operates inside the provided run_root directory and only removes directories.
-      - Exceptions are caught and logged to stdout as lightweight debug messages so this helper
-        never raises during the normal Gradio request flow.
+    Behavior changes:
+      - Prefer deterministic name-based ordering for timestamped run directories (YYYYmmddTHHMMSS).
+      - Fall back to mtime ordering when names are not parseable.
+      - Log deletion failures at WARNING so they are visible; no retries — failures are retried on future runs.
     """
     try:
         # Resolve keep from env if not explicitly provided
@@ -226,19 +221,45 @@ def _prune_old_runs(run_root: Path, keep: Optional[int] = None) -> None:
 
         # Collect subdirectories only
         subdirs = [p for p in run_root.iterdir() if p.is_dir()]
-        # Sort by mtime (newest first)
-        subdirs_sorted = sorted(subdirs, key=lambda p: p.stat().st_mtime, reverse=True)
+        if not subdirs:
+            return
+
+        # Helper: detect names matching the run_ts format used elsewhere: YYYYmmddTHHMMSS...
+        def _looks_like_run_ts(name: str) -> bool:
+            try:
+                return (
+                    len(name) >= 15
+                    and name[0:4].isdigit()
+                    and name[4:8].isdigit()
+                    and name[8] == "T"
+                    and name[9:15].isdigit()
+                )
+            except Exception:
+                return False
+
+        # If all directory names look like the timestamp format, prefer lexicographic (name) sort
+        # which is monotonic for the timestamp format. Newest first.
+        if all(_looks_like_run_ts(p.name) for p in subdirs):
+            subdirs_sorted = sorted(subdirs, key=lambda p: p.name, reverse=True)
+        else:
+            # Fallback to mtime sort (newest first) for mixed or non-standard names
+            subdirs_sorted = sorted(
+                subdirs, key=lambda p: p.stat().st_mtime, reverse=True
+            )
+
         to_delete = subdirs_sorted[keep:]
 
         for d in to_delete:
             try:
                 shutil.rmtree(d)
-                logger.debug(f"Pruned old run dir: {d}")
+                logger.info(f"Pruned old run dir: {d}")
             except Exception as e:
-                logger.debug(f"Failed to prune {d}: {e}")
+                # Surface deletion failures so they're visible in production logs;
+                # do not retry here — a future run will attempt again.
+                logger.warning(f"Failed to prune {d}: {e}")
 
     except Exception as e:
-        logger.debug(f"Prune old runs unexpected error: {e}")
+        logger.exception(f"Prune old runs unexpected error: {e}")
 
 
 def _run_pipeline(
