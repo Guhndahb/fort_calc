@@ -145,6 +145,9 @@ manifest*.json
 # Notes
 notes.md
 
+# Main output
+output/**
+
 # Gradio output
 output_gradio/**
 
