@@ -75,156 +75,126 @@ def _parse_optional_int(val: Optional[float]) -> Optional[int]:
         return None
 
 
-def parse_plot_specs(
-    raw: Optional[str], default_plot: PlotParams, run_dir: Optional[Path] = None
-) -> List[PlotParams]:
+def parse_plot_specs(raw: Optional[str], default_plot: PlotParams) -> List[PlotParams]:
     """
     Parse multiline plot spec input. Each non-empty line is either a JSON object
     (starts with '{' or '[') or a key=value[,key=value...] style spec.
     Returns a list of PlotParams instances. If raw is None/blank returns [].
     On parse failure raises ValueError mentioning the offending line.
 
-    NOTE: Temporary debug logging to file 'gradio_debug.log' is added to help
-    diagnose hangs observed when this is invoked from the Gradio UI. This file
-    logging is intentionally lightweight and will be removed once the root cause
-    is identified.
+    This implementation removes the temporary file-based debug logging and refactors
+    parsing into small helpers for readability while preserving original semantics.
     """
     import json
 
-    run_root = run_dir if run_dir is not None else Path("output_gradio")
-    try:
-        run_root.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        # keep best-effort semantics; allow logging to silently fail
-        pass
-    debug_log_path = run_root / "gradio_debug.log"
-
-    # Lightweight file-based tracing to avoid stdout capture issues within Gradio workers
-    try:
-        with debug_log_path.open("a", encoding="utf-8") as fh:
-            fh.write(f"[parse_plot_specs] raw_repr={repr(raw)[:1000]}\n")
-    except Exception:
-        # Best-effort logging only; never fail parsing because logging couldn't be written
-        pass
-
     if raw is None or str(raw).strip() == "":
-        try:
-            with debug_log_path.open("a", encoding="utf-8") as fh:
-                fh.write("[parse_plot_specs] raw blank -> returning []\n")
-        except Exception:
-            pass
         return []
+
+    def _baseline() -> PlotParams:
+        return PlotParams(
+            plot_layers=default_plot.plot_layers,
+            x_min=default_plot.x_min,
+            x_max=default_plot.x_max,
+            y_min=default_plot.y_min,
+            y_max=default_plot.y_max,
+        )
+
+    def _float_or_none(v, field_name: str):
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except Exception as e:
+            raise ValueError(
+                f"Invalid numeric value for {field_name}: {v!r} -> {e}"
+            ) from e
+
+    def _parse_json_line(ln: str) -> PlotParams:
+        try:
+            spec = json.loads(ln)
+        except Exception as e:
+            raise ValueError(f"Invalid JSON in plot spec: {e}") from e
+
+        if not isinstance(spec, dict):
+            raise ValueError(f"JSON plot spec must be an object/dict, got {type(spec)}")
+
+        params = _baseline()
+
+        if "layers" in spec:
+            try:
+                params.plot_layers = _parse_plot_layers(spec["layers"])
+            except Exception as e:
+                raise ValueError(f"Failed to parse layers: {e}") from e
+
+        if "x_min" in spec:
+            params.x_min = None if spec["x_min"] is None else float(spec["x_min"])
+        if "x_max" in spec:
+            v = spec["x_max"]
+            if v is None:
+                params.x_max = None
+            elif isinstance(v, str) and str(v).strip().upper() == OMIT_FORT:
+                params.x_max = OMIT_FORT
+            else:
+                params.x_max = float(v)
+
+        if "y_min" in spec:
+            params.y_min = None if spec["y_min"] is None else float(spec["y_min"])
+        if "y_max" in spec:
+            params.y_max = None if spec["y_max"] is None else float(spec["y_max"])
+
+        return params
+
+    def _parse_kv_line(ln: str) -> PlotParams:
+        params = _baseline()
+        # Split on commas but allow '=' inside values after first '='
+        parts = [p.strip() for p in ln.split(",") if p.strip()]
+        for kv in parts:
+            if "=" not in kv:
+                raise ValueError(f"Invalid key=value pair: {kv!r}")
+            key, value = kv.split("=", 1)
+            key = key.strip()
+            val = value.strip()
+            # Strip surrounding quotes if present
+            if (val.startswith('"') and val.endswith('"')) or (
+                val.startswith("'") and val.endswith("'")
+            ):
+                val_unq = val[1:-1].strip()
+            else:
+                val_unq = val
+
+            if key == "layers":
+                try:
+                    params.plot_layers = _parse_plot_layers(val_unq)
+                except Exception as e:
+                    raise ValueError(f"Failed to parse layers: {e}") from e
+            elif key == "x_min":
+                params.x_min = _float_or_none(val_unq, "x_min")
+            elif key == "x_max":
+                if isinstance(val_unq, str) and val_unq.strip().upper() == OMIT_FORT:
+                    params.x_max = OMIT_FORT
+                else:
+                    params.x_max = _float_or_none(val_unq, "x_max")
+            elif key == "y_min":
+                params.y_min = _float_or_none(val_unq, "y_min")
+            elif key == "y_max":
+                params.y_max = _float_or_none(val_unq, "y_max")
+            else:
+                raise ValueError(f"Unknown key in plot spec: {key}")
+        return params
+
     lines = [ln.strip() for ln in str(raw).splitlines() if ln.strip()]
     parsed: List[PlotParams] = []
     for ln in lines:
         try:
-            try:
-                with debug_log_path.open("a", encoding="utf-8") as fh:
-                    fh.write(f"[parse_plot_specs] parsing line: {ln!r}\n")
-            except Exception:
-                pass
-
-            # JSON-style spec
             if ln and ln[0] in ("{", "["):
-                try:
-                    spec_dict = json.loads(ln)
-                except Exception as e:
-                    raise ValueError(f"Invalid JSON in plot spec: {e}") from e
-                params = PlotParams(
-                    plot_layers=default_plot.plot_layers,
-                    x_min=default_plot.x_min,
-                    x_max=default_plot.x_max,
-                    y_min=default_plot.y_min,
-                    y_max=default_plot.y_max,
-                )
-                if "layers" in spec_dict:
-                    params.plot_layers = _parse_plot_layers(spec_dict["layers"])
-                # x_min
-                if "x_min" in spec_dict:
-                    if spec_dict["x_min"] is None:
-                        params.x_min = None
-                    else:
-                        params.x_min = float(spec_dict["x_min"])
-                # x_max supports the OMIT_FORT sentinel string
-                if "x_max" in spec_dict:
-                    v = spec_dict["x_max"]
-                    if v is None:
-                        params.x_max = None
-                    elif isinstance(v, str) and str(v).strip().upper() == OMIT_FORT:
-                        params.x_max = OMIT_FORT
-                    else:
-                        params.x_max = float(v)
-                # y_min / y_max
-                if "y_min" in spec_dict:
-                    if spec_dict["y_min"] is None:
-                        params.y_min = None
-                    else:
-                        params.y_min = float(spec_dict["y_min"])
-                if "y_max" in spec_dict:
-                    if spec_dict["y_max"] is None:
-                        params.y_max = None
-                    else:
-                        params.y_max = float(spec_dict["y_max"])
-                parsed.append(params)
+                params = _parse_json_line(ln)
             else:
-                # key=value[,key=value...] style
-                params = PlotParams(
-                    plot_layers=default_plot.plot_layers,
-                    x_min=default_plot.x_min,
-                    x_max=default_plot.x_max,
-                    y_min=default_plot.y_min,
-                    y_max=default_plot.y_max,
-                )
-                # Split on commas but allow values containing '=' after the first
-                for kv in [k.strip() for k in ln.split(",") if k.strip()]:
-                    if "=" not in kv:
-                        raise ValueError(f"Invalid key=value pair: {kv!r}")
-                    key, value = kv.split("=", 1)
-                    key = key.strip()
-                    val = value.strip()
-                    # Strip surrounding quotes if present
-                    if (val.startswith('"') and val.endswith('"')) or (
-                        val.startswith("'") and val.endswith("'")
-                    ):
-                        val_unq = val[1:-1].strip()
-                    else:
-                        val_unq = val
-                    if key == "layers":
-                        params.plot_layers = _parse_plot_layers(val_unq)
-                    elif key == "x_min":
-                        params.x_min = float(val_unq)
-                    elif key == "x_max":
-                        # accept sentinel text (case-insensitive)
-                        if val_unq.upper() == OMIT_FORT:
-                            params.x_max = OMIT_FORT
-                        else:
-                            params.x_max = float(val_unq)
-                    elif key == "y_min":
-                        params.y_min = float(val_unq)
-                    elif key == "y_max":
-                        params.y_max = float(val_unq)
-                    else:
-                        raise ValueError(f"Unknown key in plot spec: {key}")
-                parsed.append(params)
-
-            try:
-                with debug_log_path.open("a", encoding="utf-8") as fh:
-                    fh.write(f"[parse_plot_specs] parsed line OK -> {parsed[-1]!r}\n")
-            except Exception:
-                pass
+                params = _parse_kv_line(ln)
+            parsed.append(params)
         except Exception as e:
-            # Wrap and provide helpful message mentioning offending line
-            try:
-                with debug_log_path.open("a", encoding="utf-8") as fh:
-                    fh.write(f"[parse_plot_specs] ERROR parsing line {ln!r}: {e}\n")
-            except Exception:
-                pass
+            # Preserve helpful error text and mention offending line like before
             raise ValueError(f"Failed to parse plot spec line: {ln!r} -> {e}") from e
-    try:
-        with debug_log_path.open("a", encoding="utf-8") as fh:
-            fh.write(f"[parse_plot_specs] completed, total_parsed={len(parsed)}\n")
-    except Exception:
-        pass
+
     return parsed
 
 
@@ -395,7 +365,7 @@ def _run_pipeline(
             print(
                 f"[DEBUG {_short_ts(time.time())}] Parsing plot specs (raw={plot_specs_raw!r})"
             )
-            parsed_list = parse_plot_specs(plot_specs_raw, d_plots[0], run_dir)
+            parsed_list = parse_plot_specs(plot_specs_raw, d_plots[0])
             print(
                 f"[DEBUG {_short_ts(time.time())}] parse_plot_specs returned {len(parsed_list)} entries"
             )
