@@ -249,8 +249,47 @@ def _prune_old_runs(run_root: Path, keep: Optional[int] = None) -> None:
 
         to_delete = subdirs_sorted[keep:]
 
+        # Resolve run_root once for repeated checks
+        try:
+            run_root_resolved = run_root.resolve()
+        except Exception:
+            # If we cannot resolve the run_root, avoid deleting anything as a safety measure.
+            logger.warning(f"Could not resolve run_root {run_root} - skipping prune")
+            return
+
+        def _safe_is_subpath(child: Path, parent: Path) -> bool:
+            """
+            Return True if `child.resolve()` is located inside `parent.resolve()`.
+            Conservative: on any error return False to avoid accidental deletes.
+            """
+            try:
+                # Resolve both paths (non-strict to allow deletion of directories even if mount points change)
+                parent_r = parent.resolve()
+                child_r = child.resolve()
+            except Exception:
+                return False
+            try:
+                import os
+
+                return os.path.commonpath([str(parent_r), str(child_r)]) == str(
+                    parent_r
+                )
+            except Exception:
+                return False
+
         for d in to_delete:
             try:
+                # Skip symbolic links/junctions to avoid following targets outside run_root.
+                if d.is_symlink():
+                    logger.warning(f"Skipping symlink during prune: {d}")
+                    continue
+
+                # Ensure the resolved target is inside the intended run_root to defend against
+                # junctions / symlinks pointing outside the app-owned directory (platform dependent).
+                if not _safe_is_subpath(d, run_root_resolved):
+                    logger.warning(f"Skipping prune of {d} - resolved outside run_root")
+                    continue
+
                 shutil.rmtree(d)
                 logger.info(f"Pruned old run dir: {d}")
             except Exception as e:
@@ -284,7 +323,7 @@ def _run_pipeline(
     Added debug prints to trace progress when running via the Gradio UI.
     """
     t0 = time.time()
-    logger.debug(f"_run_pipeline START - uploaded_file_path={uploaded_file_path!r}")
+    logger.info(f"_run_pipeline START - uploaded_file_path={uploaded_file_path!r}")
 
     if not uploaded_file_path:
         msg = "<div style='color:red'>Error: No CSV file uploaded. Please upload a CSV file.</div>"
@@ -495,7 +534,7 @@ def _run_pipeline(
             parts.append(f"<div>{txt}</div>")
         html = "\n".join(parts)
 
-        logger.debug(
+        logger.info(
             f"_run_pipeline COMPLETE (duration_ms={(time.time() - t0) * 1000:.1f})"
         )
         return html, str(zip_path), report_text
