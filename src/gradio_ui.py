@@ -326,7 +326,7 @@ def _run_pipeline(
     logger.info(f"_run_pipeline START - uploaded_file_path={uploaded_file_path!r}")
 
     if not uploaded_file_path:
-        msg = "<div style='color:red'>Error: No CSV file uploaded. Please upload a CSV file.</div>"
+        msg = "Error: No CSV file uploaded. Please upload a CSV file."
         logger.debug("_run_pipeline EARLY_EXIT no file")
         return msg, None, msg
 
@@ -428,7 +428,7 @@ def _run_pipeline(
             logger.debug(f"parse_plot_specs returned {len(parsed_list)} entries")
         except ValueError as ve:
             tb = traceback.format_exc()
-            msg = f"<div style='color:red'><h3>Plot specs parse error</h3><pre>{str(ve)}</pre><pre>{tb}</pre></div>"
+            msg = f"Plot specs parse error\n{str(ve)}\n{tb}"
             logger.debug(f"parse_plot_specs ERROR: {ve}")
             return msg, None, msg
 
@@ -541,7 +541,7 @@ def _run_pipeline(
 
     except Exception as e:
         tb = traceback.format_exc()
-        msg = f"<div style='color:red'><h3>Error running pipeline</h3><pre>{str(e)}</pre><pre>{tb}</pre></div>"
+        msg = f"Error running pipeline\n{str(e)}\n{tb}"
         logger.debug(f"_run_pipeline EXCEPTION: {e}\n{tb}")
         return msg, None, msg
 
