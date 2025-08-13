@@ -2253,12 +2253,12 @@ def render_outputs(
 
 
 def render_plots(
-    list_plot_params: List[PlotParams],
+    list_plot_params: list[PlotParams],
     df_included: pd.DataFrame,
     summary: SummaryModelOutputs,
     short_hash: str,
-    df_excluded: Optional[pd.DataFrame] = None,
-    output_dir: Optional[str] = None,
+    df_excluded: pd.DataFrame | None = None,
+    output_dir: str | None = None,
 ) -> list[str]:
     """
     Render one or more plots based on a list of PlotParams. Returns artifact paths.
@@ -2272,33 +2272,28 @@ def render_plots(
     If output_dir is provided the returned artifact paths will be full paths under that directory.
     """
     n = len(list_plot_params)
-    # Always calculate padding to ensure zero-based indexing, even for single plots
     pad = max(2, len(str(max(0, n - 1)))) if n > 0 else 2
+
     artifact_paths: list[str] = []
     for idx, pp in enumerate(list_plot_params):
         flags = pp.plot_layers
         suffix = _plot_layers_suffix(flags)
-        # Always include index in filename, even for single plots
-        out_svg = f"plot-{short_hash}-{str(idx).zfill(pad)}-{suffix}.svg"
 
-        # Build full output path when output_dir provided; otherwise keep relative filename.
-        if output_dir:
-            full_out_path = Path(output_dir) / out_svg
-            full_out = str(full_out_path)
-        else:
-            full_out = out_svg
+        filename = f"plot-{short_hash}-{idx:0{pad}}-{suffix}.svg"
+        output_path = Path(output_dir) / filename if output_dir else Path(filename)
 
-        # Single call to render_outputs using the computed path
         render_outputs(
             df_included,
             summary,
-            output_svg=full_out,
+            output_svg=str(output_path),
             df_excluded=df_excluded
             if (flags & PlotLayer.DATA_SCATTER_EXCLUDED)
             else None,
             plot_params=pp,
         )
-        artifact_paths.append(full_out)
+
+        artifact_paths.append(str(output_path))
+
     return artifact_paths
 
 
