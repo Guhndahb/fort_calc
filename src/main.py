@@ -15,6 +15,7 @@ global state mutation. Logging kept for internal diagnostics but functions are p
 import logging
 import os
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum, IntFlag, auto
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -2257,6 +2258,7 @@ def render_plots(
     summary: SummaryModelOutputs,
     short_hash: str,
     df_excluded: Optional[pd.DataFrame] = None,
+    output_dir: Optional[str] = None,
 ) -> list[str]:
     """
     Render one or more plots based on a list of PlotParams. Returns artifact paths.
@@ -2266,6 +2268,8 @@ def render_plots(
         where ii is 0-based, zero-padded to the width of len(list_plot_params)-1 (e.g., 00, 01).
 
     DATA_SCATTER_EXCLUDED points are rendered only if requested by each PlotParams.
+
+    If output_dir is provided the returned artifact paths will be full paths under that directory.
     """
     n = len(list_plot_params)
     # Always calculate padding to ensure zero-based indexing, even for single plots
@@ -2276,16 +2280,25 @@ def render_plots(
         suffix = _plot_layers_suffix(flags)
         # Always include index in filename, even for single plots
         out_svg = f"plot-{short_hash}-{str(idx).zfill(pad)}-{suffix}.svg"
+
+        # Build full output path when output_dir provided; otherwise keep relative filename.
+        if output_dir:
+            full_out_path = Path(output_dir) / out_svg
+            full_out = str(full_out_path)
+        else:
+            full_out = out_svg
+
+        # Single call to render_outputs using the computed path
         render_outputs(
             df_included,
             summary,
-            output_svg=out_svg,
+            output_svg=full_out,
             df_excluded=df_excluded
             if (flags & PlotLayer.DATA_SCATTER_EXCLUDED)
             else None,
             plot_params=pp,
         )
-        artifact_paths.append(out_svg)
+        artifact_paths.append(full_out)
     return artifact_paths
 
 
@@ -2854,6 +2867,11 @@ def _orchestrate(
     Orchestrate the full pipeline given explicit parameter objects.
     Split from main() so the CLI can remain thin and tests can call this directly.
     """
+    # Compute a single global run timestamp at function start and create run dir
+    global_run_timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    run_output_dir = Path("output") / global_run_timestamp
+    run_output_dir.mkdir(parents=True, exist_ok=True)
+
     abs_input_posix, short_hash, full_hash, effective_params = build_run_identity(
         params_load, params_transform
     )
@@ -2864,12 +2882,14 @@ def _orchestrate(
 
     best_label, table_text = build_model_comparison(summary.regression_diagnostics)
 
+    # Pass the run output dir so plots are written into that directory
     artifact_paths = render_plots(
         list_plot_params=list_plot_params,
         df_included=transformed.df_range,
         summary=summary,
         short_hash=short_hash,
         df_excluded=transformed.df_excluded,
+        output_dir=str(run_output_dir),
     )
 
     total_input_rows = int(len(df_range))
@@ -2891,7 +2911,8 @@ def _orchestrate(
         hashes=(short_hash, full_hash),
         artifact_paths=artifact_paths,
     )
-    write_manifest(f"manifest-{short_hash}.json", manifest)
+    # Write manifest into the run output directory
+    write_manifest(str(run_output_dir / f"manifest-{short_hash}.json"), manifest)
 
     report = assemble_text_report(
         df_range,
@@ -2901,6 +2922,14 @@ def _orchestrate(
         best_label,
         params_transform.verbose_filtering,
     )
+
+    # Write textual report into the run dir named report-{short_hash}.txt using UTF-8, then print
+    report_path = run_output_dir / f"report-{short_hash}.txt"
+    try:
+        report_path.write_text(report, encoding="utf-8")
+    except Exception:
+        logger.exception("Failed to write textual report to %s", str(report_path))
+
     print(report)
 
 
