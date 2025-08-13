@@ -75,7 +75,9 @@ def _parse_optional_int(val: Optional[float]) -> Optional[int]:
         return None
 
 
-def parse_plot_specs(raw: Optional[str], default_plot: PlotParams) -> List[PlotParams]:
+def parse_plot_specs(
+    raw: Optional[str], default_plot: PlotParams, run_dir: Optional[Path] = None
+) -> List[PlotParams]:
     """
     Parse multiline plot spec input. Each non-empty line is either a JSON object
     (starts with '{' or '[') or a key=value[,key=value...] style spec.
@@ -89,9 +91,17 @@ def parse_plot_specs(raw: Optional[str], default_plot: PlotParams) -> List[PlotP
     """
     import json
 
+    run_root = run_dir if run_dir is not None else Path("output_gradio")
+    try:
+        run_root.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        # keep best-effort semantics; allow logging to silently fail
+        pass
+    debug_log_path = run_root / "gradio_debug.log"
+
     # Lightweight file-based tracing to avoid stdout capture issues within Gradio workers
     try:
-        with open("gradio_debug.log", "a", encoding="utf-8") as fh:
+        with debug_log_path.open("a", encoding="utf-8") as fh:
             fh.write(f"[parse_plot_specs] raw_repr={repr(raw)[:1000]}\n")
     except Exception:
         # Best-effort logging only; never fail parsing because logging couldn't be written
@@ -99,7 +109,7 @@ def parse_plot_specs(raw: Optional[str], default_plot: PlotParams) -> List[PlotP
 
     if raw is None or str(raw).strip() == "":
         try:
-            with open("gradio_debug.log", "a", encoding="utf-8") as fh:
+            with debug_log_path.open("a", encoding="utf-8") as fh:
                 fh.write("[parse_plot_specs] raw blank -> returning []\n")
         except Exception:
             pass
@@ -109,7 +119,7 @@ def parse_plot_specs(raw: Optional[str], default_plot: PlotParams) -> List[PlotP
     for ln in lines:
         try:
             try:
-                with open("gradio_debug.log", "a", encoding="utf-8") as fh:
+                with debug_log_path.open("a", encoding="utf-8") as fh:
                     fh.write(f"[parse_plot_specs] parsing line: {ln!r}\n")
             except Exception:
                 pass
@@ -198,20 +208,20 @@ def parse_plot_specs(raw: Optional[str], default_plot: PlotParams) -> List[PlotP
                 parsed.append(params)
 
             try:
-                with open("gradio_debug.log", "a", encoding="utf-8") as fh:
+                with debug_log_path.open("a", encoding="utf-8") as fh:
                     fh.write(f"[parse_plot_specs] parsed line OK -> {parsed[-1]!r}\n")
             except Exception:
                 pass
         except Exception as e:
             # Wrap and provide helpful message mentioning offending line
             try:
-                with open("gradio_debug.log", "a", encoding="utf-8") as fh:
+                with debug_log_path.open("a", encoding="utf-8") as fh:
                     fh.write(f"[parse_plot_specs] ERROR parsing line {ln!r}: {e}\n")
             except Exception:
                 pass
             raise ValueError(f"Failed to parse plot spec line: {ln!r} -> {e}") from e
     try:
-        with open("gradio_debug.log", "a", encoding="utf-8") as fh:
+        with debug_log_path.open("a", encoding="utf-8") as fh:
             fh.write(f"[parse_plot_specs] completed, total_parsed={len(parsed)}\n")
     except Exception:
         pass
@@ -295,8 +305,7 @@ def _run_pipeline(
         return msg, None, msg
 
     # Load defaults and overlay UI params
-    d_load, d_trans, d_plots = get_default_params()
-    d_plot = d_plots[0]
+    _, d_trans, d_plots = get_default_params()
     print(f"[DEBUG {_short_ts(time.time())}] Loaded default params")
 
     # Build LoadSliceParams
@@ -344,9 +353,10 @@ def _run_pipeline(
             f"[DEBUG {_short_ts(time.time())}] build_run_identity returned short_hash={short_hash}"
         )
 
-        # Ensure run directory
-        run_dir = Path("gradio_runs") / short_hash
-        os.makedirs(run_dir, exist_ok=True)
+        # Ensure run directory (use per-run output_gradio/<timestamp> like main)
+        run_ts = time.strftime("%Y%m%dT%H%M%S", time.localtime())
+        run_dir = Path("output_gradio") / run_ts
+        run_dir.mkdir(parents=True, exist_ok=True)
         print(f"[DEBUG {_short_ts(time.time())}] Ensured run_dir={run_dir}")
 
         # Execute pipeline
@@ -385,7 +395,7 @@ def _run_pipeline(
             print(
                 f"[DEBUG {_short_ts(time.time())}] Parsing plot specs (raw={plot_specs_raw!r})"
             )
-            parsed_list = parse_plot_specs(plot_specs_raw, d_plots[0])
+            parsed_list = parse_plot_specs(plot_specs_raw, d_plots[0], run_dir)
             print(
                 f"[DEBUG {_short_ts(time.time())}] parse_plot_specs returned {len(parsed_list)} entries"
             )
@@ -404,7 +414,7 @@ def _run_pipeline(
             f"[DEBUG {_short_ts(time.time())}] Will render {len(list_plot_params)} plot(s)"
         )
 
-        # Render plots (will create SVG files in current working directory)
+        # Render plots (will create SVG files in run output directory)
         print(f"[DEBUG {_short_ts(time.time())}] Calling render_plots...")
         artifact_paths = render_plots(
             list_plot_params,
@@ -412,26 +422,39 @@ def _run_pipeline(
             summary,
             short_hash,
             transformed.df_excluded,
+            output_dir=str(run_dir),
         )
         print(
             f"[DEBUG {_short_ts(time.time())}] render_plots returned {artifact_paths}"
         )
 
-        # Move generated svgs into run_dir
+        # Move generated svgs into run_dir (skip move if already in run_dir)
         saved_svgs: List[Path] = []
         for p in artifact_paths:
             src = Path(p)
             if src.exists():
-                dst = run_dir / src.name
-                shutil.move(str(src), str(dst))
-                saved_svgs.append(dst)
+                try:
+                    if src.parent.resolve() != run_dir.resolve():
+                        dst = run_dir / src.name
+                        shutil.move(str(src), str(dst))
+                        saved_svgs.append(dst)
+                    else:
+                        saved_svgs.append(src)
+                except Exception:
+                    # Fallback: attempt move if resolve fails; best-effort only
+                    dst = run_dir / src.name
+                    try:
+                        shutil.move(str(src), str(dst))
+                        saved_svgs.append(dst)
+                    except Exception:
+                        pass
         print(f"[DEBUG {_short_ts(time.time())}] Saved svgs: {saved_svgs}")
 
         # Prune older run directories according to retention policy so public-facing UI
         # doesn't accumulate unlimited artifacts. The helper reads FORT_GRADIO_RETENTION_KEEP
         # (default 10) to determine how many most-recent run dirs to keep.
         try:
-            _prune_old_runs(Path("gradio_runs"))
+            _prune_old_runs(Path("output_gradio"))
         except Exception as _e_prune:
             # Never fail the request because pruning had an issue; log lightweight debug info.
             print(f"[DEBUG {_short_ts(time.time())}] Prune old runs error: {_e_prune}")
