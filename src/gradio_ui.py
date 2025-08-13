@@ -48,15 +48,13 @@ except Exception:
         transform_pipeline,
     )
 
+import logging
 import time
+
+logger = logging.getLogger(__name__)
 import traceback
 
 import gradio as gr
-
-
-def _short_ts(t: float) -> str:
-    """Return a short timestamp for debug prints (seconds with millisecond resolution)."""
-    return f"{t:.3f}"
 
 
 def _parse_optional_int(val: Optional[float]) -> Optional[int]:
@@ -220,7 +218,7 @@ def _prune_old_runs(run_root: Path, keep: Optional[int] = None) -> None:
             except Exception:
                 keep = 10
         if keep <= 0:
-            print(f"[DEBUG] retention keep <=0 ({keep}) -> skipping prune")
+            logger.debug(f"retention keep <=0 ({keep}) -> skipping prune")
             return
 
         if not run_root.exists() or not run_root.is_dir():
@@ -235,12 +233,12 @@ def _prune_old_runs(run_root: Path, keep: Optional[int] = None) -> None:
         for d in to_delete:
             try:
                 shutil.rmtree(d)
-                print(f"[DEBUG] Pruned old run dir: {d}")
+                logger.debug(f"Pruned old run dir: {d}")
             except Exception as e:
-                print(f"[DEBUG] Failed to prune {d}: {e}")
+                logger.debug(f"Failed to prune {d}: {e}")
 
     except Exception as e:
-        print(f"[DEBUG] Prune old runs unexpected error: {e}")
+        logger.debug(f"Prune old runs unexpected error: {e}")
 
 
 def _run_pipeline(
@@ -265,18 +263,16 @@ def _run_pipeline(
     Added debug prints to trace progress when running via the Gradio UI.
     """
     t0 = time.time()
-    print(
-        f"[DEBUG {_short_ts(t0)}] _run_pipeline START - uploaded_file_path={uploaded_file_path!r}"
-    )
+    logger.debug(f"_run_pipeline START - uploaded_file_path={uploaded_file_path!r}")
 
     if not uploaded_file_path:
         msg = "<div style='color:red'>Error: No CSV file uploaded. Please upload a CSV file.</div>"
-        print(f"[DEBUG {_short_ts(time.time())}] _run_pipeline EARLY_EXIT no file")
+        logger.debug("_run_pipeline EARLY_EXIT no file")
         return msg, None, msg
 
     # Load defaults and overlay UI params
     _, d_trans, d_plots = get_default_params()
-    print(f"[DEBUG {_short_ts(time.time())}] Loaded default params")
+    logger.debug("Loaded default params")
 
     # Build LoadSliceParams
     lp = LoadSliceParams(
@@ -287,7 +283,7 @@ def _run_pipeline(
         col_sor=_parse_optional_int(col_sor),
         col_ticks=_parse_optional_int(col_ticks),
     )
-    print(f"[DEBUG {_short_ts(time.time())}] Built LoadSliceParams -> {lp}")
+    logger.debug(f"Built LoadSliceParams -> {lp}")
 
     # Map delta_mode string to enum based on the default TransformParams instance
     try:
@@ -312,39 +308,35 @@ def _run_pipeline(
         iqr_k_high=iqr_k_high if iqr_k_high is not None else d_trans.iqr_k_high,
         use_iqr_filtering=use_iqr_filtering,
     )
-    print(f"[DEBUG {_short_ts(time.time())}] Built TransformParams -> {tp}")
+    logger.debug(f"Built TransformParams -> {tp}")
 
     try:
-        print(f"[DEBUG {_short_ts(time.time())}] Calling build_run_identity...")
+        logger.debug("Calling build_run_identity...")
         abs_input_posix, short_hash, full_hash, effective_params = build_run_identity(
             lp, tp
         )
-        print(
-            f"[DEBUG {_short_ts(time.time())}] build_run_identity returned short_hash={short_hash}"
-        )
+        logger.debug(f"build_run_identity returned short_hash={short_hash}")
 
         # Ensure run directory (use per-run output_gradio/<timestamp> like main)
         run_ts = time.strftime("%Y%m%dT%H%M%S", time.localtime())
         run_dir = Path("output_gradio") / run_ts
         run_dir.mkdir(parents=True, exist_ok=True)
-        print(f"[DEBUG {_short_ts(time.time())}] Ensured run_dir={run_dir}")
+        logger.debug(f"Ensured run_dir={run_dir}")
 
         # Execute pipeline
-        print(f"[DEBUG {_short_ts(time.time())}] Calling load_and_slice_csv...")
+        logger.debug("Calling load_and_slice_csv...")
         df = load_and_slice_csv(lp)
-        print(
-            f"[DEBUG {_short_ts(time.time())}] load_and_slice_csv returned {len(df)} rows"
-        )
+        logger.debug(f"load_and_slice_csv returned {len(df)} rows")
 
-        print(f"[DEBUG {_short_ts(time.time())}] Calling transform_pipeline...")
+        logger.debug("Calling transform_pipeline...")
         transformed = transform_pipeline(df, tp)
-        print(
-            f"[DEBUG {_short_ts(time.time())}] transform_pipeline complete; df_range len={len(transformed.df_range)}"
+        logger.debug(
+            f"transform_pipeline complete; df_range len={len(transformed.df_range)}"
         )
 
-        print(f"[DEBUG {_short_ts(time.time())}] Calling summarize_and_model...")
+        logger.debug("Calling summarize_and_model...")
         summary = summarize_and_model(transformed.df_range, tp)
-        print(f"[DEBUG {_short_ts(time.time())}] summarize_and_model complete")
+        logger.debug("summarize_and_model complete")
 
         # Build textual report from pipeline outputs
         try:
@@ -354,39 +346,31 @@ def _run_pipeline(
             report_text = assemble_text_report(
                 df, transformed, summary, table_text, best_label, tp.verbose_filtering
             )
-            print(f"[DEBUG {_short_ts(time.time())}] Assembled textual report")
+            logger.debug("Assembled textual report")
 
             # Save textual report into the run directory so it can be archived with the plots.
             # Use UTF-8 encoding and best-effort logging on failure (do not fail the pipeline).
             try:
                 report_path = run_dir / f"report-{short_hash}.txt"
                 report_path.write_text(report_text, encoding="utf-8")
-                print(
-                    f"[DEBUG {_short_ts(time.time())}] Saved textual report to {report_path}"
-                )
+                logger.debug(f"Saved textual report to {report_path}")
             except Exception:
                 # Keep consistent lightweight debug prints used elsewhere in this file.
-                print(
-                    f"[DEBUG {_short_ts(time.time())}] Failed to write textual report to {report_path}"
-                )
+                logger.debug(f"Failed to write textual report to {report_path}")
         except Exception:
             rpt_tb = traceback.format_exc()
             report_text = f"Failed to assemble report: {rpt_tb}"
-            print(f"[DEBUG {_short_ts(time.time())}] Report assembly FAILED: {rpt_tb}")
+            logger.debug(f"Report assembly FAILED: {rpt_tb}")
 
         # Decide plot parameter list: parse UI-provided multiline specs or fallback to defaults
         try:
-            print(
-                f"[DEBUG {_short_ts(time.time())}] Parsing plot specs (raw={plot_specs_raw!r})"
-            )
+            logger.debug(f"Parsing plot specs (raw={plot_specs_raw!r})")
             parsed_list = parse_plot_specs(plot_specs_raw, d_plots[0])
-            print(
-                f"[DEBUG {_short_ts(time.time())}] parse_plot_specs returned {len(parsed_list)} entries"
-            )
+            logger.debug(f"parse_plot_specs returned {len(parsed_list)} entries")
         except ValueError as ve:
             tb = traceback.format_exc()
             msg = f"<div style='color:red'><h3>Plot specs parse error</h3><pre>{str(ve)}</pre><pre>{tb}</pre></div>"
-            print(f"[DEBUG {_short_ts(time.time())}] parse_plot_specs ERROR: {ve}")
+            logger.debug(f"parse_plot_specs ERROR: {ve}")
             return msg, None, msg
 
         if parsed_list:
@@ -394,12 +378,10 @@ def _run_pipeline(
         else:
             # Use canonical default plot list
             list_plot_params = d_plots
-        print(
-            f"[DEBUG {_short_ts(time.time())}] Will render {len(list_plot_params)} plot(s)"
-        )
+        logger.debug(f"Will render {len(list_plot_params)} plot(s)")
 
         # Render plots (will create SVG files in run output directory)
-        print(f"[DEBUG {_short_ts(time.time())}] Calling render_plots...")
+        logger.debug("Calling render_plots...")
         artifact_paths = render_plots(
             list_plot_params,
             transformed.df_range,
@@ -408,9 +390,7 @@ def _run_pipeline(
             transformed.df_excluded,
             output_dir=str(run_dir),
         )
-        print(
-            f"[DEBUG {_short_ts(time.time())}] render_plots returned {artifact_paths}"
-        )
+        logger.debug(f"render_plots returned {artifact_paths}")
 
         # Move generated svgs into run_dir (skip move if already in run_dir)
         saved_svgs: List[Path] = []
@@ -432,19 +412,15 @@ def _run_pipeline(
                         saved_svgs.append(dst)
                     except Exception:
                         pass
-        print(f"[DEBUG {_short_ts(time.time())}] Saved svgs: {saved_svgs}")
+        logger.debug(f"Saved svgs: {saved_svgs}")
 
         # If we successfully wrote a textual report above, include it in the artifacts to be zipped.
         try:
             if "report_path" in locals() and report_path.exists():
                 saved_svgs.append(report_path)
-                print(
-                    f"[DEBUG {_short_ts(time.time())}] Included report in artifacts: {report_path}"
-                )
+                logger.debug(f"Included report in artifacts: {report_path}")
         except Exception as _e_inc:
-            print(
-                f"[DEBUG {_short_ts(time.time())}] Failed to include report in artifacts: {_e_inc}"
-            )
+            logger.debug(f"Failed to include report in artifacts: {_e_inc}")
 
         # Prune older run directories according to retention policy so public-facing UI
         # doesn't accumulate unlimited artifacts. The helper reads FORT_GRADIO_RETENTION_KEEP
@@ -453,7 +429,7 @@ def _run_pipeline(
             _prune_old_runs(Path("output_gradio"))
         except Exception as _e_prune:
             # Never fail the request because pruning had an issue; log lightweight debug info.
-            print(f"[DEBUG {_short_ts(time.time())}] Prune old runs error: {_e_prune}")
+            logger.debug(f"Prune old runs error: {_e_prune}")
 
         # Create zip archive inside run_dir: plots-{short_hash}.zip
         # To avoid blocking the Gradio worker (which appeared to hang for some users),
@@ -471,24 +447,18 @@ def _run_pipeline(
                 ) as zf:
                     for svg in svgs:
                         zf.write(svg, arcname=svg.name)
-                print(
-                    f"[DEBUG {_short_ts(time.time())}] Async zip created at {zip_path_local}"
-                )
+                logger.debug(f"Async zip created at {zip_path_local}")
             except Exception as e_zip:
-                print(f"[DEBUG {_short_ts(time.time())}] Async zip failed: {e_zip}")
+                logger.debug(f"Async zip failed: {e_zip}")
 
         try:
             thread = threading.Thread(
                 target=_create_zip_async, args=(zip_path, list(saved_svgs)), daemon=True
             )
             thread.start()
-            print(
-                f"[DEBUG {_short_ts(time.time())}] Zip creation started in background thread"
-            )
+            logger.debug("Zip creation started in background thread")
         except Exception as _e_thread:
-            print(
-                f"[DEBUG {_short_ts(time.time())}] Failed to start async zip thread: {_e_thread}"
-            )
+            logger.debug(f"Failed to start async zip thread: {_e_thread}")
             zip_path = ""
 
         # Read SVGs and embed raw content
@@ -501,15 +471,15 @@ def _run_pipeline(
             parts.append(f"<div>{txt}</div>")
         html = "\n".join(parts)
 
-        print(
-            f"[DEBUG {_short_ts(time.time())}] _run_pipeline COMPLETE (duration_ms={(time.time() - t0) * 1000:.1f})"
+        logger.debug(
+            f"_run_pipeline COMPLETE (duration_ms={(time.time() - t0) * 1000:.1f})"
         )
         return html, str(zip_path), report_text
 
     except Exception as e:
         tb = traceback.format_exc()
         msg = f"<div style='color:red'><h3>Error running pipeline</h3><pre>{str(e)}</pre><pre>{tb}</pre></div>"
-        print(f"[DEBUG {_short_ts(time.time())}] _run_pipeline EXCEPTION: {e}\n{tb}")
+        logger.debug(f"_run_pipeline EXCEPTION: {e}\n{tb}")
         return msg, None, msg
 
 
