@@ -355,6 +355,20 @@ def _run_pipeline(
                 df, transformed, summary, table_text, best_label, tp.verbose_filtering
             )
             print(f"[DEBUG {_short_ts(time.time())}] Assembled textual report")
+
+            # Save textual report into the run directory so it can be archived with the plots.
+            # Use UTF-8 encoding and best-effort logging on failure (do not fail the pipeline).
+            try:
+                report_path = run_dir / f"report-{short_hash}.txt"
+                report_path.write_text(report_text, encoding="utf-8")
+                print(
+                    f"[DEBUG {_short_ts(time.time())}] Saved textual report to {report_path}"
+                )
+            except Exception:
+                # Keep consistent lightweight debug prints used elsewhere in this file.
+                print(
+                    f"[DEBUG {_short_ts(time.time())}] Failed to write textual report to {report_path}"
+                )
         except Exception:
             rpt_tb = traceback.format_exc()
             report_text = f"Failed to assemble report: {rpt_tb}"
@@ -419,6 +433,18 @@ def _run_pipeline(
                     except Exception:
                         pass
         print(f"[DEBUG {_short_ts(time.time())}] Saved svgs: {saved_svgs}")
+
+        # If we successfully wrote a textual report above, include it in the artifacts to be zipped.
+        try:
+            if "report_path" in locals() and report_path.exists():
+                saved_svgs.append(report_path)
+                print(
+                    f"[DEBUG {_short_ts(time.time())}] Included report in artifacts: {report_path}"
+                )
+        except Exception as _e_inc:
+            print(
+                f"[DEBUG {_short_ts(time.time())}] Failed to include report in artifacts: {_e_inc}"
+            )
 
         # Prune older run directories according to retention policy so public-facing UI
         # doesn't accumulate unlimited artifacts. The helper reads FORT_GRADIO_RETENTION_KEEP
