@@ -355,7 +355,6 @@ def _run_pipeline(
                 report_path.write_text(report_text, encoding="utf-8")
                 logger.debug(f"Saved textual report to {report_path}")
             except Exception:
-                # Keep consistent lightweight debug prints used elsewhere in this file.
                 logger.debug(f"Failed to write textual report to {report_path}")
         except Exception:
             rpt_tb = traceback.format_exc()
@@ -415,10 +414,12 @@ def _run_pipeline(
         logger.debug(f"Saved svgs: {saved_svgs}")
 
         # If we successfully wrote a textual report above, include it in the artifacts to be zipped.
+        # Keep a separate list for zip artifacts so we inline only SVGs into the HTML.
+        artifacts_for_zip = list(saved_svgs)
         try:
             if "report_path" in locals() and report_path.exists():
-                saved_svgs.append(report_path)
-                logger.debug(f"Included report in artifacts: {report_path}")
+                artifacts_for_zip.append(report_path)
+                logger.debug(f"Included report in zip artifacts: {report_path}")
         except Exception as _e_inc:
             logger.debug(f"Failed to include report in artifacts: {_e_inc}")
 
@@ -453,7 +454,9 @@ def _run_pipeline(
 
         try:
             thread = threading.Thread(
-                target=_create_zip_async, args=(zip_path, list(saved_svgs)), daemon=True
+                target=_create_zip_async,
+                args=(zip_path, list(artifacts_for_zip)),
+                daemon=True,
             )
             thread.start()
             logger.debug("Zip creation started in background thread")
@@ -486,7 +489,6 @@ def _run_pipeline(
 def _build_ui():
     with gr.Blocks() as demo:
         d_load, d_trans, d_plots = get_default_params()
-        d_plot = d_plots[0]
         gr.Markdown(
             "### FORT Calculator GUI — [GitHub repository](https://github.com/Guhndahb/fort_calc)"
         )
