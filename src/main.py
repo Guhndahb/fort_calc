@@ -2550,8 +2550,8 @@ def build_manifest_dict(
 ) -> dict:
     short_hash, full_hash = hashes
     exclusion_reasons = (
-        f"timestamp_range_excluded_rows={counts.get('pre_zscore_excluded', 0)}; "
-        f"zscore_excluded_rows={counts.get('excluded_row_count', 0)}"
+        f"pre_outlier_excluded_rows={counts.get('pre_zscore_excluded', 0)}; "
+        f"outlier_excluded_rows={counts.get('excluded_row_count', 0)}"
     )
     return {
         "version": "1",
