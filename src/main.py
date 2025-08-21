@@ -95,6 +95,15 @@ class DeltaMode(Enum):
     )  # offline-cost derived from model predictions (see docstring above)
 
 
+class ValidationTest(Enum):
+    """
+    Available validation test scenarios for --validation-test.
+    Future-proofing enum; current implemented test is FORT_LADDER_DOWN.
+    """
+
+    FORT_LADDER_DOWN = auto()
+
+
 class FilterResult:
     """Container for filter operation results and diagnostics."""
 
@@ -3292,6 +3301,13 @@ def _build_cli_parser():
         help="Do not fail when any timestamps fail to parse.",
     )
 
+    # Validation test runner: allow selecting a validation test scenario (choices defined by ValidationTest)
+    g_tr.add_argument(
+        "--validation-test",
+        choices=[v.name for v in ValidationTest],
+        help="Run validation tests (special iterative runs) instead of a single pipeline run. Choices: FORT_LADDER_DOWN",
+    )
+
     # PlotParams
     g_plot = parser.add_argument_group("PlotParams")
     g_plot.add_argument(
@@ -3577,6 +3593,61 @@ def main() -> None:
         getattr(args, "debug", False) or os.getenv("FORT_CALC_DEBUG", "") == "1"
     )
     params_load, params_transform, plot_params_list = _args_to_params(args)
+
+    # If user requested validation tests, run the selected validation suite instead of the normal orchestration.
+    validation_choice = getattr(args, "validation_test", None)
+    if validation_choice is not None:
+        try:
+            # Resolve validation_tests module robustly to avoid relative-import errors when main is executed
+            # as a script (no package context) or as a package. Try package-relative import first, then
+            # sys.modules lookup, then absolute import names as fallbacks.
+            import importlib
+            import sys
+
+            def _resolve_validation_tests_module():
+                # 1) package-relative import when running as a package (preferred)
+                try:
+                    pkg = __package__ if __package__ else "src"
+                    return importlib.import_module(".validation_tests", package=pkg)
+                except Exception:
+                    pass
+
+                # 2) If already loaded under known names, return it
+                for candidate in ("src.validation_tests", "validation_tests"):
+                    if candidate in sys.modules:
+                        return sys.modules[candidate]
+
+                # 3) Try absolute import names
+                for candidate in ("src.validation_tests", "validation_tests"):
+                    try:
+                        return importlib.import_module(candidate)
+                    except Exception:
+                        continue
+
+                raise ImportError(
+                    "Could not import validation_tests module (tried package-relative and absolute imports)"
+                )
+
+            validation_tests = _resolve_validation_tests_module()
+
+            vt = ValidationTest[validation_choice]
+            if vt is ValidationTest.FORT_LADDER_DOWN:
+                validation_tests.validate_fort_ladder_down(
+                    params_load,
+                    params_transform,
+                    plot_params_list,
+                    output_base_dir=Path("output_validation") / vt.name,
+                )
+                return
+            else:
+                # Unknown/unsupported enum variant (future-proof); raise to signal unhandled selection
+                raise ValueError(
+                    f"Selected validation test not supported: {validation_choice}"
+                )
+        except Exception:
+            logger.exception("Validation test runner failed")
+            # Re-raise to allow main() centralized exception handling to run
+            raise
 
     if debug_mode:
         logger.setLevel(logging.DEBUG)

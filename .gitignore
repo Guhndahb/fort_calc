@@ -156,3 +156,6 @@ design**
 
 # Filter comparison output
 compare_filters/**
+
+# Validation tests
+output_validation/**
