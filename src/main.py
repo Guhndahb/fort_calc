@@ -75,6 +75,14 @@ class DeltaMode(Enum):
                       The first chunk has no previous baseline and thus yields NaN.
     - FIRST_CHUNK:    run_time_delta = run_time_mean(current_chunk) - run_time_mean(first_chunk)
                       The first chunk uses itself as baseline and thus yields NaN.
+    - MODEL_BASED:    Use regression-model predictions to derive per-model offline costs.
+                      The summary used for delta computation should still be produced
+                      (using a baseline delta_mode such as PREVIOUS_CHUNK) to preserve
+                      the contract that the final degenerate 'fort' row exists and that
+                      run_time_mean values are validated. The MODEL_BASED path then
+                      computes offline costs as: offline_cost_model = mean_fort - prediction(prev_k)
+                      falling back to the final summary delta if the model-based estimate is
+                      unavailable or non-finite.
 
     See also: summarize_run_time_by_sor_range() for details on how deltas are populated,
     including the degenerate final 'fort' row.
@@ -82,6 +90,9 @@ class DeltaMode(Enum):
 
     PREVIOUS_CHUNK = auto()  # delta vs. the immediately-preceding chunk
     FIRST_CHUNK = auto()  # delta vs. the very first chunk
+    MODEL_BASED = (
+        auto()
+    )  # offline-cost derived from model predictions (see docstring above)
 
 
 class FilterResult:
@@ -1127,8 +1138,13 @@ class SummaryModelOutputs:
     df_results: pd.DataFrame
     regression_diagnostics: dict
     offline_cost: float
-    sor_min_cost_lin: int
-    sor_min_cost_quad: int
+    # Per-model offline costs (MODEL_BASED path will populate these; otherwise may be None)
+    offline_cost_lin_ols: Optional[float] = None
+    offline_cost_quad_ols: Optional[float] = None
+    offline_cost_lin_wls: Optional[float] = None
+    offline_cost_quad_wls: Optional[float] = None
+    sor_min_cost_lin: int = 0
+    sor_min_cost_quad: int = 0
     # New: WLS min-cost markers (optional presence based on include_wls_overlay)
     sor_min_cost_lin_wls: Optional[int] = None
     sor_min_cost_quad_wls: Optional[int] = None
@@ -1743,8 +1759,9 @@ def summarize_and_model(
 
     Definitions:
     - offline_cost: The estimated extra time game restarts (usually offline stacks) take
-      versus an online stack. Computed as the run_time_delta of the final degenerate 'fort'
-      row produced by summarize_run_time_by_sor_range() under the chosen delta_mode.
+      versus an online stack. For MODEL_BASED, per-model offline costs are computed using
+      the model predictions and the final 'fort' run_time_mean; otherwise the final summary
+      delta is used as a scalar offline_cost.
 
     Notes:
     - The final "offline" row created by summarize_run_time_by_sor_range has start == end == input_data_fort
@@ -1760,33 +1777,165 @@ def summarize_and_model(
             f"({params.input_data_fort}); none found."
         )
 
-    df_summary = summarize_run_time_by_sor_range(
-        df_range, params.input_data_fort, params.delta_mode
-    )
-
-    # Disallow any NaNs in run_time_mean (including the final 'fort' row).
-    run_time_mean_isna = df_summary["run_time_mean"].isna()
-    nan_count = int(run_time_mean_isna.sum())
-    if nan_count > 0:
-        raise ValueError(
-            f"Insufficient input data: Found {nan_count} summary rows with no mean run time values."
+    # MODEL_BASED path: use model predictions to compute per-model offline costs.
+    if params.delta_mode is DeltaMode.MODEL_BASED:
+        # Produce a summary for diagnostics / contract validation. Use PREVIOUS_CHUNK baseline
+        # for summary delta computation (the model-based offline cost will not rely on that delta
+        # except as a fallback).
+        df_summary = summarize_run_time_by_sor_range(
+            df_range, params.input_data_fort, DeltaMode.PREVIOUS_CHUNK
         )
 
-    # Offline cost comes from the final row's delta; must be finite and not NaN
-    final_delta = df_summary.iloc[-1]["run_time_delta"]
-    if not np.isfinite(final_delta):
-        raise ValueError(
-            "Offline cost could not be computed: final run_time_delta is NaN or not finite."
+        # Disallow any NaNs in run_time_mean (including the final 'fort' row).
+        run_time_mean_isna = df_summary["run_time_mean"].isna()
+        nan_count = int(run_time_mean_isna.sum())
+        if nan_count > 0:
+            raise ValueError(
+                f"Insufficient input data: Found {nan_count} summary rows with no mean run time values."
+            )
+
+        # Fallback offline cost if model-based estimate is unavailable
+        final_delta = df_summary.iloc[-1]["run_time_delta"]
+        final_delta_fallback = float(final_delta) if np.isfinite(final_delta) else None
+
+        # Run regressions to obtain model predictions (produces 1..input_data_fort)
+        df_results, regression_diagnostics = regression_analysis(
+            df_range, params.input_data_fort
         )
-    offline_cost = float(final_delta)
 
-    # Extend prediction sequence to include k == input_data_fort in evaluated curve
-    # while leaving training behavior unchanged inside regression_analysis.
-    df_results, regression_diagnostics = regression_analysis(
-        df_range, params.input_data_fort
-    )
+        # mean_fort is the run_time_mean for the final degenerate row in df_summary
+        mean_fort = float(df_summary.iloc[-1]["run_time_mean"])
 
-    # Cumulative sums (OLS)
+        prev_k = params.input_data_fort - 1
+
+        # Helper to extract model prediction at prev_k
+        def _prediction_at_prev_k(col: str) -> Optional[float]:
+            if prev_k < 1:
+                return None
+            if col not in df_results.columns:
+                return None
+            sel = df_results.loc[df_results["sor#"] == prev_k, col]
+            if sel.empty:
+                return None
+            try:
+                val = float(pd.to_numeric(sel.squeeze(), errors="coerce"))
+            except Exception:
+                return None
+            if not np.isfinite(val):
+                return None
+            return val
+
+        # Compute per-model offline costs (model-based = mean_fort - prediction_at_prev_k)
+        offline_cost_lin_ols = None
+        offline_cost_quad_ols = None
+        offline_cost_lin_wls = None
+        offline_cost_quad_wls = None
+
+        # Linear OLS
+        pred = _prediction_at_prev_k("linear_model_output")
+        if pred is not None:
+            offline_cost_lin_ols = mean_fort - pred
+        else:
+            offline_cost_lin_ols = final_delta_fallback
+
+        # Quadratic OLS
+        pred = _prediction_at_prev_k("quadratic_model_output")
+        if pred is not None:
+            offline_cost_quad_ols = mean_fort - pred
+        else:
+            offline_cost_quad_ols = final_delta_fallback
+
+        # Linear WLS (may be present as column of NaNs if WLS fitting failed)
+        pred = _prediction_at_prev_k("linear_model_output_wls")
+        if pred is not None:
+            offline_cost_lin_wls = mean_fort - pred
+        else:
+            offline_cost_lin_wls = final_delta_fallback
+
+        # Quadratic WLS
+        pred = _prediction_at_prev_k("quadratic_model_output_wls")
+        if pred is not None:
+            offline_cost_quad_wls = mean_fort - pred
+        else:
+            offline_cost_quad_wls = final_delta_fallback
+
+        # Ensure finite values: if any computed offline cost is not finite, apply fallback
+        def _ensure_finite_or_fallback(x: Optional[float]) -> Optional[float]:
+            try:
+                if x is None:
+                    return None
+                xf = float(x)
+                if np.isfinite(xf):
+                    return xf
+                return final_delta_fallback
+            except Exception:
+                return final_delta_fallback
+
+        offline_cost_lin_ols = _ensure_finite_or_fallback(offline_cost_lin_ols)
+        offline_cost_quad_ols = _ensure_finite_or_fallback(offline_cost_quad_ols)
+        offline_cost_lin_wls = _ensure_finite_or_fallback(offline_cost_lin_wls)
+        offline_cost_quad_wls = _ensure_finite_or_fallback(offline_cost_quad_wls)
+
+        # Determine authoritative scalar offline_cost for backward compatibility:
+        # prefer linear OLS if finite, else first finite of the others.
+        chosen_offline_cost = None
+        candidates = [
+            offline_cost_lin_ols,
+            offline_cost_quad_ols,
+            offline_cost_lin_wls,
+            offline_cost_quad_wls,
+            final_delta_fallback,
+        ]
+        for c in candidates:
+            if c is not None and np.isfinite(c):
+                chosen_offline_cost = float(c)
+                break
+
+        if chosen_offline_cost is None:
+            raise ValueError(
+                "Offline cost could not be computed: no finite model-based or fallback offline cost available."
+            )
+
+        offline_cost = chosen_offline_cost
+
+    else:
+        # Non-model-based (existing behavior): compute df_summary using requested delta_mode
+        df_summary = summarize_run_time_by_sor_range(
+            df_range, params.input_data_fort, params.delta_mode
+        )
+
+        # Disallow any NaNs in run_time_mean (including the final 'fort' row).
+        run_time_mean_isna = df_summary["run_time_mean"].isna()
+        nan_count = int(run_time_mean_isna.sum())
+        if nan_count > 0:
+            raise ValueError(
+                f"Insufficient input data: Found {nan_count} summary rows with no mean run time values."
+            )
+
+        # Offline cost comes from the final row's delta; must be finite and not NaN
+        final_delta = df_summary.iloc[-1]["run_time_delta"]
+        if not np.isfinite(final_delta):
+            raise ValueError(
+                "Offline cost could not be computed: final run_time_delta is NaN or not finite."
+            )
+        offline_cost = float(final_delta)
+
+        # Run regression afterwards as before
+        df_results, regression_diagnostics = regression_analysis(
+            df_range, params.input_data_fort
+        )
+
+        # No per-model offline costs in non-MODEL_BASED path
+        offline_cost_lin_ols = None
+        offline_cost_quad_ols = None
+        offline_cost_lin_wls = None
+        offline_cost_quad_wls = None
+
+    # At this point we have:
+    # - df_summary
+    # - df_results and regression_diagnostics (set in either branch)
+    # - offline_cost scalar and per-model offline_cost_* variables (some may be None)
+    # Compute cumulative sums
     df_results["sum_lin"] = df_results["linear_model_output"].cumsum()
     df_results["sum_quad"] = df_results["quadratic_model_output"].cumsum()
 
@@ -1799,21 +1948,27 @@ def summarize_and_model(
         df_results["sum_lin_wls"] = df_results["linear_model_output_wls"].cumsum()
         df_results["sum_quad_wls"] = df_results["quadratic_model_output_wls"].cumsum()
 
-    # Cost per run columns (OLS)
+    # Helper to choose per-column offline cost (prefer per-model if available and finite, else scalar)
+    def _offline_for(column_specific: Optional[float]) -> float:
+        if column_specific is not None and np.isfinite(column_specific):
+            return float(column_specific)
+        return float(offline_cost)
+
+    # Cost per run columns (OLS) using per-model offline costs
     df_results["cost_per_run_at_fort_lin"] = (
-        df_results["sum_lin"] + offline_cost
+        df_results["sum_lin"] + _offline_for(offline_cost_lin_ols)
     ) / df_results["sor#"]
     df_results["cost_per_run_at_fort_quad"] = (
-        df_results["sum_quad"] + offline_cost
+        df_results["sum_quad"] + _offline_for(offline_cost_quad_ols)
     ) / df_results["sor#"]
 
-    # If WLS available, compute WLS cost-per-run
+    # If WLS available, compute WLS cost-per-run using per-model offline costs
     if has_wls_cols:
         df_results["cost_per_run_at_fort_lin_wls"] = (
-            df_results["sum_lin_wls"] + offline_cost
+            df_results["sum_lin_wls"] + _offline_for(offline_cost_lin_wls)
         ) / df_results["sor#"]
         df_results["cost_per_run_at_fort_quad_wls"] = (
-            df_results["sum_quad_wls"] + offline_cost
+            df_results["sum_quad_wls"] + _offline_for(offline_cost_quad_wls)
         ) / df_results["sor#"]
 
     # Handle potential all-NA series robustly for small synthetic inputs
@@ -1848,7 +2003,19 @@ def summarize_and_model(
         df_summary=df_summary,
         df_results=df_results,
         regression_diagnostics=regression_diagnostics,
-        offline_cost=offline_cost,
+        offline_cost=float(offline_cost),
+        offline_cost_lin_ols=(
+            float(offline_cost_lin_ols) if offline_cost_lin_ols is not None else None
+        ),
+        offline_cost_quad_ols=(
+            float(offline_cost_quad_ols) if offline_cost_quad_ols is not None else None
+        ),
+        offline_cost_lin_wls=(
+            float(offline_cost_lin_wls) if offline_cost_lin_wls is not None else None
+        ),
+        offline_cost_quad_wls=(
+            float(offline_cost_quad_wls) if offline_cost_quad_wls is not None else None
+        ),
         sor_min_cost_lin=sor_min_cost_lin,
         sor_min_cost_quad=sor_min_cost_quad,
         sor_min_cost_lin_wls=sor_min_cost_lin_wls,
@@ -3086,7 +3253,7 @@ def _build_cli_parser():
     )
     g_tr.add_argument(
         "--delta-mode",
-        choices=["PREVIOUS_CHUNK", "FIRST_CHUNK"],
+        choices=["PREVIOUS_CHUNK", "FIRST_CHUNK", "MODEL_BASED"],
         help="Delta mode for summarize_run_time_by_sor_range.",
     )
     g_tr.add_argument(
