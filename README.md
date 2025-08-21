@@ -68,7 +68,7 @@ Transform options:
 
 - --fort INT (input_data_fort)
 - --ignore-resetticks / --use-resetticks
-- --delta-mode {PREVIOUS_CHUNK, FIRST_CHUNK}
+- --delta-mode {PREVIOUS_CHUNK, FIRST_CHUNK, MODEL_BASED}
 - --exclude-range START,END (repeatable; format YYYYMMDDHHMMSS). Requires a timestamp column parseable to datetime.
 - --iqr-k-low FLOAT, --iqr-k-high FLOAT
 - --use-zscore-filtering

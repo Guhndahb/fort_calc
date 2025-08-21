@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from src.csv_processor import CSVRangeProcessor
@@ -195,3 +196,97 @@ def test_regression_analysis_does_not_mutate_df_range_columns():
 
     # Assert columns unchanged in both content and order
     assert df.columns.tolist() == original_cols
+
+
+def test_summarize_and_model_model_based_offline_cost():
+    # Verify MODEL_BASED produces per-model offline_costs equal to mean_fort - prediction(prev_k)
+    import warnings
+
+    warnings.filterwarnings(
+        "ignore",
+        message="`kurtosistest` p-value may be inaccurate",
+        category=UserWarning,
+    )
+
+    df = pd.DataFrame(
+        {
+            "sor#": [1, 2, 3, 4, 5, 6, 7, 8],
+            "adjusted_run_time": [1.0, 1.1, 1.2, 1.05, 1.0, 0.95, 0.9, 0.88],
+        }
+    )
+
+    params = TransformParams(
+        zscore_min=-2.0,
+        zscore_max=2.0,
+        input_data_fort=8,
+        ignore_resetticks=True,
+        delta_mode=DeltaMode.MODEL_BASED,
+        exclude_timestamp_ranges=None,
+        verbose_filtering=False,
+        fail_on_any_invalid_timestamps=True,
+        iqr_k_low=0.75,
+        iqr_k_high=1.5,
+        use_iqr_filtering=True,
+    )
+
+    summary = summarize_and_model(df, params)
+
+    # Per-model offline cost fields must be present on the SummaryModelOutputs dataclass
+    assert hasattr(summary, "offline_cost_lin_ols")
+    assert hasattr(summary, "offline_cost_quad_ols")
+    assert hasattr(summary, "offline_cost_lin_wls")
+    assert hasattr(summary, "offline_cost_quad_wls")
+
+    # linear OLS model-based offline cost should be finite
+    assert isinstance(summary.offline_cost_lin_ols, float)
+    assert np.isfinite(summary.offline_cost_lin_ols)
+
+    prev_k = params.input_data_fort - 1
+
+    # Prediction at prev_k should exist in df_results for linear_model_output
+    pred_lin = summary.df_results.loc[
+        summary.df_results["sor#"] == prev_k, "linear_model_output"
+    ]
+    assert not pred_lin.empty
+    pred_lin_val = float(pred_lin.squeeze())
+
+    mean_fort = float(summary.df_summary.iloc[-1]["run_time_mean"])
+
+    expected_offline_lin = mean_fort - pred_lin_val
+    # Compare computed per-model offline cost to expected
+    assert abs(summary.offline_cost_lin_ols - expected_offline_lin) <= 1e-9
+
+    # Verify cost-per-run column uses the per-model offline cost at prev_k
+    sum_lin_at_prev = float(
+        summary.df_results.loc[
+            summary.df_results["sor#"] == prev_k, "sum_lin"
+        ].squeeze()
+    )
+    expected_cost_at_prev = (sum_lin_at_prev + summary.offline_cost_lin_ols) / float(
+        prev_k
+    )
+    actual_cost_at_prev = float(
+        summary.df_results.loc[
+            summary.df_results["sor#"] == prev_k, "cost_per_run_at_fort_lin"
+        ].squeeze()
+    )
+    assert abs(actual_cost_at_prev - expected_cost_at_prev) <= 1e-9
+
+    # If WLS predictions are present, validate WLS offline cost and cost-per-run column
+    if "linear_model_output_wls" in summary.df_results.columns:
+        assert summary.offline_cost_lin_wls is not None
+        assert np.isfinite(summary.offline_cost_lin_wls)
+        sum_lin_wls_at_prev = float(
+            summary.df_results.loc[
+                summary.df_results["sor#"] == prev_k, "sum_lin_wls"
+            ].squeeze()
+        )
+        expected_cost_wls_at_prev = (
+            sum_lin_wls_at_prev + summary.offline_cost_lin_wls
+        ) / float(prev_k)
+        actual_cost_wls_at_prev = float(
+            summary.df_results.loc[
+                summary.df_results["sor#"] == prev_k, "cost_per_run_at_fort_lin_wls"
+            ].squeeze()
+        )
+        assert abs(actual_cost_wls_at_prev - expected_cost_wls_at_prev) <= 1e-9
