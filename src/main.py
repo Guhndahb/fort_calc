@@ -102,6 +102,7 @@ class ValidationTest(Enum):
     """
 
     FORT_LADDER_DOWN = auto()
+    FORT_LADDER_DOWN_FIXED_MODEL = auto()
 
 
 class FilterResult:
@@ -2422,6 +2423,8 @@ def render_outputs(
 
     plt.savefig(output_svg, format="svg")
     plt.close()
+    if omit_fort:
+        plot_params.x_max = OMIT_FORT
     return output_svg
 
 
@@ -3633,6 +3636,14 @@ def main() -> None:
             vt = ValidationTest[validation_choice]
             if vt is ValidationTest.FORT_LADDER_DOWN:
                 validation_tests.validate_fort_ladder_down(
+                    params_load,
+                    params_transform,
+                    plot_params_list,
+                    output_base_dir=Path("output_validation") / vt.name,
+                )
+                return
+            elif vt is ValidationTest.FORT_LADDER_DOWN_FIXED_MODEL:
+                validation_tests.validate_fort_ladder_down_fixed_model(
                     params_load,
                     params_transform,
                     plot_params_list,
