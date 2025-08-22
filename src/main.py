@@ -2578,8 +2578,8 @@ def render_master_plots(
                     df_summary_filtered["linear_model_output"],
                     color=color,
                     linewidth=1.6,
-                    linestyle="--",
-                    alpha=0.9,
+                    # linestyle="--",
+                    # alpha=0.9,
                     label=None,
                 )
             if flags & PlotLayer.OLS_PRED_QUAD:
@@ -2588,8 +2588,8 @@ def render_master_plots(
                     df_summary_filtered["quadratic_model_output"],
                     color=color,
                     linewidth=1.6,
-                    linestyle=":",
-                    alpha=0.9,
+                    # linestyle=":",
+                    # alpha=0.9,
                     label=None,
                 )
 
@@ -2601,8 +2601,8 @@ def render_master_plots(
                     df_summary_filtered["linear_model_output_wls"],
                     color=color,
                     linewidth=1.2,
-                    linestyle="-.",
-                    alpha=0.85,
+                    # linestyle="-.",
+                    # alpha=0.85,
                     label=None,
                 )
             if (flags & PlotLayer.WLS_PRED_QUAD) and (
@@ -2613,8 +2613,8 @@ def render_master_plots(
                     df_summary_filtered["quadratic_model_output_wls"],
                     color=color,
                     linewidth=1.2,
-                    linestyle=(0, (1, 1)),
-                    alpha=0.85,
+                    # linestyle=(0, (1, 1)),
+                    # alpha=0.85,
                     label=None,
                 )
 
@@ -2629,9 +2629,9 @@ def render_master_plots(
                     df_summary_filtered["sor#"],
                     df_summary_filtered["cost_per_run_at_fort_lin"],
                     color=_c_cost_lin_ols,
-                    linestyle="-",
+                    # linestyle="-",
                     linewidth=1.3,
-                    alpha=0.7,
+                    # alpha=0.7,
                     label=None,
                 )
             if flags & PlotLayer.OLS_COST_QUAD:
@@ -2639,9 +2639,9 @@ def render_master_plots(
                     df_summary_filtered["sor#"],
                     df_summary_filtered["cost_per_run_at_fort_quad"],
                     color=_c_cost_quad_ols,
-                    linestyle="-",
+                    # linestyle="-",
                     linewidth=1.3,
-                    alpha=0.7,
+                    # alpha=0.7,
                     label=None,
                 )
 
@@ -2652,9 +2652,9 @@ def render_master_plots(
                     df_summary_filtered["sor#"],
                     df_summary_filtered["cost_per_run_at_fort_lin_wls"],
                     color=_c_cost_lin_wls,
-                    linestyle="-",
+                    # linestyle="-",
                     linewidth=1.3,
-                    alpha=0.7,
+                    # alpha=0.7,
                     label=None,
                 )
             if (flags & PlotLayer.WLS_COST_QUAD) and (
@@ -2664,9 +2664,9 @@ def render_master_plots(
                     df_summary_filtered["sor#"],
                     df_summary_filtered["cost_per_run_at_fort_quad_wls"],
                     color=_c_cost_quad_wls,
-                    linestyle="-",
+                    # linestyle="-",
                     linewidth=1.3,
-                    alpha=0.7,
+                    # alpha=0.7,
                     label=None,
                 )
 
@@ -2677,7 +2677,7 @@ def render_master_plots(
                     color=color,
                     linestyle=":",
                     linewidth=1.0,
-                    alpha=0.6,
+                    # alpha=0.6,
                     label=None,
                 )
             if flags & PlotLayer.OLS_MIN_QUAD:
@@ -2686,7 +2686,7 @@ def render_master_plots(
                     color=color,
                     linestyle=":",
                     linewidth=1.0,
-                    alpha=0.6,
+                    # alpha=0.6,
                     label=None,
                 )
             if (flags & PlotLayer.WLS_MIN_LINEAR) and (
@@ -2697,7 +2697,7 @@ def render_master_plots(
                     color=color,
                     linestyle=":",
                     linewidth=1.0,
-                    alpha=0.6,
+                    # alpha=0.6,
                     label=None,
                 )
             if (flags & PlotLayer.WLS_MIN_QUAD) and (
@@ -2708,7 +2708,7 @@ def render_master_plots(
                     color=color,
                     linestyle=":",
                     linewidth=1.0,
-                    alpha=0.6,
+                    # alpha=0.6,
                     label=None,
                 )
 

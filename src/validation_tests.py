@@ -236,7 +236,7 @@ def validate_fort_ladder_down(
     original_included = initial_transformed.df_range
     original_excluded = initial_transformed.df_excluded
 
-    while cur_fort > 10:
+    while cur_fort > 50:
         new_fort = cur_fort - 10
         iter_name = f"iter-{iter_index:02d}-fort-{new_fort}"
         iter_dir = run_root / iter_name
@@ -323,6 +323,39 @@ def validate_fort_ladder_down(
         # Run summarize_and_model for this iteration and save artifacts; capture exceptions
         try:
             summary_iter = summarize_and_model(df_iter, params_for_iter)
+
+            # Early-stop: if any model's recommended sor_min_cost equals the current cur_fort,
+            # omit this iteration (do not render plots/manifests/reports) and stop iterating.
+            try:
+                recs = [
+                    getattr(summary_iter, "sor_min_cost_lin", None),
+                    getattr(summary_iter, "sor_min_cost_quad", None),
+                    getattr(summary_iter, "sor_min_cost_lin_wls", None),
+                    getattr(summary_iter, "sor_min_cost_quad_wls", None),
+                ]
+                reached = any(
+                    (r is not None and np.isfinite(r) and int(r) == int(cur_fort))
+                    for r in recs
+                )
+                if reached:
+                    logger.info(
+                        "Iteration %d: a model recommended sor_min_cost == current cur_fort (%d); omitting this run and stopping further iterations",
+                        iter_index,
+                        cur_fort,
+                    )
+                    # Remove the iter_dir we created for this iteration from the list of created dirs
+                    try:
+                        if iter_dirs and iter_dirs[-1] == iter_dir:
+                            iter_dirs.pop()
+                    except Exception:
+                        pass
+                    break
+            except Exception:
+                logger.exception(
+                    "Iteration %d: failed during early-stop check; continuing",
+                    iter_index,
+                )
+
             # Collect inputs for master overlay plots
             try:
                 master_plot_inputs.append(
@@ -779,6 +812,17 @@ def validate_fort_ladder_down_fixed_model(
 
     # Render plots (may be empty if plot list is empty)
     artifact_paths = []
+    # Accumulator used to build master overlay plots after iterations complete (fixed-model runner)
+    master_plot_inputs: list[dict] = []
+    # Collect the original iteration inputs
+    master_plot_inputs.append(
+        {
+            "label": "iter-00-original",
+            "df_included": initial_transformed.df_range.copy(),
+            "summary": summary_initial,
+            "df_excluded": initial_transformed.df_excluded,
+        }
+    )
     if plot_each_iteration and list_plot_params:
         try:
             artifact_paths = render_plots(
@@ -944,6 +988,54 @@ def validate_fort_ladder_down_fixed_model(
             summary_iter = _summarize_with_cached_models(
                 df_iter, params_for_iter, cache
             )
+
+            # Early-stop: if any model's recommended sor_min_cost equals the current cur_fort,
+            # omit this iteration (do not render plots/manifests/reports) and stop iterating.
+            try:
+                recs = [
+                    getattr(summary_iter, "sor_min_cost_lin", None),
+                    getattr(summary_iter, "sor_min_cost_quad", None),
+                    getattr(summary_iter, "sor_min_cost_lin_wls", None),
+                    getattr(summary_iter, "sor_min_cost_quad_wls", None),
+                ]
+                reached = any(
+                    (r is not None and np.isfinite(r) and int(r) == int(cur_fort))
+                    for r in recs
+                )
+                if reached:
+                    logger.info(
+                        "Iteration %d (fixed-model): a model recommended sor_min_cost == current cur_fort (%d); omitting this run and stopping further iterations",
+                        iter_index,
+                        cur_fort,
+                    )
+                    # Remove the iter_dir we created for this iteration from the list of created dirs
+                    try:
+                        if iter_dirs and iter_dirs[-1] == iter_dir:
+                            iter_dirs.pop()
+                    except Exception:
+                        pass
+                    break
+            except Exception:
+                logger.exception(
+                    "Iteration %d: failed during early-stop check (fixed-model); continuing",
+                    iter_index,
+                )
+
+            # Collect inputs for master overlay plots (keep parity with non-fixed runner)
+            try:
+                master_plot_inputs.append(
+                    {
+                        "label": iter_name,
+                        "df_included": df_iter.copy(),
+                        "summary": summary_iter,
+                        "df_excluded": original_excluded,
+                    }
+                )
+            except Exception:
+                logger.exception(
+                    "Iteration %d: failed to append to master_plot_inputs (fixed-model)",
+                    iter_index,
+                )
 
             # Build run identity for naming
             abs_input_posix_i, short_hash_i, full_hash_i, effective_params_i = (
