@@ -2476,6 +2476,329 @@ def render_plots(
     return artifact_paths
 
 
+def render_master_plots(
+    list_plot_params: list[PlotParams],
+    per_iteration_inputs: list[dict],
+    output_dir: str | None = None,
+    filename_prefix: str = "master",
+) -> list[str]:
+    """
+    Create one combined master plot per PlotParams that overlays the original and all iterations.
+
+    Parameters:
+      - list_plot_params: list of PlotParams to produce master plots for (same ordering as render_plots).
+      - per_iteration_inputs: list of dicts, each with keys:
+            - "label": str label for the iteration (e.g., "iter-00-original", "iter-01-fort-90")
+            - "df_included": DataFrame of included rows
+            - "summary": SummaryModelOutputs for that iteration
+            - "df_excluded": Optional DataFrame of excluded rows for that iteration
+      - output_dir: directory to write master plots into (if None, current working dir)
+      - filename_prefix: prefix for generated master filenames
+
+    Returns:
+      - list of written file paths.
+    """
+    artifact_paths: list[str] = []
+    if not list_plot_params or not per_iteration_inputs:
+        return artifact_paths
+
+    # Color cycle for iterations
+    cmap = plt.get_cmap("tab10")
+    n_iters = len(per_iteration_inputs)
+    colors = [cmap(i % 10) for i in range(n_iters)]
+
+    for idx, pp in enumerate(list_plot_params):
+        flags = pp.plot_layers
+        suffix = _plot_layers_suffix(flags)
+        filename = f"{filename_prefix}-{idx:02d}-{suffix}.svg"
+        output_path = Path(output_dir) / filename if output_dir else Path(filename)
+
+        plt.style.use("dark_background")
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        # If plot_params.x_max is OMIT_FORT sentinel, handle per-iteration omission
+        omit_fort = pp.x_max == OMIT_FORT
+
+        for j, inp in enumerate(per_iteration_inputs):
+            label = inp.get("label", f"iter-{j}")
+            df_range = inp.get("df_included")
+            df_excluded = inp.get("df_excluded")
+            summary = inp.get("summary")
+
+            if df_range is None or summary is None:
+                # Skip incomplete iterations but still include a legend entry later
+                continue
+
+            if omit_fort:
+                df_range_filtered = filter_omit_fort(df_range)
+                df_excluded_filtered = (
+                    filter_omit_fort(df_excluded) if df_excluded is not None else None
+                )
+                df_summary_filtered = filter_omit_fort(summary.df_results)
+            else:
+                df_range_filtered = df_range
+                df_excluded_filtered = df_excluded
+                df_summary_filtered = summary.df_results
+
+            color = colors[j]
+
+            # Data points (use low alpha so overlays remain readable)
+            if flags & PlotLayer.DATA_SCATTER:
+                ax.scatter(
+                    df_range_filtered["sor#"],
+                    df_range_filtered["adjusted_run_time"],
+                    s=18,
+                    color=color,
+                    edgecolors=None,
+                    linewidths=0,
+                    label=None,
+                    alpha=0.25,
+                )
+
+            # Excluded points (if requested for this plot)
+            if (
+                (flags & PlotLayer.DATA_SCATTER_EXCLUDED)
+                and (df_excluded_filtered is not None)
+                and (not df_excluded_filtered.empty)
+            ):
+                ax.scatter(
+                    df_excluded_filtered["sor#"],
+                    df_excluded_filtered["adjusted_run_time"],
+                    s=20,
+                    marker="x",
+                    color=color,
+                    label=None,
+                    alpha=0.65,
+                )
+
+            # OLS/WLS predictions and cost curves: draw with iteration color but lighter/dashed styles
+            if flags & PlotLayer.OLS_PRED_LINEAR:
+                ax.plot(
+                    df_summary_filtered["sor#"],
+                    df_summary_filtered["linear_model_output"],
+                    color=color,
+                    linewidth=1.6,
+                    linestyle="--",
+                    alpha=0.9,
+                    label=None,
+                )
+            if flags & PlotLayer.OLS_PRED_QUAD:
+                ax.plot(
+                    df_summary_filtered["sor#"],
+                    df_summary_filtered["quadratic_model_output"],
+                    color=color,
+                    linewidth=1.6,
+                    linestyle=":",
+                    alpha=0.9,
+                    label=None,
+                )
+
+            if (flags & PlotLayer.WLS_PRED_LINEAR) and (
+                "linear_model_output_wls" in summary.df_results.columns
+            ):
+                ax.plot(
+                    df_summary_filtered["sor#"],
+                    df_summary_filtered["linear_model_output_wls"],
+                    color=color,
+                    linewidth=1.2,
+                    linestyle="-.",
+                    alpha=0.85,
+                    label=None,
+                )
+            if (flags & PlotLayer.WLS_PRED_QUAD) and (
+                "quadratic_model_output_wls" in summary.df_results.columns
+            ):
+                ax.plot(
+                    df_summary_filtered["sor#"],
+                    df_summary_filtered["quadratic_model_output_wls"],
+                    color=color,
+                    linewidth=1.2,
+                    linestyle=(0, (1, 1)),
+                    alpha=0.85,
+                    label=None,
+                )
+
+            # Cost curves: use fainter line style to avoid overpowering overlays
+            _c_cost_lin_ols = "#00FFA2"
+            _c_cost_quad_ols = "#00B3FF"
+            _c_cost_lin_wls = "#F6FF00"
+            _c_cost_quad_wls = "#FF6BD6"
+
+            if flags & PlotLayer.OLS_COST_LINEAR:
+                ax.plot(
+                    df_summary_filtered["sor#"],
+                    df_summary_filtered["cost_per_run_at_fort_lin"],
+                    color=_c_cost_lin_ols,
+                    linestyle="-",
+                    linewidth=1.3,
+                    alpha=0.7,
+                    label=None,
+                )
+            if flags & PlotLayer.OLS_COST_QUAD:
+                ax.plot(
+                    df_summary_filtered["sor#"],
+                    df_summary_filtered["cost_per_run_at_fort_quad"],
+                    color=_c_cost_quad_ols,
+                    linestyle="-",
+                    linewidth=1.3,
+                    alpha=0.7,
+                    label=None,
+                )
+
+            if (flags & PlotLayer.WLS_COST_LINEAR) and (
+                "cost_per_run_at_fort_lin_wls" in summary.df_results.columns
+            ):
+                ax.plot(
+                    df_summary_filtered["sor#"],
+                    df_summary_filtered["cost_per_run_at_fort_lin_wls"],
+                    color=_c_cost_lin_wls,
+                    linestyle="-",
+                    linewidth=1.3,
+                    alpha=0.7,
+                    label=None,
+                )
+            if (flags & PlotLayer.WLS_COST_QUAD) and (
+                "cost_per_run_at_fort_quad_wls" in summary.df_results.columns
+            ):
+                ax.plot(
+                    df_summary_filtered["sor#"],
+                    df_summary_filtered["cost_per_run_at_fort_quad_wls"],
+                    color=_c_cost_quad_wls,
+                    linestyle="-",
+                    linewidth=1.3,
+                    alpha=0.7,
+                    label=None,
+                )
+
+            # Min cost markers as vertical lines (subtle)
+            if flags & PlotLayer.OLS_MIN_LINEAR:
+                ax.axvline(
+                    x=summary.sor_min_cost_lin,
+                    color=color,
+                    linestyle=":",
+                    linewidth=1.0,
+                    alpha=0.6,
+                    label=None,
+                )
+            if flags & PlotLayer.OLS_MIN_QUAD:
+                ax.axvline(
+                    x=summary.sor_min_cost_quad,
+                    color=color,
+                    linestyle=":",
+                    linewidth=1.0,
+                    alpha=0.6,
+                    label=None,
+                )
+            if (flags & PlotLayer.WLS_MIN_LINEAR) and (
+                summary.sor_min_cost_lin_wls is not None
+            ):
+                ax.axvline(
+                    x=summary.sor_min_cost_lin_wls,
+                    color=color,
+                    linestyle=":",
+                    linewidth=1.0,
+                    alpha=0.6,
+                    label=None,
+                )
+            if (flags & PlotLayer.WLS_MIN_QUAD) and (
+                summary.sor_min_cost_quad_wls is not None
+            ):
+                ax.axvline(
+                    x=summary.sor_min_cost_quad_wls,
+                    color=color,
+                    linestyle=":",
+                    linewidth=1.0,
+                    alpha=0.6,
+                    label=None,
+                )
+
+        ax.set_xlabel("Sequential Online Run #")
+        ax.set_ylabel("Run Time (s)")
+
+        # Axis limits from PlotParams (support one-sided)
+        # Defensive handling: PlotParams.x_max may be the OMIT_FORT sentinel string.
+        # Convert sentinel -> None so Matplotlib doesn't attempt to interpret a string as an axis value.
+        x_min_val = pp.x_min if pp.x_min is not None else None
+        x_max_val = (
+            None
+            if (pp.x_max == OMIT_FORT)
+            else (pp.x_max if pp.x_max is not None else None)
+        )
+        y_min_val = pp.y_min if pp.y_min is not None else None
+        y_max_val = pp.y_max if pp.y_max is not None else None
+
+        ax.set_xlim(left=x_min_val, right=x_max_val)
+        ax.set_ylim(bottom=y_min_val, top=y_max_val)
+
+        # Add a compact legend identifying iterations with their colors
+        if pp.plot_layers & PlotLayer.LEGEND:
+            from matplotlib.lines import Line2D
+
+            handles = []
+            labels = []
+            for j, inp in enumerate(per_iteration_inputs):
+                label = inp.get("label", f"iter-{j}")
+                handles.append(Line2D([], [], color=colors[j], linewidth=2))
+                labels.append(label)
+            # Add an "omit fort" extra line if applicable
+            if omit_fort:
+                handles.append(Line2D([], [], linestyle="None", marker=None))
+                labels.append("SOR# = FORT omitted")
+
+            ax.legend(handles=handles, labels=labels, loc="best")
+
+        # Filtering legend (as in render_outputs) if requested
+        if pp.plot_layers & PlotLayer.LEGEND_FILTERING:
+            # Read metadata from the first iteration's frame attrs (best-effort)
+            first_df = per_iteration_inputs[0].get("df_included")
+            iqr_k_low = None
+            iqr_k_high = None
+            zscore_min = None
+            zscore_max = None
+            if first_df is not None:
+                iqr_k_low = first_df.attrs.get("iqr_k_low", None)
+                iqr_k_high = first_df.attrs.get("iqr_k_high", None)
+                zscore_min = first_df.attrs.get("zscore_min", None)
+                zscore_max = first_df.attrs.get("zscore_max", None)
+
+            if (iqr_k_low is not None) and (iqr_k_high is not None):
+                try:
+                    text = f"IQR filter (kₗ={float(iqr_k_low):.2f}, kₕ={float(iqr_k_high):.2f})"
+                except Exception:
+                    text = "IQR filter (params invalid)"
+            elif (zscore_min is not None) and (zscore_max is not None):
+                try:
+                    text = f"Z-score filter (zₗ={float(zscore_min):.2f}, zₕ={float(zscore_max):.2f})"
+                except Exception:
+                    text = "Z-score filter (params invalid)"
+            else:
+                text = "Filter: unknown"
+
+            ax.text(
+                0.01,
+                0.98,
+                text,
+                transform=ax.transAxes,
+                va="top",
+                ha="left",
+                fontsize=10,
+                color="white",
+                bbox=dict(facecolor="black", alpha=0.55, pad=4),
+            )
+
+        # Ensure output directory exists (defensive)
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        fig.savefig(output_path, format="svg")
+        plt.close(fig)
+        logger.info("Wrote master plot: %s", str(output_path))
+        artifact_paths.append(str(output_path))
+
+    return artifact_paths
+
+
 def get_default_params() -> tuple[LoadSliceParams, TransformParams, List[PlotParams]]:
     """
     Build default LoadSliceParams, TransformParams, and the canonical list of PlotParams.

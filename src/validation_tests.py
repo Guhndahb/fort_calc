@@ -93,6 +93,8 @@ def validate_fort_ladder_down(
     build_run_identity = _main.build_run_identity
     load_and_slice_csv = _main.load_and_slice_csv
     render_plots = _main.render_plots
+    # New: master plot renderer (overlays original + iterations)
+    render_master_plots = _main.render_master_plots
     summarize_and_model = _main.summarize_and_model
     transform_pipeline = _main.transform_pipeline
     write_manifest = _main.write_manifest
@@ -146,6 +148,17 @@ def validate_fort_ladder_down(
 
     # Render plots (may be empty if plot list is empty)
     artifact_paths = []
+    # Accumulator used to build master overlay plots after iterations complete
+    master_plot_inputs: list[dict] = []
+    # Collect the original iteration inputs
+    master_plot_inputs.append(
+        {
+            "label": "iter-00-original",
+            "df_included": initial_transformed.df_range.copy(),
+            "summary": summary_initial,
+            "df_excluded": initial_transformed.df_excluded,
+        }
+    )
     if plot_each_iteration and list_plot_params:
         try:
             artifact_paths = render_plots(
@@ -310,6 +323,20 @@ def validate_fort_ladder_down(
         # Run summarize_and_model for this iteration and save artifacts; capture exceptions
         try:
             summary_iter = summarize_and_model(df_iter, params_for_iter)
+            # Collect inputs for master overlay plots
+            try:
+                master_plot_inputs.append(
+                    {
+                        "label": iter_name,
+                        "df_included": df_iter.copy(),
+                        "summary": summary_iter,
+                        "df_excluded": original_excluded,
+                    }
+                )
+            except Exception:
+                logger.exception(
+                    "Iteration %d: failed to append to master_plot_inputs", iter_index
+                )
             # Build run identity for naming
             abs_input_posix_i, short_hash_i, full_hash_i, effective_params_i = (
                 build_run_identity(params_load, params_for_iter)
@@ -392,6 +419,21 @@ def validate_fort_ladder_down(
         # Prepare next iteration
         cur_fort = new_fort
         iter_index += 1
+
+    # After all iterations, attempt to render combined master plots that overlay all iterations
+    if plot_each_iteration and list_plot_params and master_plot_inputs:
+        try:
+            master_artifacts = render_master_plots(
+                list_plot_params=list_plot_params,
+                per_iteration_inputs=master_plot_inputs,
+                output_dir=str(run_root),
+            )
+            if master_artifacts:
+                print("Created master plot artifacts:")
+                for p in master_artifacts:
+                    print(str(p))
+        except Exception:
+            logger.exception("Failed to render master overlay plots")
 
     # Final concise summary to stdout
     print("Validation run complete.")
