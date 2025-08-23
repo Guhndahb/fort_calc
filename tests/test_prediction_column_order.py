@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from src.main import regression_analysis
+from src.main import model_output_column, regression_analysis
 
 
 def test_model_predict_column_order_independence():
@@ -20,8 +20,8 @@ def test_model_predict_column_order_independence():
     result_df, _ = regression_analysis(df, input_data_fort=20)
 
     # Expected predictions from the function using correctly named DataFrames
-    expected_linear = result_df["linear_model_output"].to_numpy()
-    expected_quadratic = result_df["quadratic_model_output"].to_numpy()
+    expected_linear = result_df[model_output_column("ols_linear")].to_numpy()
+    expected_quadratic = result_df[model_output_column("ols_quadratic")].to_numpy()
 
     # Construct our own prediction DataFrames with shuffled columns to validate
     # predict-time column-order independence. We must mirror training column names:

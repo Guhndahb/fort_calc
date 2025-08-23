@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from src.main import regression_analysis
+from src.main import model_output_column, regression_analysis
 
 
 def _make_monotone_df(n=30, noise=0.0, hetero=False, seed=123):
@@ -25,9 +25,12 @@ def test_diagnostics_include_all_variants_linear_and_quadratic():
     result_df, diagnostics = regression_analysis(df, input_data_fort=40)
 
     # Sanity on result_df schema invariants (unchanged pipeline contract)
-    assert {"sor#", "linear_model_output", "quadratic_model_output"}.issubset(
-        set(result_df.columns)
-    )
+    expected_cols = {
+        "sor#",
+        model_output_column("ols_linear"),
+        model_output_column("ols_quadratic"),
+    }
+    assert expected_cols.issubset(set(result_df.columns))
     assert len(result_df) == 40
 
     # Diagnostics must include the new variants for both linear and quadratic

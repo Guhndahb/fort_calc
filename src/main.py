@@ -2166,16 +2166,9 @@ def summarize_and_model(
             return val
 
         # Compute per-model offline costs (model-based = mean_fort - prediction_at_prev_k)
-        # Map model token -> df_results column name
-        model_to_col = {
-            "robust_linear": "robust_model_output_ols_linear",
-            "isotonic": "isotonic_model_output",
-            "pchip": "pchip_model_output",
-            "ols_linear": "model_output_ols_linear",
-            "wls_linear": "model_output_wls_linear",
-            "ols_quadratic": "model_output_ols_quadratic",
-            "wls_quadratic": "model_output_wls_quadratic",
-        }
+        # Map model token -> df_results column name (use authoritative helper so new models
+        # added to MODEL_PRIORITY are handled without editing this mapping)
+        model_to_col = {token: model_output_column(token) for token in MODEL_PRIORITY}
 
         # Build per_model_offline_costs only for models that produce finite predictions at prev_k
         per_model_offline_costs: dict[str, float] = {}
@@ -2250,18 +2243,13 @@ def summarize_and_model(
     except NameError:
         per_model_offline_costs = {}
 
-    # Compute cumulative sums for baseline models
-    df_results["sum_lin"] = df_results["model_output_ols_linear"].cumsum()
-    df_results["sum_quad"] = df_results["model_output_ols_quadratic"].cumsum()
-
-    # If WLS predictions exist, compute their sums too
-    has_wls_cols = all(
-        c in df_results.columns
-        for c in ["model_output_wls_linear", "model_output_wls_quadratic"]
-    )
-    if has_wls_cols:
-        df_results["sum_wls_linear"] = df_results["model_output_wls_linear"].cumsum()
-        df_results["sum_quad_wls"] = df_results["model_output_wls_quadratic"].cumsum()
+    # Build cumulative sums, cost-per-run columns and per-model minima generically
+    # Use canonical helper functions so adding new models to MODEL_PRIORITY requires no edits here.
+    for token in MODEL_PRIORITY:
+        pred_col = model_output_column(token)
+        if pred_col in df_results.columns:
+            sum_col = model_sum_column(token)
+            df_results[sum_col] = df_results[pred_col].cumsum()
 
     # Helper to choose per-column offline cost (prefer per-model if available and finite, else scalar)
     def _offline_for(column_specific: Optional[float]) -> float:
@@ -2269,49 +2257,14 @@ def summarize_and_model(
             return float(column_specific)
         return float(offline_cost)
 
-    # Cost per run columns (OLS) using per-model offline costs when available (fall back to scalar offline_cost)
-    df_results["cost_per_run_at_fort_lin"] = (
-        df_results["sum_lin"] + _offline_for(per_model_offline_costs.get("ols_linear"))
-    ) / df_results["sor#"]
-    df_results["cost_per_run_at_fort_quad"] = (
-        df_results["sum_quad"]
-        + _offline_for(per_model_offline_costs.get("ols_quadratic"))
-    ) / df_results["sor#"]
-
-    # If WLS available, compute WLS cost-per-run using per-model offline costs when available
-    if has_wls_cols:
-        df_results["cost_per_run_at_fort_lin_wls"] = (
-            df_results["sum_wls_linear"]
-            + _offline_for(per_model_offline_costs.get("wls_linear"))
-        ) / df_results["sor#"]
-        df_results["cost_per_run_at_fort_quad_wls"] = (
-            df_results["sum_quad_wls"]
-            + _offline_for(per_model_offline_costs.get("wls_quadratic"))
-        ) / df_results["sor#"]
-
-    # Additional model sums & cost-per-run columns (only when model produced finite preds)
-    # Use _offline_for to pick per-model offline cost when available, else scalar offline_cost.
-    if "isotonic_model_output" in df_results.columns:
-        df_results["sum_isotonic"] = df_results["isotonic_model_output"].cumsum()
-        df_results["cost_per_run_at_fort_isotonic"] = (
-            df_results["sum_isotonic"]
-            + _offline_for(per_model_offline_costs.get("isotonic"))
-        ) / df_results["sor#"]
-
-    if "pchip_model_output" in df_results.columns:
-        df_results["sum_pchip"] = df_results["pchip_model_output"].cumsum()
-        df_results["cost_per_run_at_fort_pchip"] = (
-            df_results["sum_pchip"] + _offline_for(per_model_offline_costs.get("pchip"))
-        ) / df_results["sor#"]
-
-    if "robust_model_output_ols_linear" in df_results.columns:
-        df_results["sum_robust_linear"] = df_results[
-            "robust_model_output_ols_linear"
-        ].cumsum()
-        df_results["cost_per_run_at_fort_robust_linear"] = (
-            df_results["sum_robust_linear"]
-            + _offline_for(per_model_offline_costs.get("robust_linear"))
-        ) / df_results["sor#"]
+    # Compute cost-per-run columns for each model that produced predictions
+    for token in MODEL_PRIORITY:
+        sum_col = model_sum_column(token)
+        if sum_col in df_results.columns:
+            cost_col = model_cost_column(token)
+            df_results[cost_col] = (
+                df_results[sum_col] + _offline_for(per_model_offline_costs.get(token))
+            ) / df_results["sor#"]
 
     # Handle potential all-NA series robustly for small synthetic inputs
     def _safe_idxmin(series: pd.Series) -> int:
@@ -2320,61 +2273,17 @@ def summarize_and_model(
             return int(series.index[0])
         return int(series.dropna().idxmin())
 
-    # Compute minima for OLS cost curves and optional WLS curves, then populate the authoritative sor_min_costs dict.
+    # Compute minima for every model's cost curve and populate the authoritative sor_min_costs dict.
     sor_min_costs: dict[str, int] = {}
-    try:
-        sor_min_cost_lin = int(
-            df_results.loc[_safe_idxmin(df_results["cost_per_run_at_fort_lin"]), "sor#"]
-        )
-        sor_min_costs["ols_linear"] = sor_min_cost_lin
-    except Exception:
-        # best-effort: leave absent when unable to compute
-        pass
-
-    try:
-        sor_min_cost_quad = int(
-            df_results.loc[
-                _safe_idxmin(df_results["cost_per_run_at_fort_quad"]), "sor#"
-            ]
-        )
-        sor_min_costs["ols_quadratic"] = sor_min_cost_quad
-    except Exception:
-        pass
-
-    if has_wls_cols:
-        try:
-            sor_min_cost_lin_wls = int(
-                df_results.loc[
-                    _safe_idxmin(df_results["cost_per_run_at_fort_lin_wls"]), "sor#"
-                ]
-            )
-            sor_min_costs["wls_linear"] = sor_min_cost_lin_wls
-        except Exception:
-            pass
-        try:
-            sor_min_cost_quad_wls = int(
-                df_results.loc[
-                    _safe_idxmin(df_results["cost_per_run_at_fort_quad_wls"]), "sor#"
-                ]
-            )
-            sor_min_costs["wls_quadratic"] = sor_min_cost_quad_wls
-        except Exception:
-            pass
-
-    # Build sor_min_costs entries for successful additional models only (isotonic, pchip, robust_linear)
-    try:
-        if "cost_per_run_at_fort_isotonic" in df_results.columns:
-            idx = _safe_idxmin(df_results["cost_per_run_at_fort_isotonic"])
-            sor_min_costs["isotonic"] = int(df_results.loc[idx, "sor#"])
-        if "cost_per_run_at_fort_pchip" in df_results.columns:
-            idx = _safe_idxmin(df_results["cost_per_run_at_fort_pchip"])
-            sor_min_costs["pchip"] = int(df_results.loc[idx, "sor#"])
-        if "cost_per_run_at_fort_robust_linear" in df_results.columns:
-            idx = _safe_idxmin(df_results["cost_per_run_at_fort_robust_linear"])
-            sor_min_costs["robust_linear"] = int(df_results.loc[idx, "sor#"])
-    except Exception:
-        # Best-effort only; do not fail pipeline for this metadata bookkeeping
-        pass
+    for token in MODEL_PRIORITY:
+        cost_col = model_cost_column(token)
+        if cost_col in df_results.columns:
+            try:
+                idx = _safe_idxmin(df_results[cost_col])
+                sor_min_costs[token] = int(df_results.loc[idx, "sor#"])
+            except Exception:
+                # best-effort: leave absent when unable to compute
+                pass
 
     # Ensure per_model_offline_costs exists (empty when not computed)
     try:
@@ -2683,42 +2592,48 @@ def render_outputs(
     _c_cost_quad_wls = "#FF6BD6"  # pink
 
     if effective_flags & PlotLayer.OLS_COST_LINEAR:
-        plt.plot(
-            df_summary_filtered["sor#"],
-            df_summary_filtered["cost_per_run_at_fort_lin"],
-            color=_c_cost_lin_ols,
-            linestyle="-",  # solid per request
-            linewidth=2.2,
-            label="Cost/Run @ FORT (Linear, OLS)",
-        )
+        cost_col = model_cost_column("ols_linear")
+        if cost_col in df_summary_filtered.columns:
+            plt.plot(
+                df_summary_filtered["sor#"],
+                df_summary_filtered[cost_col],
+                color=_c_cost_lin_ols,
+                linestyle="-",  # solid per request
+                linewidth=2.2,
+                label="Cost/Run @ FORT (Linear, OLS)",
+            )
     if effective_flags & PlotLayer.OLS_COST_QUAD:
-        plt.plot(
-            df_summary_filtered["sor#"],
-            df_summary_filtered["cost_per_run_at_fort_quad"],
-            color=_c_cost_quad_ols,
-            linestyle="-",  # solid per request
-            linewidth=2.2,
-            label="Cost/Run @ FORT (Quadratic, OLS)",
-        )
+        cost_col = model_cost_column("ols_quadratic")
+        if cost_col in df_summary_filtered.columns:
+            plt.plot(
+                df_summary_filtered["sor#"],
+                df_summary_filtered[cost_col],
+                color=_c_cost_quad_ols,
+                linestyle="-",  # solid per request
+                linewidth=2.2,
+                label="Cost/Run @ FORT (Quadratic, OLS)",
+            )
 
     # WLS cost-per-run curves (solid)
+    cost_col_wls_lin = model_cost_column("wls_linear")
+    cost_col_wls_quad = model_cost_column("wls_quadratic")
     if (effective_flags & PlotLayer.WLS_COST_LINEAR) and (
-        "cost_per_run_at_fort_lin_wls" in summary.df_results.columns
+        cost_col_wls_lin in summary.df_results.columns
     ):
         plt.plot(
             df_summary_filtered["sor#"],
-            df_summary_filtered["cost_per_run_at_fort_lin_wls"],
+            df_summary_filtered[cost_col_wls_lin],
             color=_c_cost_lin_wls,
             linestyle="-",  # solid per request
             linewidth=2.2,
             label="Cost/Run @ FORT (Linear, WLS)",
         )
     if (effective_flags & PlotLayer.WLS_COST_QUAD) and (
-        "cost_per_run_at_fort_quad_wls" in summary.df_results.columns
+        cost_col_wls_quad in summary.df_results.columns
     ):
         plt.plot(
             df_summary_filtered["sor#"],
-            df_summary_filtered["cost_per_run_at_fort_quad_wls"],
+            df_summary_filtered[cost_col_wls_quad],
             color=_c_cost_quad_wls,
             linestyle="-",  # solid per request
             linewidth=2.2,
@@ -3026,32 +2941,38 @@ def render_master_plots(
             _c_cost_quad_wls = "#FF6BD6"
 
             if flags & PlotLayer.OLS_COST_LINEAR:
-                ax.plot(
-                    df_summary_filtered["sor#"],
-                    df_summary_filtered["cost_per_run_at_fort_lin"],
-                    color=_c_cost_lin_ols,
-                    # linestyle="-",
-                    linewidth=1.3,
-                    # alpha=0.7,
-                    label=None,
-                )
+                cost_col = model_cost_column("ols_linear")
+                if cost_col in df_summary_filtered.columns:
+                    ax.plot(
+                        df_summary_filtered["sor#"],
+                        df_summary_filtered[cost_col],
+                        color=_c_cost_lin_ols,
+                        # linestyle="-",
+                        linewidth=1.3,
+                        # alpha=0.7,
+                        label=None,
+                    )
             if flags & PlotLayer.OLS_COST_QUAD:
-                ax.plot(
-                    df_summary_filtered["sor#"],
-                    df_summary_filtered["cost_per_run_at_fort_quad"],
-                    color=_c_cost_quad_ols,
-                    # linestyle="-",
-                    linewidth=1.3,
-                    # alpha=0.7,
-                    label=None,
-                )
+                cost_col = model_cost_column("ols_quadratic")
+                if cost_col in df_summary_filtered.columns:
+                    ax.plot(
+                        df_summary_filtered["sor#"],
+                        df_summary_filtered[cost_col],
+                        color=_c_cost_quad_ols,
+                        # linestyle="-",
+                        linewidth=1.3,
+                        # alpha=0.7,
+                        label=None,
+                    )
 
+            cost_col_wls_lin = model_cost_column("wls_linear")
+            cost_col_wls_quad = model_cost_column("wls_quadratic")
             if (flags & PlotLayer.WLS_COST_LINEAR) and (
-                "cost_per_run_at_fort_lin_wls" in summary.df_results.columns
+                cost_col_wls_lin in summary.df_results.columns
             ):
                 ax.plot(
                     df_summary_filtered["sor#"],
-                    df_summary_filtered["cost_per_run_at_fort_lin_wls"],
+                    df_summary_filtered[cost_col_wls_lin],
                     color=_c_cost_lin_wls,
                     # linestyle="-",
                     linewidth=1.3,
@@ -3059,11 +2980,11 @@ def render_master_plots(
                     label=None,
                 )
             if (flags & PlotLayer.WLS_COST_QUAD) and (
-                "cost_per_run_at_fort_quad_wls" in summary.df_results.columns
+                cost_col_wls_quad in summary.df_results.columns
             ):
                 ax.plot(
                     df_summary_filtered["sor#"],
-                    df_summary_filtered["cost_per_run_at_fort_quad_wls"],
+                    df_summary_filtered[cost_col_wls_quad],
                     color=_c_cost_quad_wls,
                     # linestyle="-",
                     linewidth=1.3,
@@ -3547,21 +3468,26 @@ def assemble_text_report(
         Return a shallow header-renamed view for display only.
         This does not mutate the original DataFrame.
         """
-        rename_map = {
-            "sor#": "sor",
-            "model_output_ols_linear": "lin",
-            "model_output_ols_quadratic": "quad",
-            "model_output_wls_linear": "lin_wls",
-            "model_output_wls_quadratic": "quad_wls",
-            "sum_lin": "Σlin",
-            "sum_quad": "Σquad",
-            "sum_wls_linear": "Σlin_wls",
-            "sum_quad_wls": "Σquad_wls",
-            "cost_per_run_at_fort_lin": "cpr_lin",
-            "cost_per_run_at_fort_quad": "cpr_quad",
-            "cost_per_run_at_fort_lin_wls": "cpr_lin_wls",
-            "cost_per_run_at_fort_quad_wls": "cpr_quad_wls",
-        }
+        # Build display-only rename map programmatically using canonical helpers so the mapping
+        # stays correct when model tokens change.
+        rename_map: dict[str, str] = {"sor#": "sor"}
+        # OLS
+        rename_map[model_output_column("ols_linear")] = "lin_ols"
+        rename_map[model_output_column("ols_quadratic")] = "quad_ols"
+        # WLS
+        rename_map[model_output_column("wls_linear")] = "lin_wls"
+        rename_map[model_output_column("wls_quadratic")] = "quad_wls"
+        # Sums -> Σ<short>
+        rename_map[model_sum_column("ols_linear")] = "Σlin_ols"
+        rename_map[model_sum_column("ols_quadratic")] = "Σquad_ols"
+        rename_map[model_sum_column("wls_linear")] = "Σlin_wls"
+        rename_map[model_sum_column("wls_quadratic")] = "Σquad_wls"
+        # Cost-per-run columns -> cpr_*
+        rename_map[model_cost_column("ols_linear")] = "cpr_lin_ols"
+        rename_map[model_cost_column("ols_quadratic")] = "cpr_quad_ols"
+        rename_map[model_cost_column("wls_linear")] = "cpr_lin_wls"
+        rename_map[model_cost_column("wls_quadratic")] = "cpr_quad_wls"
+
         # Only rename columns that exist to avoid KeyError
         present = {k: v for k, v in rename_map.items() if k in df.columns}
         return df.rename(columns=present)

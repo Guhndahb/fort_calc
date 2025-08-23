@@ -10,6 +10,9 @@ from src.main import (
     _args_to_params,
     _parse_plot_spec_json,
     _parse_plot_spec_kv,
+    model_cost_column,
+    model_output_column,
+    model_sum_column,
     render_plots,
 )
 
@@ -40,21 +43,25 @@ def _build_inputs(include_wls=True):
         }
     )
 
-    # Base df_results with OLS predictions
+    # Base df_results with OLS predictions (use canonical column names)
     df_results = pd.DataFrame(
         {
             "sor#": [1, 2, 3, 4, 5],
-            "linear_model_output": [1.00, 1.05, 1.10, 1.15, 1.20],
-            "quadratic_model_output": [1.00, 1.04, 1.09, 1.15, 1.22],
+            model_output_column("ols_linear"): [1.00, 1.05, 1.10, 1.15, 1.20],
+            model_output_column("ols_quadratic"): [1.00, 1.04, 1.09, 1.15, 1.22],
         }
     )
-    df_results["sum_lin"] = df_results["linear_model_output"].cumsum()
-    df_results["sum_quad"] = df_results["quadratic_model_output"].cumsum()
-    df_results["cost_per_run_at_fort_lin"] = (df_results["sum_lin"] + 0.1) / df_results[
-        "sor#"
-    ]
-    df_results["cost_per_run_at_fort_quad"] = (
-        df_results["sum_quad"] + 0.1
+    df_results[model_sum_column("ols_linear")] = df_results[
+        model_output_column("ols_linear")
+    ].cumsum()
+    df_results[model_sum_column("ols_quadratic")] = df_results[
+        model_output_column("ols_quadratic")
+    ].cumsum()
+    df_results[model_cost_column("ols_linear")] = (
+        df_results[model_sum_column("ols_linear")] + 0.1
+    ) / df_results["sor#"]
+    df_results[model_cost_column("ols_quadratic")] = (
+        df_results[model_sum_column("ols_quadratic")] + 0.1
     ) / df_results["sor#"]
 
     if include_wls:
@@ -70,15 +77,20 @@ def _build_inputs(include_wls=True):
             df_results["sum_quad_wls"] + 0.1
         ) / df_results["sor#"]
 
+    sor_min_costs = {
+        "ols_linear": 2,
+        "ols_quadratic": 4,
+    }
+    if include_wls:
+        sor_min_costs["wls_linear"] = 3
+        sor_min_costs["wls_quadratic"] = 5
+
     summary = SummaryModelOutputs(
         df_summary=pd.DataFrame({"a": [1]}),
         df_results=df_results,
         regression_diagnostics={},
         offline_cost=0.1,
-        sor_min_cost_lin=2,
-        sor_min_cost_quad=4,
-        sor_min_cost_lin_wls=3 if include_wls else None,
-        sor_min_cost_quad_wls=5 if include_wls else None,
+        sor_min_costs=sor_min_costs,
     )
 
     return df_range, summary

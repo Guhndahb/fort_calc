@@ -13,6 +13,9 @@ from src.main import (
     TransformOutputs,
     TransformParams,
     load_and_slice_csv,
+    model_cost_column,
+    model_output_column,
+    model_sum_column,
     summarize_and_model,
     transform_pipeline,
 )
@@ -130,24 +133,25 @@ def test_summarize_and_model_contract():
     )
     summary: SummaryModelOutputs = summarize_and_model(df, params)
     assert isinstance(summary, SummaryModelOutputs)
+    # Check canonical outputs exist
     assert {
         "df_summary",
         "df_results",
         "regression_diagnostics",
         "offline_cost",
-        "sor_min_cost_lin",
-        "sor_min_cost_quad",
+        "per_model_offline_costs",
+        "sor_min_costs",
     }.issubset(set(summary.__dict__.keys()))
 
     # df_results expected columns
     for col in [
         "sor#",
-        "linear_model_output",
-        "quadratic_model_output",
-        "sum_lin",
-        "sum_quad",
-        "cost_per_run_at_fort_lin",
-        "cost_per_run_at_fort_quad",
+        model_output_column("ols_linear"),
+        model_output_column("ols_quadratic"),
+        model_sum_column("ols_linear"),
+        model_sum_column("ols_quadratic"),
+        model_cost_column("ols_linear"),
+        model_cost_column("ols_quadratic"),
     ]:
         assert col in summary.df_results.columns
 
@@ -231,21 +235,19 @@ def test_summarize_and_model_model_based_offline_cost():
 
     summary = summarize_and_model(df, params)
 
-    # Per-model offline cost fields must be present on the SummaryModelOutputs dataclass
-    assert hasattr(summary, "offline_cost_lin_ols")
-    assert hasattr(summary, "offline_cost_quad_ols")
-    assert hasattr(summary, "offline_cost_lin_wls")
-    assert hasattr(summary, "offline_cost_quad_wls")
+    # Per-model offline costs should be present in the per_model_offline_costs dict
+    assert "ols_linear" in summary.per_model_offline_costs
+    assert "ols_quadratic" in summary.per_model_offline_costs
 
-    # linear OLS model-based offline cost should be finite
-    assert isinstance(summary.offline_cost_lin_ols, float)
-    assert np.isfinite(summary.offline_cost_lin_ols)
+    # linear OLS model-based offline cost should be finite in the dict
+    assert isinstance(summary.per_model_offline_costs["ols_linear"], float)
+    assert np.isfinite(summary.per_model_offline_costs["ols_linear"])
 
     prev_k = params.input_data_fort - 1
 
-    # Prediction at prev_k should exist in df_results for linear_model_output
+    # Prediction at prev_k should exist in df_results for canonical linear output
     pred_lin = summary.df_results.loc[
-        summary.df_results["sor#"] == prev_k, "linear_model_output"
+        summary.df_results["sor#"] == prev_k, model_output_column("ols_linear")
     ]
     assert not pred_lin.empty
     pred_lin_val = float(pred_lin.squeeze())
@@ -253,40 +255,43 @@ def test_summarize_and_model_model_based_offline_cost():
     mean_fort = float(summary.df_summary.iloc[-1]["run_time_mean"])
 
     expected_offline_lin = mean_fort - pred_lin_val
-    # Compare computed per-model offline cost to expected
-    assert abs(summary.offline_cost_lin_ols - expected_offline_lin) <= 1e-9
+    # Compare computed per-model offline cost to expected (using dict entry)
+    assert (
+        abs(summary.per_model_offline_costs["ols_linear"] - expected_offline_lin)
+        <= 1e-9
+    )
 
     # Verify cost-per-run column uses the per-model offline cost at prev_k
     sum_lin_at_prev = float(
         summary.df_results.loc[
-            summary.df_results["sor#"] == prev_k, "sum_lin"
+            summary.df_results["sor#"] == prev_k, model_sum_column("ols_linear")
         ].squeeze()
     )
-    expected_cost_at_prev = (sum_lin_at_prev + summary.offline_cost_lin_ols) / float(
-        prev_k
-    )
+    expected_cost_at_prev = (
+        sum_lin_at_prev + summary.per_model_offline_costs["ols_linear"]
+    ) / float(prev_k)
     actual_cost_at_prev = float(
         summary.df_results.loc[
-            summary.df_results["sor#"] == prev_k, "cost_per_run_at_fort_lin"
+            summary.df_results["sor#"] == prev_k, model_cost_column("ols_linear")
         ].squeeze()
     )
     assert abs(actual_cost_at_prev - expected_cost_at_prev) <= 1e-9
 
     # If WLS predictions are present, validate WLS offline cost and cost-per-run column
-    if "linear_model_output_wls" in summary.df_results.columns:
-        assert summary.offline_cost_lin_wls is not None
-        assert np.isfinite(summary.offline_cost_lin_wls)
+    if model_output_column("wls_linear") in summary.df_results.columns:
+        assert "wls_linear" in summary.per_model_offline_costs
+        assert np.isfinite(summary.per_model_offline_costs["wls_linear"])
         sum_lin_wls_at_prev = float(
             summary.df_results.loc[
-                summary.df_results["sor#"] == prev_k, "sum_lin_wls"
+                summary.df_results["sor#"] == prev_k, model_sum_column("wls_linear")
             ].squeeze()
         )
         expected_cost_wls_at_prev = (
-            sum_lin_wls_at_prev + summary.offline_cost_lin_wls
+            sum_lin_wls_at_prev + summary.per_model_offline_costs["wls_linear"]
         ) / float(prev_k)
         actual_cost_wls_at_prev = float(
             summary.df_results.loc[
-                summary.df_results["sor#"] == prev_k, "cost_per_run_at_fort_lin_wls"
+                summary.df_results["sor#"] == prev_k, model_cost_column("wls_linear")
             ].squeeze()
         )
         assert abs(actual_cost_wls_at_prev - expected_cost_wls_at_prev) <= 1e-9
