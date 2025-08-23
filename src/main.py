@@ -1158,25 +1158,40 @@ class SummaryModelOutputs:
     sor_min_costs: dict[str, int] = field(default_factory=dict)
 
 
-MODEL_PRIORITY = [
-    "robust_linear",
-    "isotonic",
-    "pchip",
-    "ols_linear",
-    "wls_linear",
-    "ols_quadratic",
-    "wls_quadratic",
+# Model registry using a small dataclass to keep token + metadata together.
+@dataclass(frozen=True)
+class ModelSpec:
+    """
+    Canonical model specification.
+
+    Attributes:
+        token: internal token used in column names (e.g., 'ols_linear')
+        label: human-friendly display label (e.g., 'OLS linear')
+        enabled: whether this model is considered by default (when False, excluded from
+                 MODEL_PRIORITY/model_label_map derived views)
+    """
+
+    token: str
+    label: str
+    enabled: bool = True
+
+
+# Ordered registry of models (single source of truth).
+MODEL_SPECS: list[ModelSpec] = [
+    ModelSpec("robust_linear", "Robust linear", enabled=True),
+    ModelSpec("isotonic", "Isotonic", enabled=True),
+    ModelSpec("pchip", "PCHIP", enabled=True),
+    ModelSpec("ols_linear", "OLS linear", enabled=True),
+    ModelSpec("wls_linear", "WLS linear", enabled=True),
+    ModelSpec("ols_quadratic", "OLS quadratic", enabled=True),
+    ModelSpec("wls_quadratic", "WLS quadratic", enabled=True),
 ]
 
-model_label_map = {
-    "robust_linear": "Robust linear",
-    "isotonic": "Isotonic",
-    "pchip": "PCHIP",
-    "ols_linear": "OLS linear",
-    "wls_linear": "WLS linear",
-    "ols_quadratic": "OLS quadratic",
-    "wls_quadratic": "WLS quadratic",
-}
+# Backwards-compatible derived views:
+# - MODEL_PRIORITY: tuple of enabled tokens in canonical order (immutable)
+# - model_label_map: mapping token -> human label for enabled models
+MODEL_PRIORITY = tuple(ms.token for ms in MODEL_SPECS if ms.enabled)
+model_label_map = {ms.token: ms.label for ms in MODEL_SPECS if ms.enabled}
 
 
 # Public helper functions for other modules to derive canonical column names
