@@ -1178,6 +1178,38 @@ MODEL_PRIORITY = [
 ]
 
 
+# Public helper functions for other modules to derive canonical column names
+# Uniform naming scheme (programmatic; no hard-coded full dict):
+# - Prediction column: model_output_<token>
+# - Cumulative sum column: sum_<token>
+# - Cost-per-run column: cost_per_run_at_fort_<token>
+def model_output_column(token: str) -> str:
+    """
+    Return the predictions column name for a given model token.
+    E.g., token='ols_linear' -> 'model_output_ols_linear'
+    """
+    token = token.strip()
+    return f"model_output_{token}"
+
+
+def model_sum_column(token: str) -> str:
+    """
+    Return the cumulative-sum column name for a given model token.
+    E.g., token='ols_linear' -> 'sum_ols_linear'
+    """
+    token = token.strip()
+    return f"sum_{token}"
+
+
+def model_cost_column(token: str) -> str:
+    """
+    Return the cost-per-run column name for a given model token.
+    E.g., token='ols_linear' -> 'cost_per_run_at_fort_ols_linear'
+    """
+    token = token.strip()
+    return f"cost_per_run_at_fort_{token}"
+
+
 def fit_isotonic(df_range, input_data_fort) -> tuple[np.ndarray, dict]:
     # Signature (as requested in task text):
     # def fit_isotonic(df_range, input_data_fort) -> (predictions: np.ndarray, diagnostics: dict)
@@ -1425,8 +1457,8 @@ def regression_analysis(
     Returns:
       tuple[pd.DataFrame, dict]
         - result_df: DataFrame with columns:
-            ["sor#", "linear_model_output", "quadratic_model_output",
-             "linear_model_output_wls", "quadratic_model_output_wls"]
+            ["sor#", "model_output_ols_linear", "model_output_ols_quadratic",
+             "model_output_wls_linear", "model_output_wls_quadratic"]
         - diagnostics: Nested dict containing model statistics for all variants.
 
     Notes:
@@ -1501,8 +1533,8 @@ def regression_analysis(
     X_quadratic_pred = X_quadratic_pred.reindex(columns=quad_ols.model.exog_names)
 
     # Baseline predictions used in result_df
-    linear_model_output = lin_ols.predict(X_linear_pred)
-    quadratic_model_output = quad_ols.predict(X_quadratic_pred)
+    model_output_ols_linear = lin_ols.predict(X_linear_pred)
+    model_output_ols_quadratic = quad_ols.predict(X_quadratic_pred)
 
     # Diagnostics container with baseline 'ols'
     diagnostics: Dict[str, Dict[str, Any]] = {
@@ -1544,8 +1576,8 @@ def regression_analysis(
 
     # Variant: Empirical WLS (replace fixed 1/(sor#^2))
     # Estimate variance-power p via log(resid^2 + eps) ~ log(sor#), then weights = 1 / (sor#^p)
-    linear_model_output_wls = None
-    quadratic_model_output_wls = None
+    model_output_wls_linear = None
+    model_output_wls_quadratic = None
     try:
         sor_vals = pd.to_numeric(df_range["sor#"], errors="coerce").to_numpy(
             dtype=float
@@ -1643,8 +1675,8 @@ def regression_analysis(
         X_quadratic_pred_wls = X_quadratic_pred.reindex(
             columns=quad_wls.model.exog_names
         )
-        linear_model_output_wls = lin_wls.predict(X_linear_pred_wls)
-        quadratic_model_output_wls = quad_wls.predict(X_quadratic_pred_wls)
+        model_output_wls_linear = lin_wls.predict(X_linear_pred_wls)
+        model_output_wls_quadratic = quad_wls.predict(X_quadratic_pred_wls)
 
         # Empirical WLS + robust SEs (HC1)
         try:
@@ -1670,17 +1702,17 @@ def regression_analysis(
     # Assemble result_df with both OLS and WLS predictions (WLS columns may be None)
     df_dict = {
         "sor#": sor_sequence,
-        "linear_model_output": linear_model_output,
-        "quadratic_model_output": quadratic_model_output,
+        "model_output_ols_linear": model_output_ols_linear,
+        "model_output_ols_quadratic": model_output_ols_quadratic,
     }
-    if linear_model_output_wls is not None:
-        df_dict["linear_model_output_wls"] = linear_model_output_wls
+    if model_output_wls_linear is not None:
+        df_dict["model_output_wls_linear"] = model_output_wls_linear
     else:
-        df_dict["linear_model_output_wls"] = pd.Series([np.nan] * len(sor_sequence))
-    if quadratic_model_output_wls is not None:
-        df_dict["quadratic_model_output_wls"] = quadratic_model_output_wls
+        df_dict["model_output_wls_linear"] = pd.Series([np.nan] * len(sor_sequence))
+    if model_output_wls_quadratic is not None:
+        df_dict["model_output_wls_quadratic"] = model_output_wls_quadratic
     else:
-        df_dict["quadratic_model_output_wls"] = pd.Series([np.nan] * len(sor_sequence))
+        df_dict["model_output_wls_quadratic"] = pd.Series([np.nan] * len(sor_sequence))
 
     # Attempt additional, more stable model fits (isotonic, pchip, robust linear).
     # Each helper returns (preds_or_none, diagnostics) per design.
@@ -1735,7 +1767,7 @@ def regression_analysis(
         df_dict["pchip_model_output"] = pchip_preds
 
     if robust_preds is not None and np.isfinite(robust_preds).all():
-        df_dict["robust_linear_model_output"] = robust_preds
+        df_dict["robust_model_output_ols_linear"] = robust_preds
 
     result_df = pd.DataFrame(df_dict).sort_values(by="sor#").reset_index(drop=True)
 
@@ -2136,13 +2168,13 @@ def summarize_and_model(
         # Compute per-model offline costs (model-based = mean_fort - prediction_at_prev_k)
         # Map model token -> df_results column name
         model_to_col = {
-            "robust_linear": "robust_linear_model_output",
+            "robust_linear": "robust_model_output_ols_linear",
             "isotonic": "isotonic_model_output",
             "pchip": "pchip_model_output",
-            "ols_linear": "linear_model_output",
-            "wls_linear": "linear_model_output_wls",
-            "ols_quadratic": "quadratic_model_output",
-            "wls_quadratic": "quadratic_model_output_wls",
+            "ols_linear": "model_output_ols_linear",
+            "wls_linear": "model_output_wls_linear",
+            "ols_quadratic": "model_output_ols_quadratic",
+            "wls_quadratic": "model_output_wls_quadratic",
         }
 
         # Build per_model_offline_costs only for models that produce finite predictions at prev_k
@@ -2232,17 +2264,17 @@ def summarize_and_model(
         per_model_offline_costs = {}
 
     # Compute cumulative sums for baseline models
-    df_results["sum_lin"] = df_results["linear_model_output"].cumsum()
-    df_results["sum_quad"] = df_results["quadratic_model_output"].cumsum()
+    df_results["sum_lin"] = df_results["model_output_ols_linear"].cumsum()
+    df_results["sum_quad"] = df_results["model_output_ols_quadratic"].cumsum()
 
     # If WLS predictions exist, compute their sums too
     has_wls_cols = all(
         c in df_results.columns
-        for c in ["linear_model_output_wls", "quadratic_model_output_wls"]
+        for c in ["model_output_wls_linear", "model_output_wls_quadratic"]
     )
     if has_wls_cols:
-        df_results["sum_lin_wls"] = df_results["linear_model_output_wls"].cumsum()
-        df_results["sum_quad_wls"] = df_results["quadratic_model_output_wls"].cumsum()
+        df_results["sum_wls_linear"] = df_results["model_output_wls_linear"].cumsum()
+        df_results["sum_quad_wls"] = df_results["model_output_wls_quadratic"].cumsum()
 
     # Helper to choose per-column offline cost (prefer per-model if available and finite, else scalar)
     def _offline_for(column_specific: Optional[float]) -> float:
@@ -2261,7 +2293,7 @@ def summarize_and_model(
     # If WLS available, compute WLS cost-per-run using per-model offline costs
     if has_wls_cols:
         df_results["cost_per_run_at_fort_lin_wls"] = (
-            df_results["sum_lin_wls"] + _offline_for(offline_cost_lin_wls)
+            df_results["sum_wls_linear"] + _offline_for(offline_cost_lin_wls)
         ) / df_results["sor#"]
         df_results["cost_per_run_at_fort_quad_wls"] = (
             df_results["sum_quad_wls"] + _offline_for(offline_cost_quad_wls)
@@ -2282,9 +2314,9 @@ def summarize_and_model(
             df_results["sum_pchip"] + _offline_for(per_model_offline_costs.get("pchip"))
         ) / df_results["sor#"]
 
-    if "robust_linear_model_output" in df_results.columns:
+    if "robust_model_output_ols_linear" in df_results.columns:
         df_results["sum_robust_linear"] = df_results[
-            "robust_linear_model_output"
+            "robust_model_output_ols_linear"
         ].cumsum()
         df_results["cost_per_run_at_fort_robust_linear"] = (
             df_results["sum_robust_linear"]
@@ -2580,7 +2612,7 @@ def render_outputs(
     if effective_flags & PlotLayer.OLS_PRED_LINEAR:
         plt.plot(
             df_summary_filtered["sor#"],
-            df_summary_filtered["linear_model_output"],
+            df_summary_filtered["model_output_ols_linear"],
             color="#FFD60A",  # bright yellow (prediction)
             linewidth=2.2,
             label="Linear Model (OLS)",
@@ -2588,7 +2620,7 @@ def render_outputs(
     if effective_flags & PlotLayer.OLS_PRED_QUAD:
         plt.plot(
             df_summary_filtered["sor#"],
-            df_summary_filtered["quadratic_model_output"],
+            df_summary_filtered["model_output_ols_quadratic"],
             color="#FF2DFF",  # fuchsia/magenta (prediction)
             linewidth=2.2,
             label="Quadratic Model (OLS)",
@@ -2621,11 +2653,11 @@ def render_outputs(
 
     # Robust linear (Theil-Sen)
     if (effective_flags & PlotLayer.OLS_PRED_LINEAR) and (
-        "robust_linear_model_output" in summary.df_results.columns
+        "robust_model_output_ols_linear" in summary.df_results.columns
     ):
         plt.plot(
             df_summary_filtered["sor#"],
-            df_summary_filtered["robust_linear_model_output"],
+            df_summary_filtered["robust_model_output_ols_linear"],
             color="#00CED1",  # dark turquoise (robust linear)
             linewidth=2.0,
             label="Robust Linear (Theil–Sen)",
@@ -2633,21 +2665,21 @@ def render_outputs(
 
     # WLS predictions
     if (effective_flags & PlotLayer.WLS_PRED_LINEAR) and (
-        "linear_model_output_wls" in summary.df_results.columns
+        "model_output_wls_linear" in summary.df_results.columns
     ):
         plt.plot(
             df_summary_filtered["sor#"],
-            df_summary_filtered["linear_model_output_wls"],
+            df_summary_filtered["model_output_wls_linear"],
             color="#FF9F0A",  # orange/amber (prediction)
             linewidth=2.0,
             label="Linear Model (WLS)",
         )
     if (effective_flags & PlotLayer.WLS_PRED_QUAD) and (
-        "quadratic_model_output_wls" in summary.df_results.columns
+        "model_output_wls_quadratic" in summary.df_results.columns
     ):
         plt.plot(
             df_summary_filtered["sor#"],
-            df_summary_filtered["quadratic_model_output_wls"],
+            df_summary_filtered["model_output_wls_quadratic"],
             color="#BF5AF2",  # violet (prediction)
             linewidth=2.0,
             label="Quadratic Model (WLS)",
@@ -2949,7 +2981,7 @@ def render_master_plots(
             if flags & PlotLayer.OLS_PRED_LINEAR:
                 ax.plot(
                     df_summary_filtered["sor#"],
-                    df_summary_filtered["linear_model_output"],
+                    df_summary_filtered["model_output_ols_linear"],
                     color=color,
                     linewidth=1.6,
                     # linestyle="--",
@@ -2959,7 +2991,7 @@ def render_master_plots(
             if flags & PlotLayer.OLS_PRED_QUAD:
                 ax.plot(
                     df_summary_filtered["sor#"],
-                    df_summary_filtered["quadratic_model_output"],
+                    df_summary_filtered["model_output_ols_quadratic"],
                     color=color,
                     linewidth=1.6,
                     # linestyle=":",
@@ -2968,11 +3000,11 @@ def render_master_plots(
                 )
 
             if (flags & PlotLayer.WLS_PRED_LINEAR) and (
-                "linear_model_output_wls" in summary.df_results.columns
+                "model_output_wls_linear" in summary.df_results.columns
             ):
                 ax.plot(
                     df_summary_filtered["sor#"],
-                    df_summary_filtered["linear_model_output_wls"],
+                    df_summary_filtered["model_output_wls_linear"],
                     color=color,
                     linewidth=1.2,
                     # linestyle="-.",
@@ -2980,11 +3012,11 @@ def render_master_plots(
                     label=None,
                 )
             if (flags & PlotLayer.WLS_PRED_QUAD) and (
-                "quadratic_model_output_wls" in summary.df_results.columns
+                "model_output_wls_quadratic" in summary.df_results.columns
             ):
                 ax.plot(
                     df_summary_filtered["sor#"],
-                    df_summary_filtered["quadratic_model_output_wls"],
+                    df_summary_filtered["model_output_wls_quadratic"],
                     color=color,
                     linewidth=1.2,
                     # linestyle=(0, (1, 1)),
@@ -3517,13 +3549,13 @@ def assemble_text_report(
         """
         rename_map = {
             "sor#": "sor",
-            "linear_model_output": "lin",
-            "quadratic_model_output": "quad",
-            "linear_model_output_wls": "lin_wls",
-            "quadratic_model_output_wls": "quad_wls",
+            "model_output_ols_linear": "lin",
+            "model_output_ols_quadratic": "quad",
+            "model_output_wls_linear": "lin_wls",
+            "model_output_wls_quadratic": "quad_wls",
             "sum_lin": "Σlin",
             "sum_quad": "Σquad",
-            "sum_lin_wls": "Σlin_wls",
+            "sum_wls_linear": "Σlin_wls",
             "sum_quad_wls": "Σquad_wls",
             "cost_per_run_at_fort_lin": "cpr_lin",
             "cost_per_run_at_fort_quad": "cpr_quad",
