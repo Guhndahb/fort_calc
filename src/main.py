@@ -1168,6 +1168,16 @@ MODEL_PRIORITY = [
     "wls_quadratic",
 ]
 
+model_label_map = {
+    "robust_linear": "Robust linear",
+    "isotonic": "Isotonic",
+    "pchip": "PCHIP",
+    "ols_linear": "OLS linear",
+    "wls_linear": "WLS linear",
+    "ols_quadratic": "OLS quadratic",
+    "wls_quadratic": "WLS quadratic",
+}
+
 
 # Public helper functions for other modules to derive canonical column names
 # Uniform naming scheme (programmatic; no hard-coded full dict):
@@ -3607,16 +3617,6 @@ def assemble_text_report(
     # 2) Do not render the Model Comparison table in the textual report.
     #    Instead, list FORTs for lowest cost/run using models ordered by MODEL_PRIORITY.
     #    Only include models that were successfully processed (have a non-None sor value).
-    model_label_map = {
-        "robust_linear": "Robust linear",
-        "isotonic": "Isotonic",
-        "pchip": "PCHIP",
-        "ols_linear": "OLS linear",
-        "wls_linear": "WLS linear",
-        "ols_quadratic": "OLS quadratic",
-        "wls_quadratic": "WLS quadratic",
-    }
-
     def _value_str(val):
         return "-" if val is None else str(int(val))
 
