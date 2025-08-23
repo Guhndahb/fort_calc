@@ -2507,32 +2507,37 @@ def render_outputs(
             alpha=0.70 if omit_fort else 0.90,
         )
 
-    # OLS predictions
+    # OLS predictions (use canonical helper names so new models stay consistent)
     if effective_flags & PlotLayer.OLS_PRED_LINEAR:
-        plt.plot(
-            df_summary_filtered["sor#"],
-            df_summary_filtered["model_output_ols_linear"],
-            color="#FFD60A",  # bright yellow (prediction)
-            linewidth=2.2,
-            label="Linear Model (OLS)",
-        )
+        col_lin = model_output_column("ols_linear")
+        if col_lin in df_summary_filtered.columns:
+            plt.plot(
+                df_summary_filtered["sor#"],
+                df_summary_filtered[col_lin],
+                color="#FFD60A",  # bright yellow (prediction)
+                linewidth=2.2,
+                label="Linear Model (OLS)",
+            )
     if effective_flags & PlotLayer.OLS_PRED_QUAD:
-        plt.plot(
-            df_summary_filtered["sor#"],
-            df_summary_filtered["model_output_ols_quadratic"],
-            color="#FF2DFF",  # fuchsia/magenta (prediction)
-            linewidth=2.2,
-            label="Quadratic Model (OLS)",
-        )
+        col_quad = model_output_column("ols_quadratic")
+        if col_quad in df_summary_filtered.columns:
+            plt.plot(
+                df_summary_filtered["sor#"],
+                df_summary_filtered[col_quad],
+                color="#FF2DFF",  # fuchsia/magenta (prediction)
+                linewidth=2.2,
+                label="Quadratic Model (OLS)",
+            )
 
     # New model predictions (plot only when prediction layer is enabled and column exists)
     # Isotonic (monotone step)
     if (effective_flags & PlotLayer.OLS_PRED_LINEAR) and (
-        "isotonic_model_output" in summary.df_results.columns
+        model_output_column("isotonic") in summary.df_results.columns
     ):
+        col = model_output_column("isotonic")
         plt.plot(
             df_summary_filtered["sor#"],
-            df_summary_filtered["isotonic_model_output"],
+            df_summary_filtered[col],
             color="#7FFFD4",  # aquamarine (isotonic)
             linewidth=2.0,
             label="Isotonic Model",
@@ -2540,11 +2545,12 @@ def render_outputs(
 
     # PCHIP (smooth shape-preserving cubic)
     if (effective_flags & PlotLayer.OLS_PRED_LINEAR) and (
-        "pchip_model_output" in summary.df_results.columns
+        model_output_column("pchip") in summary.df_results.columns
     ):
+        col = model_output_column("pchip")
         plt.plot(
             df_summary_filtered["sor#"],
-            df_summary_filtered["pchip_model_output"],
+            df_summary_filtered[col],
             color="#FFDAB9",  # peach (pchip)
             linewidth=2.0,
             label="PCHIP Model",
@@ -2552,11 +2558,12 @@ def render_outputs(
 
     # Robust linear (Theil-Sen)
     if (effective_flags & PlotLayer.OLS_PRED_LINEAR) and (
-        "robust_model_output_ols_linear" in summary.df_results.columns
+        model_output_column("robust_linear") in summary.df_results.columns
     ):
+        col = model_output_column("robust_linear")
         plt.plot(
             df_summary_filtered["sor#"],
-            df_summary_filtered["robust_model_output_ols_linear"],
+            df_summary_filtered[col],
             color="#00CED1",  # dark turquoise (robust linear)
             linewidth=2.0,
             label="Robust Linear (Theil–Sen)",
@@ -2889,32 +2896,36 @@ def render_master_plots(
 
             # OLS/WLS predictions and cost curves: draw with iteration color but lighter/dashed styles
             if flags & PlotLayer.OLS_PRED_LINEAR:
-                ax.plot(
-                    df_summary_filtered["sor#"],
-                    df_summary_filtered["model_output_ols_linear"],
-                    color=color,
-                    linewidth=1.6,
-                    # linestyle="--",
-                    # alpha=0.9,
-                    label=None,
-                )
+                col_lin = model_output_column("ols_linear")
+                if col_lin in df_summary_filtered.columns:
+                    ax.plot(
+                        df_summary_filtered["sor#"],
+                        df_summary_filtered[col_lin],
+                        color=color,
+                        linewidth=1.6,
+                        # linestyle="--",
+                        # alpha=0.9,
+                        label=None,
+                    )
             if flags & PlotLayer.OLS_PRED_QUAD:
-                ax.plot(
-                    df_summary_filtered["sor#"],
-                    df_summary_filtered["model_output_ols_quadratic"],
-                    color=color,
-                    linewidth=1.6,
-                    # linestyle=":",
-                    # alpha=0.9,
-                    label=None,
-                )
+                col_quad = model_output_column("ols_quadratic")
+                if col_quad in df_summary_filtered.columns:
+                    ax.plot(
+                        df_summary_filtered["sor#"],
+                        df_summary_filtered[col_quad],
+                        color=color,
+                        linewidth=1.6,
+                        # linestyle=":",
+                        # alpha=0.9,
+                        label=None,
+                    )
 
             if (flags & PlotLayer.WLS_PRED_LINEAR) and (
-                "model_output_wls_linear" in summary.df_results.columns
+                model_output_column("wls_linear") in summary.df_results.columns
             ):
                 ax.plot(
                     df_summary_filtered["sor#"],
-                    df_summary_filtered["model_output_wls_linear"],
+                    df_summary_filtered[model_output_column("wls_linear")],
                     color=color,
                     linewidth=1.2,
                     # linestyle="-.",
@@ -2922,11 +2933,11 @@ def render_master_plots(
                     label=None,
                 )
             if (flags & PlotLayer.WLS_PRED_QUAD) and (
-                "model_output_wls_quadratic" in summary.df_results.columns
+                model_output_column("wls_quadratic") in summary.df_results.columns
             ):
                 ax.plot(
                     df_summary_filtered["sor#"],
-                    df_summary_filtered["model_output_wls_quadratic"],
+                    df_summary_filtered[model_output_column("wls_quadratic")],
                     color=color,
                     linewidth=1.2,
                     # linestyle=(0, (1, 1)),
@@ -3466,30 +3477,88 @@ def assemble_text_report(
     def _shorten_headers(df: pd.DataFrame) -> pd.DataFrame:
         """
         Return a shallow header-renamed view for display only.
+        Programmatic mapping derived from MODEL_PRIORITY and canonical helpers so
+        new model tokens are handled automatically.
         This does not mutate the original DataFrame.
         """
-        # Build display-only rename map programmatically using canonical helpers so the mapping
-        # stays correct when model tokens change.
-        rename_map: dict[str, str] = {"sor#": "sor"}
-        # OLS
-        rename_map[model_output_column("ols_linear")] = "lin_ols"
-        rename_map[model_output_column("ols_quadratic")] = "quad_ols"
-        # WLS
-        rename_map[model_output_column("wls_linear")] = "lin_wls"
-        rename_map[model_output_column("wls_quadratic")] = "quad_wls"
-        # Sums -> Σ<short>
-        rename_map[model_sum_column("ols_linear")] = "Σlin_ols"
-        rename_map[model_sum_column("ols_quadratic")] = "Σquad_ols"
-        rename_map[model_sum_column("wls_linear")] = "Σlin_wls"
-        rename_map[model_sum_column("wls_quadratic")] = "Σquad_wls"
-        # Cost-per-run columns -> cpr_*
-        rename_map[model_cost_column("ols_linear")] = "cpr_lin_ols"
-        rename_map[model_cost_column("ols_quadratic")] = "cpr_quad_ols"
-        rename_map[model_cost_column("wls_linear")] = "cpr_lin_wls"
-        rename_map[model_cost_column("wls_quadratic")] = "cpr_quad_wls"
+        # Keep the canonical short for the SOR column
+        base_map: dict[str, str] = {"sor#": "sor"}
 
-        # Only rename columns that exist to avoid KeyError
-        present = {k: v for k, v in rename_map.items() if k in df.columns}
+        # Helper: produce compact short token for display
+        def _short_token(token: str) -> str:
+            t = token.strip()
+            parts = t.split("_")
+            # maps for common pieces
+            form_map = {"linear": "lin", "quadratic": "quad"}
+            estimator_map = {"ols": "ols", "wls": "wls", "robust": "robust"}
+            form = None
+            estimator = None
+            for p in parts:
+                if p in form_map and form is None:
+                    form = form_map[p]
+                if p in estimator_map and estimator is None:
+                    estimator = estimator_map[p]
+            if form and estimator:
+                short = f"{form}_{estimator}"
+            elif form:
+                short = form
+            elif estimator:
+                short = estimator
+            else:
+                # single-token models like 'isotonic' / 'pchip' -> abbreviate common ones
+                if t == "isotonic":
+                    short = "iso"
+                elif t == "pchip":
+                    short = "pchip"
+                else:
+                    # fallback: use token (trim to a reasonable length)
+                    short = t if len(t) <= 12 else t[:12]
+            return short
+
+        # Build candidate mapping only for columns that exist
+        candidate_map: dict[str, str] = {}
+        seen_targets: dict[str, list[str]] = {}
+        for token in MODEL_PRIORITY:
+            out_col = model_output_column(token)
+            sum_col = model_sum_column(token)
+            cost_col = model_cost_column(token)
+            short = _short_token(token)
+
+            if out_col in df.columns:
+                candidate_map[out_col] = short
+                seen_targets.setdefault(short, []).append(out_col)
+            if sum_col in df.columns:
+                tgt = f"Σ{short}"
+                candidate_map[sum_col] = tgt
+                seen_targets.setdefault(tgt, []).append(sum_col)
+            if cost_col in df.columns:
+                tgt = f"cpr_{short}"
+                candidate_map[cost_col] = tgt
+                seen_targets.setdefault(tgt, []).append(cost_col)
+
+        # Resolve collisions: disambiguate conflicting short targets by falling back to token-based names
+        remap: dict[str, str] = {}
+        for src_col, tgt in candidate_map.items():
+            colliding = seen_targets.get(tgt, [])
+            if len(colliding) == 1:
+                remap[src_col] = tgt
+            else:
+                # Collision: prefer explicit stable name derived from canonical column
+                if src_col.startswith("model_output_"):
+                    token = src_col[len("model_output_") :]
+                    remap[src_col] = token
+                elif src_col.startswith("sum_"):
+                    token = src_col[len("sum_") :]
+                    remap[src_col] = f"Σ{token}"
+                elif src_col.startswith("cost_per_run_at_fort_"):
+                    token = src_col[len("cost_per_run_at_fort_") :]
+                    remap[src_col] = f"cpr_{token}"
+                else:
+                    remap[src_col] = src_col
+
+        # Merge base map (sor) with remap and only keep present columns
+        final_map = {**base_map, **remap}
+        present = {k: v for k, v in final_map.items() if k in df.columns}
         return df.rename(columns=present)
 
     def _fmt_table(df: pd.DataFrame, n: int = 10) -> str:
@@ -3570,7 +3639,7 @@ def assemble_text_report(
     max_label_len = max((len(lbl) for lbl, _ in rows_disp), default=0)
     max_val_width = max((len(v) for _, v in rows_disp), default=1)
 
-    parts.append("\nFORTs for lowest cost/run (models ordered by MODEL_PRIORITY)")
+    parts.append("FORTs for lowest cost/run (models ordered by MODEL_PRIORITY)")
 
     # Render using exact left segment and computed padding (preserve original alignment style)
     for idx, (disp_label, val_str) in enumerate(rows_disp, start=1):
