@@ -1153,16 +1153,7 @@ class SummaryModelOutputs:
     df_results: pd.DataFrame
     regression_diagnostics: dict
     offline_cost: float
-    # Per-model offline costs (MODEL_BASED path will populate these; otherwise may be None)
-    offline_cost_lin_ols: Optional[float] = None
-    offline_cost_quad_ols: Optional[float] = None
-    offline_cost_lin_wls: Optional[float] = None
-    offline_cost_quad_wls: Optional[float] = None
-    sor_min_cost_lin: int = 0
-    sor_min_cost_quad: int = 0
-    # New: WLS min-cost markers (optional presence based on include_wls_overlay)
-    sor_min_cost_lin_wls: Optional[int] = None
-    sor_min_cost_quad_wls: Optional[int] = None
+    # Breaking change: legacy per-model/offline fields removed; use per_model_offline_costs and sor_min_costs dicts
     per_model_offline_costs: dict[str, float] = field(default_factory=dict)
     sor_min_costs: dict[str, int] = field(default_factory=dict)
 
@@ -1699,20 +1690,28 @@ def regression_analysis(
         diagnostics.setdefault("linear", {})["wls_error"] = str(e)
         diagnostics.setdefault("quadratic", {})["wls_error"] = str(e)
 
-    # Assemble result_df with both OLS and WLS predictions (WLS columns may be None)
+    # Assemble result_df using canonical column-name helpers so external callers
+    # consume authoritative names produced by model_output_column(token).
+    pred_key_ols_lin = model_output_column("ols_linear")
+    pred_key_ols_quad = model_output_column("ols_quadratic")
+    pred_key_wls_lin = model_output_column("wls_linear")
+    pred_key_wls_quad = model_output_column("wls_quadratic")
+
     df_dict = {
         "sor#": sor_sequence,
-        "model_output_ols_linear": model_output_ols_linear,
-        "model_output_ols_quadratic": model_output_ols_quadratic,
+        pred_key_ols_lin: model_output_ols_linear,
+        pred_key_ols_quad: model_output_ols_quadratic,
     }
+
+    # Ensure WLS prediction columns exist in the result (fill with NaN series when absent)
     if model_output_wls_linear is not None:
-        df_dict["model_output_wls_linear"] = model_output_wls_linear
+        df_dict[pred_key_wls_lin] = model_output_wls_linear
     else:
-        df_dict["model_output_wls_linear"] = pd.Series([np.nan] * len(sor_sequence))
+        df_dict[pred_key_wls_lin] = pd.Series([np.nan] * len(sor_sequence))
     if model_output_wls_quadratic is not None:
-        df_dict["model_output_wls_quadratic"] = model_output_wls_quadratic
+        df_dict[pred_key_wls_quad] = model_output_wls_quadratic
     else:
-        df_dict["model_output_wls_quadratic"] = pd.Series([np.nan] * len(sor_sequence))
+        df_dict[pred_key_wls_quad] = pd.Series([np.nan] * len(sor_sequence))
 
     # Attempt additional, more stable model fits (isotonic, pchip, robust linear).
     # Each helper returns (preds_or_none, diagnostics) per design.
@@ -1760,14 +1759,15 @@ def regression_analysis(
 
     # Add model output columns only when a model produced finite predictions on the full grid.
     if isotonic_preds is not None and np.isfinite(isotonic_preds).all():
-        df_dict["isotonic_model_output"] = isotonic_preds
+        df_dict[model_output_column("isotonic")] = isotonic_preds
     # Do not add columns when omitted (per integration policy).
 
     if pchip_preds is not None and np.isfinite(pchip_preds).all():
-        df_dict["pchip_model_output"] = pchip_preds
+        df_dict[model_output_column("pchip")] = pchip_preds
 
     if robust_preds is not None and np.isfinite(robust_preds).all():
-        df_dict["robust_model_output_ols_linear"] = robust_preds
+        # Use canonical name for robust_linear predictions
+        df_dict[model_output_column("robust_linear")] = robust_preds
 
     result_df = pd.DataFrame(df_dict).sort_values(by="sor#").reset_index(drop=True)
 
@@ -2187,19 +2187,9 @@ def summarize_and_model(
             if pred is not None and np.isfinite(pred):
                 per_model_offline_costs[model_name] = float(mean_fort - pred)
 
-        # Backward-compatible named offline_cost_* variables (prefer model-based if available)
-        offline_cost_lin_ols = per_model_offline_costs.get(
-            "ols_linear", final_delta_fallback
-        )
-        offline_cost_quad_ols = per_model_offline_costs.get(
-            "ols_quadratic", final_delta_fallback
-        )
-        offline_cost_lin_wls = per_model_offline_costs.get(
-            "wls_linear", final_delta_fallback
-        )
-        offline_cost_quad_wls = per_model_offline_costs.get(
-            "wls_quadratic", final_delta_fallback
-        )
+        # Per-model offline costs are authoritative and available in per_model_offline_costs.
+        # Do not create legacy per-model scalar variables here; renderers and downstream logic
+        # should consult per_model_offline_costs dict (falling back to final_delta_fallback when needed).
 
         # Determine authoritative scalar offline_cost by walking MODEL_PRIORITY in order
         chosen_offline_cost = None
@@ -2247,11 +2237,8 @@ def summarize_and_model(
             df_range, params.input_data_fort
         )
 
-        # No per-model offline costs in non-MODEL_BASED path
-        offline_cost_lin_ols = None
-        offline_cost_quad_ols = None
-        offline_cost_lin_wls = None
-        offline_cost_quad_wls = None
+        # No per-model offline costs in non-MODEL_BASED path; ensure dict exists (empty)
+        # downstream code will consult per_model_offline_costs and fall back to scalar offline_cost.
 
     # At this point we have:
     # - df_summary
@@ -2282,21 +2269,24 @@ def summarize_and_model(
             return float(column_specific)
         return float(offline_cost)
 
-    # Cost per run columns (OLS) using per-model offline costs
+    # Cost per run columns (OLS) using per-model offline costs when available (fall back to scalar offline_cost)
     df_results["cost_per_run_at_fort_lin"] = (
-        df_results["sum_lin"] + _offline_for(offline_cost_lin_ols)
+        df_results["sum_lin"] + _offline_for(per_model_offline_costs.get("ols_linear"))
     ) / df_results["sor#"]
     df_results["cost_per_run_at_fort_quad"] = (
-        df_results["sum_quad"] + _offline_for(offline_cost_quad_ols)
+        df_results["sum_quad"]
+        + _offline_for(per_model_offline_costs.get("ols_quadratic"))
     ) / df_results["sor#"]
 
-    # If WLS available, compute WLS cost-per-run using per-model offline costs
+    # If WLS available, compute WLS cost-per-run using per-model offline costs when available
     if has_wls_cols:
         df_results["cost_per_run_at_fort_lin_wls"] = (
-            df_results["sum_wls_linear"] + _offline_for(offline_cost_lin_wls)
+            df_results["sum_wls_linear"]
+            + _offline_for(per_model_offline_costs.get("wls_linear"))
         ) / df_results["sor#"]
         df_results["cost_per_run_at_fort_quad_wls"] = (
-            df_results["sum_quad_wls"] + _offline_for(offline_cost_quad_wls)
+            df_results["sum_quad_wls"]
+            + _offline_for(per_model_offline_costs.get("wls_quadratic"))
         ) / df_results["sor#"]
 
     # Additional model sums & cost-per-run columns (only when model produced finite preds)
@@ -2330,39 +2320,55 @@ def summarize_and_model(
             return int(series.index[0])
         return int(series.dropna().idxmin())
 
-    sor_min_cost_lin = int(
-        df_results.loc[_safe_idxmin(df_results["cost_per_run_at_fort_lin"]), "sor#"]
-    )
-    sor_min_cost_quad = int(
-        df_results.loc[_safe_idxmin(df_results["cost_per_run_at_fort_quad"]), "sor#"]
-    )
-
-    sor_min_cost_lin_wls: Optional[int] = None
-    sor_min_cost_quad_wls: Optional[int] = None
-    if has_wls_cols:
-        sor_min_cost_lin_wls = int(
-            df_results.loc[
-                _safe_idxmin(df_results["cost_per_run_at_fort_lin_wls"]), "sor#"
-            ]
-        )
-        sor_min_cost_quad_wls = int(
-            df_results.loc[
-                _safe_idxmin(df_results["cost_per_run_at_fort_quad_wls"]), "sor#"
-            ]
-        )
-
-    # Build sor_min_costs dict for successful additional models only
+    # Compute minima for OLS cost curves and optional WLS curves, then populate the authoritative sor_min_costs dict.
     sor_min_costs: dict[str, int] = {}
     try:
-        # isotonic
+        sor_min_cost_lin = int(
+            df_results.loc[_safe_idxmin(df_results["cost_per_run_at_fort_lin"]), "sor#"]
+        )
+        sor_min_costs["ols_linear"] = sor_min_cost_lin
+    except Exception:
+        # best-effort: leave absent when unable to compute
+        pass
+
+    try:
+        sor_min_cost_quad = int(
+            df_results.loc[
+                _safe_idxmin(df_results["cost_per_run_at_fort_quad"]), "sor#"
+            ]
+        )
+        sor_min_costs["ols_quadratic"] = sor_min_cost_quad
+    except Exception:
+        pass
+
+    if has_wls_cols:
+        try:
+            sor_min_cost_lin_wls = int(
+                df_results.loc[
+                    _safe_idxmin(df_results["cost_per_run_at_fort_lin_wls"]), "sor#"
+                ]
+            )
+            sor_min_costs["wls_linear"] = sor_min_cost_lin_wls
+        except Exception:
+            pass
+        try:
+            sor_min_cost_quad_wls = int(
+                df_results.loc[
+                    _safe_idxmin(df_results["cost_per_run_at_fort_quad_wls"]), "sor#"
+                ]
+            )
+            sor_min_costs["wls_quadratic"] = sor_min_cost_quad_wls
+        except Exception:
+            pass
+
+    # Build sor_min_costs entries for successful additional models only (isotonic, pchip, robust_linear)
+    try:
         if "cost_per_run_at_fort_isotonic" in df_results.columns:
             idx = _safe_idxmin(df_results["cost_per_run_at_fort_isotonic"])
             sor_min_costs["isotonic"] = int(df_results.loc[idx, "sor#"])
-        # pchip
         if "cost_per_run_at_fort_pchip" in df_results.columns:
             idx = _safe_idxmin(df_results["cost_per_run_at_fort_pchip"])
             sor_min_costs["pchip"] = int(df_results.loc[idx, "sor#"])
-        # robust_linear
         if "cost_per_run_at_fort_robust_linear" in df_results.columns:
             idx = _safe_idxmin(df_results["cost_per_run_at_fort_robust_linear"])
             sor_min_costs["robust_linear"] = int(df_results.loc[idx, "sor#"])
@@ -2381,22 +2387,6 @@ def summarize_and_model(
         df_results=df_results,
         regression_diagnostics=regression_diagnostics,
         offline_cost=float(offline_cost),
-        offline_cost_lin_ols=(
-            float(offline_cost_lin_ols) if offline_cost_lin_ols is not None else None
-        ),
-        offline_cost_quad_ols=(
-            float(offline_cost_quad_ols) if offline_cost_quad_ols is not None else None
-        ),
-        offline_cost_lin_wls=(
-            float(offline_cost_lin_wls) if offline_cost_lin_wls is not None else None
-        ),
-        offline_cost_quad_wls=(
-            float(offline_cost_quad_wls) if offline_cost_quad_wls is not None else None
-        ),
-        sor_min_cost_lin=sor_min_cost_lin,
-        sor_min_cost_quad=sor_min_cost_quad,
-        sor_min_cost_lin_wls=sor_min_cost_lin_wls,
-        sor_min_cost_quad_wls=sor_min_cost_quad_wls,
         per_model_offline_costs=per_model_offline_costs,
         sor_min_costs=sor_min_costs,
     )
@@ -2736,38 +2726,43 @@ def render_outputs(
         )
 
     # Min cost verticals: dotted lines using the SAME colors as their corresponding cost curves
+    # Column/field names are authoritative via model_* helpers; per-model minima are in summary.sor_min_costs
     if effective_flags & PlotLayer.OLS_MIN_LINEAR:
-        plt.axvline(
-            x=summary.sor_min_cost_lin,
-            color=_c_cost_lin_ols,
-            linestyle=":",  # dotted per request
-            linewidth=2.0,
-            label="Min Cost (Linear, OLS)",
-        )
+        _val = summary.sor_min_costs.get("ols_linear")
+        if _val is not None:
+            plt.axvline(
+                x=int(_val),
+                color=_c_cost_lin_ols,
+                linestyle=":",  # dotted per request
+                linewidth=2.0,
+                label="Min Cost (Linear, OLS)",
+            )
     if effective_flags & PlotLayer.OLS_MIN_QUAD:
-        plt.axvline(
-            x=summary.sor_min_cost_quad,
-            color=_c_cost_quad_ols,
-            linestyle=":",  # dotted per request
-            linewidth=2.0,
-            label="Min Cost (Quadratic, OLS)",
-        )
+        _val = summary.sor_min_costs.get("ols_quadratic")
+        if _val is not None:
+            plt.axvline(
+                x=int(_val),
+                color=_c_cost_quad_ols,
+                linestyle=":",  # dotted per request
+                linewidth=2.0,
+                label="Min Cost (Quadratic, OLS)",
+            )
 
     if (effective_flags & PlotLayer.WLS_MIN_LINEAR) and (
-        summary.sor_min_cost_lin_wls is not None
+        summary.sor_min_costs.get("wls_linear") is not None
     ):
         plt.axvline(
-            x=summary.sor_min_cost_lin_wls,
+            x=int(summary.sor_min_costs.get("wls_linear")),
             color=_c_cost_lin_wls,
             linestyle=":",  # dotted per request
             linewidth=2.0,
             label="Min Cost (Linear, WLS)",
         )
     if (effective_flags & PlotLayer.WLS_MIN_QUAD) and (
-        summary.sor_min_cost_quad_wls is not None
+        summary.sor_min_costs.get("wls_quadratic") is not None
     ):
         plt.axvline(
-            x=summary.sor_min_cost_quad_wls,
+            x=int(summary.sor_min_costs.get("wls_quadratic")),
             color=_c_cost_quad_wls,
             linestyle=":",  # dotted per request
             linewidth=2.0,
@@ -3077,29 +3072,34 @@ def render_master_plots(
                 )
 
             # Min cost markers as vertical lines (subtle)
+            # Per-model minima are authoritative in summary.sor_min_costs (keys per MODEL_PRIORITY)
             if flags & PlotLayer.OLS_MIN_LINEAR:
-                ax.axvline(
-                    x=summary.sor_min_cost_lin,
-                    color=color,
-                    linestyle=":",
-                    linewidth=1.0,
-                    # alpha=0.6,
-                    label=None,
-                )
+                _val = summary.sor_min_costs.get("ols_linear")
+                if _val is not None:
+                    ax.axvline(
+                        x=int(_val),
+                        color=color,
+                        linestyle=":",
+                        linewidth=1.0,
+                        # alpha=0.6,
+                        label=None,
+                    )
             if flags & PlotLayer.OLS_MIN_QUAD:
-                ax.axvline(
-                    x=summary.sor_min_cost_quad,
-                    color=color,
-                    linestyle=":",
-                    linewidth=1.0,
-                    # alpha=0.6,
-                    label=None,
-                )
+                _val = summary.sor_min_costs.get("ols_quadratic")
+                if _val is not None:
+                    ax.axvline(
+                        x=int(_val),
+                        color=color,
+                        linestyle=":",
+                        linewidth=1.0,
+                        # alpha=0.6,
+                        label=None,
+                    )
             if (flags & PlotLayer.WLS_MIN_LINEAR) and (
-                summary.sor_min_cost_lin_wls is not None
+                summary.sor_min_costs.get("wls_linear") is not None
             ):
                 ax.axvline(
-                    x=summary.sor_min_cost_lin_wls,
+                    x=int(summary.sor_min_costs.get("wls_linear")),
                     color=color,
                     linestyle=":",
                     linewidth=1.0,
@@ -3107,10 +3107,10 @@ def render_master_plots(
                     label=None,
                 )
             if (flags & PlotLayer.WLS_MIN_QUAD) and (
-                summary.sor_min_cost_quad_wls is not None
+                summary.sor_min_costs.get("wls_quadratic") is not None
             ):
                 ax.axvline(
-                    x=summary.sor_min_cost_quad_wls,
+                    x=int(summary.sor_min_costs.get("wls_quadratic")),
                     color=color,
                     linestyle=":",
                     linewidth=1.0,
@@ -3627,18 +3627,8 @@ def assemble_text_report(
 
     rows_disp: list[tuple[str, str]] = []
     for model_name in MODEL_PRIORITY:
-        if model_name in ("robust_linear", "isotonic", "pchip"):
-            sor_val = summary.sor_min_costs.get(model_name)
-        elif model_name == "ols_linear":
-            sor_val = summary.sor_min_cost_lin
-        elif model_name == "wls_linear":
-            sor_val = summary.sor_min_cost_lin_wls
-        elif model_name == "ols_quadratic":
-            sor_val = summary.sor_min_cost_quad
-        elif model_name == "wls_quadratic":
-            sor_val = summary.sor_min_cost_quad_wls
-        else:
-            sor_val = None
+        # Use the authoritative per-model minima mapping (sor_min_costs) for all models.
+        sor_val = summary.sor_min_costs.get(model_name)
 
         # Treat missing/None as not successfully processed; skip them
         if sor_val is None:
