@@ -45,6 +45,12 @@ def test_diagnostics_include_all_variants_linear_and_quadratic():
         if "wls_hc1" in form_diag:
             assert "weights_spec" in form_diag["wls_hc1"]
 
+    # New model diagnostics (isotonic, pchip, robust_linear) should be present at top-level
+    for m in ("isotonic", "pchip", "robust_linear"):
+        assert m in diagnostics, f"Missing diagnostics for new model: {m}"
+        # Each model diagnostics must include a fit_message token per contract
+        assert "fit_message" in diagnostics[m], f"No fit_message for {m}"
+
 
 def test_heteroskedastic_behavior_robust_se_and_wls_smoke():
     # Construct heteroskedastic data where variance increases with sor#

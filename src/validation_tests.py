@@ -327,12 +327,21 @@ def validate_fort_ladder_down(
             # Early-stop: if any model's recommended sor_min_cost equals the current cur_fort,
             # omit this iteration (do not render plots/manifests/reports) and stop iterating.
             try:
+                # Collect recommendations from legacy named attributes and first-class additional models
                 recs = [
                     getattr(summary_iter, "sor_min_cost_lin", None),
                     getattr(summary_iter, "sor_min_cost_quad", None),
                     getattr(summary_iter, "sor_min_cost_lin_wls", None),
                     getattr(summary_iter, "sor_min_cost_quad_wls", None),
                 ]
+                # Append additional-model recommendations from sor_min_costs dict when available
+                try:
+                    extra = getattr(summary_iter, "sor_min_costs", {}) or {}
+                    for key in ("isotonic", "pchip", "robust_linear"):
+                        recs.append(extra.get(key))
+                except Exception:
+                    # best-effort: if attribute missing, ignore
+                    pass
                 reached = any(
                     (r is not None and np.isfinite(r) and int(r) == int(cur_fort))
                     for r in recs
@@ -567,6 +576,12 @@ def _summarize_with_cached_models(df_range, params, cache: dict | None):
         cache_local["offline_cost_quad_ols"] = summary_initial.offline_cost_quad_ols
         cache_local["offline_cost_lin_wls"] = summary_initial.offline_cost_lin_wls
         cache_local["offline_cost_quad_wls"] = summary_initial.offline_cost_quad_wls
+        # Per-model offline costs for additional models (may be absent; store None when missing)
+        # summary_initial exposes per_model_offline_costs (dict) when MODEL_BASED was used.
+        pmo = getattr(summary_initial, "per_model_offline_costs", {}) or {}
+        cache_local["offline_cost_isotonic"] = pmo.get("isotonic")
+        cache_local["offline_cost_pchip"] = pmo.get("pchip")
+        cache_local["offline_cost_robust_linear"] = pmo.get("robust_linear")
 
         # If caller provided a dict, update it in-place so the caller sees populated cache
         if cache is not None:
@@ -634,6 +649,29 @@ def _summarize_with_cached_models(df_range, params, cache: dict | None):
             df_results_iter["sum_quad_wls"]
             + _offline_for(cache_local.get("offline_cost_quad_wls"))
         ) / df_results_iter["sor#"]
+    # Additional models (isotonic / pchip / robust_linear): recompute sums & cost-per-run when present
+    if "isotonic_model_output" in df_results_iter.columns:
+        df_results_iter["sum_isotonic"] = df_results_iter[
+            "isotonic_model_output"
+        ].cumsum()
+        df_results_iter["cost_per_run_at_fort_isotonic"] = (
+            df_results_iter["sum_isotonic"]
+            + _offline_for(cache_local.get("offline_cost_isotonic"))
+        ) / df_results_iter["sor#"]
+    if "pchip_model_output" in df_results_iter.columns:
+        df_results_iter["sum_pchip"] = df_results_iter["pchip_model_output"].cumsum()
+        df_results_iter["cost_per_run_at_fort_pchip"] = (
+            df_results_iter["sum_pchip"]
+            + _offline_for(cache_local.get("offline_cost_pchip"))
+        ) / df_results_iter["sor#"]
+    if "robust_linear_model_output" in df_results_iter.columns:
+        df_results_iter["sum_robust_linear"] = df_results_iter[
+            "robust_linear_model_output"
+        ].cumsum()
+        df_results_iter["cost_per_run_at_fort_robust_linear"] = (
+            df_results_iter["sum_robust_linear"]
+            + _offline_for(cache_local.get("offline_cost_robust_linear"))
+        ) / df_results_iter["sor#"]
 
     # Safe idxmin helper (mirrors main._safe_idxmin)
     def _safe_idxmin(series: pd.Series) -> int:
@@ -651,6 +689,36 @@ def _summarize_with_cached_models(df_range, params, cache: dict | None):
             _safe_idxmin(df_results_iter["cost_per_run_at_fort_quad"]), "sor#"
         ]
     )
+    # Compute sor_min for additional models when their cost columns exist
+    sor_min_cost_isotonic = None
+    sor_min_cost_pchip = None
+    sor_min_cost_robust_linear = None
+    try:
+        if "cost_per_run_at_fort_isotonic" in df_results_iter.columns:
+            sor_min_cost_isotonic = int(
+                df_results_iter.loc[
+                    _safe_idxmin(df_results_iter["cost_per_run_at_fort_isotonic"]),
+                    "sor#",
+                ]
+            )
+        if "cost_per_run_at_fort_pchip" in df_results_iter.columns:
+            sor_min_cost_pchip = int(
+                df_results_iter.loc[
+                    _safe_idxmin(df_results_iter["cost_per_run_at_fort_pchip"]), "sor#"
+                ]
+            )
+        if "cost_per_run_at_fort_robust_linear" in df_results_iter.columns:
+            sor_min_cost_robust_linear = int(
+                df_results_iter.loc[
+                    _safe_idxmin(df_results_iter["cost_per_run_at_fort_robust_linear"]),
+                    "sor#",
+                ]
+            )
+    except Exception:
+        # Best-effort only; do not fail the pipeline for this metadata bookkeeping
+        sor_min_cost_isotonic = sor_min_cost_isotonic
+        sor_min_cost_pchip = sor_min_cost_pchip
+        sor_min_cost_robust_linear = sor_min_cost_robust_linear
 
     sor_min_cost_lin_wls = None
     sor_min_cost_quad_wls = None
@@ -665,6 +733,43 @@ def _summarize_with_cached_models(df_range, params, cache: dict | None):
                 _safe_idxmin(df_results_iter["cost_per_run_at_fort_quad_wls"]), "sor#"
             ]
         )
+
+    # Build per_model_offline_costs dict from cache (best-effort)
+    per_model_offline_costs = {}
+    if cache_local.get("offline_cost_isotonic") is not None:
+        try:
+            per_model_offline_costs["isotonic"] = float(
+                cache_local.get("offline_cost_isotonic")
+            )
+        except Exception:
+            per_model_offline_costs["isotonic"] = None
+    if cache_local.get("offline_cost_pchip") is not None:
+        try:
+            per_model_offline_costs["pchip"] = float(
+                cache_local.get("offline_cost_pchip")
+            )
+        except Exception:
+            per_model_offline_costs["pchip"] = None
+    if cache_local.get("offline_cost_robust_linear") is not None:
+        try:
+            per_model_offline_costs["robust_linear"] = float(
+                cache_local.get("offline_cost_robust_linear")
+            )
+        except Exception:
+            per_model_offline_costs["robust_linear"] = None
+
+    # Build sor_min_costs dict for discovered additional models
+    sor_min_costs: dict[str, int] = {}
+    try:
+        if sor_min_cost_isotonic is not None:
+            sor_min_costs["isotonic"] = int(sor_min_cost_isotonic)
+        if sor_min_cost_pchip is not None:
+            sor_min_costs["pchip"] = int(sor_min_cost_pchip)
+        if sor_min_cost_robust_linear is not None:
+            sor_min_costs["robust_linear"] = int(sor_min_cost_robust_linear)
+    except Exception:
+        # best-effort
+        pass
 
     # Build and return SummaryModelOutputs using cached diagnostics and offline cost values
     return SummaryModelOutputs(
@@ -696,6 +801,8 @@ def _summarize_with_cached_models(df_range, params, cache: dict | None):
         sor_min_cost_quad=sor_min_cost_quad,
         sor_min_cost_lin_wls=sor_min_cost_lin_wls,
         sor_min_cost_quad_wls=sor_min_cost_quad_wls,
+        per_model_offline_costs=per_model_offline_costs,
+        sor_min_costs=sor_min_costs,
     )
 
 
@@ -992,12 +1099,21 @@ def validate_fort_ladder_down_fixed_model(
             # Early-stop: if any model's recommended sor_min_cost equals the current cur_fort,
             # omit this iteration (do not render plots/manifests/reports) and stop iterating.
             try:
+                # Collect recommendations from legacy named attributes and first-class additional models
                 recs = [
                     getattr(summary_iter, "sor_min_cost_lin", None),
                     getattr(summary_iter, "sor_min_cost_quad", None),
                     getattr(summary_iter, "sor_min_cost_lin_wls", None),
                     getattr(summary_iter, "sor_min_cost_quad_wls", None),
                 ]
+                # Append additional-model recommendations from sor_min_costs dict when available
+                try:
+                    extra = getattr(summary_iter, "sor_min_costs", {}) or {}
+                    for key in ("isotonic", "pchip", "robust_linear"):
+                        recs.append(extra.get(key))
+                except Exception:
+                    # best-effort: if attribute missing, ignore
+                    pass
                 reached = any(
                     (r is not None and np.isfinite(r) and int(r) == int(cur_fort))
                     for r in recs

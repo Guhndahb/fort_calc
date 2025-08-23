@@ -31,6 +31,11 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from matplotlib.lines import Line2D
+from scipy.interpolate import PchipInterpolator
+
+# Modeling helpers added for isotonic / pchip / robust regressors
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import TheilSenRegressor
 
 # Support both package and script execution modes
 try:
@@ -1158,6 +1163,244 @@ class SummaryModelOutputs:
     # New: WLS min-cost markers (optional presence based on include_wls_overlay)
     sor_min_cost_lin_wls: Optional[int] = None
     sor_min_cost_quad_wls: Optional[int] = None
+    per_model_offline_costs: dict[str, float] = field(default_factory=dict)
+    sor_min_costs: dict[str, int] = field(default_factory=dict)
+
+
+MODEL_PRIORITY = [
+    "robust_linear",
+    "isotonic",
+    "pchip",
+    "ols_linear",
+    "wls_linear",
+    "ols_quadratic",
+    "wls_quadratic",
+]
+
+
+def fit_isotonic(df_range, input_data_fort) -> tuple[np.ndarray, dict]:
+    # Signature (as requested in task text):
+    # def fit_isotonic(df_range, input_data_fort) -> (predictions: np.ndarray, diagnostics: dict)
+
+    # Shared per‑SOR means extraction (coerce sor# -> numeric, drop NaN, mean by sor)
+    df_means = (
+        df_range.assign(sor_numeric=pd.to_numeric(df_range["sor#"], errors="coerce"))
+        .dropna(subset=["sor_numeric"])
+        .groupby("sor_numeric", as_index=True)["adjusted_run_time"]
+        .mean()
+        .sort_index()
+    )
+
+    # Use inclusive integer grid
+    seq = np.arange(1, input_data_fort + 1)
+
+    # Initialize diagnostics with sensible defaults
+    diagnostics: dict = {
+        "RMSE": None,
+        "n_obs": 0,
+        "monotonicity_check": True,
+        "fit_exception": None,
+        "fit_message": None,
+    }
+
+    # Small-sample rule
+    try:
+        unique_count = int(df_means.index.nunique())
+    except Exception:
+        unique_count = 0
+    if unique_count < 3:
+        diagnostics["fit_message"] = "omitted_due_to_too_few_unique_sor"
+        diagnostics["n_obs"] = int(unique_count)
+        return None, diagnostics
+
+    # Fit flow with exception handling
+    try:
+        x = df_means.index.to_numpy(dtype=float)
+        y = df_means.values.astype(float)
+
+        iso = IsotonicRegression(increasing=True).fit(x, y)
+        preds = iso.predict(seq)
+
+        # Non-finite predictions check
+        if not np.isfinite(preds).all():
+            diagnostics["fit_message"] = "omitted_due_to_nonfinite_predictions"
+            diagnostics["fit_exception"] = None
+            diagnostics["n_obs"] = int(len(x))
+            return None, diagnostics
+
+        # In-sample RMSE using isotonic predictions at x
+        rmse = float(np.sqrt(np.mean((iso.predict(x) - y) ** 2)))
+
+        diagnostics["RMSE"] = rmse
+        diagnostics["n_obs"] = int(len(x))
+        diagnostics["monotonicity_check"] = True
+        diagnostics["fit_message"] = "fit_ok"
+        diagnostics["fit_exception"] = None
+
+        return preds.astype(float), diagnostics
+
+    except Exception as e:
+        diagnostics["fit_exception"] = str(e)
+        diagnostics["fit_message"] = "omitted_due_to_fit_exception"
+        diagnostics["n_obs"] = int(df_means.index.nunique())
+        diagnostics["monotonicity_check"] = False
+        diagnostics["RMSE"] = None
+        return None, diagnostics
+
+
+def fit_robust_linear(df_range, input_data_fort) -> tuple[np.ndarray | None, dict]:
+    df_means = (
+        df_range.assign(sor_numeric=pd.to_numeric(df_range["sor#"], errors="coerce"))
+        .dropna(subset=["sor_numeric"])
+        .groupby("sor_numeric", as_index=True)["adjusted_run_time"]
+        .mean()
+        .sort_index()
+    )
+
+    # Use inclusive integer grid
+    seq = np.arange(1, input_data_fort + 1)
+
+    # Diagnostics dict must include required keys
+    diagnostics: dict = {
+        "RMSE": None,
+        "n_obs": 0,
+        "monotonicity_check": False,
+        "fit_exception": None,
+        "fit_message": None,
+    }
+
+    # Small-sample rule for robust linear (needs at least two distinct x to fit)
+    try:
+        unique_count = int(df_means.index.nunique())
+    except Exception:
+        unique_count = 0
+    if unique_count < 2:
+        diagnostics["fit_message"] = "omitted_due_to_too_few_unique_sor"
+        diagnostics["n_obs"] = int(unique_count)
+        return None, diagnostics
+
+    # Fit flow (wrapped in try/except)
+    try:
+        x = df_means.index.to_numpy(dtype=float)
+        y = df_means.values.astype(float)
+
+        model = TheilSenRegressor().fit(x.reshape(-1, 1), y)
+        preds_seq = model.predict(seq.reshape(-1, 1))
+
+        if not np.isfinite(preds_seq).all():
+            diagnostics["fit_message"] = "omitted_due_to_nonfinite_predictions"
+            diagnostics["fit_exception"] = None
+            diagnostics["n_obs"] = int(len(x))
+            return None, diagnostics
+
+        rmse = float(np.sqrt(np.mean((model.predict(x.reshape(-1, 1)) - y) ** 2)))
+
+        diagnostics["RMSE"] = rmse
+        diagnostics["n_obs"] = int(len(x))
+        diagnostics["monotonicity_check"] = False
+        diagnostics["fit_message"] = "fit_ok"
+        diagnostics["fit_exception"] = None
+
+        return preds_seq.astype(float), diagnostics
+
+    except Exception as e:
+        diagnostics["fit_exception"] = str(e)
+        diagnostics["fit_message"] = "omitted_due_to_fit_exception"
+        diagnostics["n_obs"] = int(df_means.index.nunique())
+        diagnostics["monotonicity_check"] = False
+        diagnostics["RMSE"] = None
+        return None, diagnostics
+
+
+def fit_pchip(df_range, input_data_fort) -> tuple[np.ndarray | None, dict]:
+    df_means = (
+        df_range.assign(sor_numeric=pd.to_numeric(df_range["sor#"], errors="coerce"))
+        .dropna(subset=["sor_numeric"])
+        .groupby("sor_numeric", as_index=True)["adjusted_run_time"]
+        .mean()
+        .sort_index()
+    )
+
+    # Use inclusive integer grid
+    seq = np.arange(1, input_data_fort + 1)
+
+    # Diagnostics must be a dict with required keys
+    diagnostics: dict = {
+        "RMSE": None,
+        "n_obs": 0,
+        "monotonicity_check": False,
+        "fit_exception": None,
+        "fit_message": None,
+    }
+
+    # Small-sample rule
+    try:
+        unique_count = int(df_means.index.nunique())
+    except Exception:
+        unique_count = 0
+    if unique_count < 3:
+        diagnostics["fit_message"] = "omitted_due_to_too_few_unique_sor"
+        diagnostics["n_obs"] = int(unique_count)
+        return None, diagnostics
+
+    # Fit flow with exception handling
+    try:
+        x = df_means.index.to_numpy(dtype=float)
+        y = df_means.values.astype(float)
+
+        pchip = PchipInterpolator(x, y, extrapolate=True)
+        preds_seq = pchip(seq)
+
+        # Non-finite predictions check
+        if not np.isfinite(preds_seq).all():
+            diagnostics["fit_message"] = "omitted_due_to_nonfinite_predictions"
+            diagnostics["fit_exception"] = None
+            diagnostics["n_obs"] = int(len(x))
+            return None, diagnostics
+
+        # Check monotonicity strictly non-decreasing on seq
+        monotone_ok = not np.any(np.diff(preds_seq) < -1e-12)
+        diagnostics["monotonicity_check"] = bool(monotone_ok)
+
+        if monotone_ok:
+            # Compute RMSE using pchip(x)
+            rmse = float(np.sqrt(np.mean((pchip(x) - y) ** 2)))
+            diagnostics["RMSE"] = rmse
+            diagnostics["n_obs"] = int(len(x))
+            diagnostics["fit_message"] = "fit_ok"
+            diagnostics["fit_exception"] = None
+            return preds_seq.astype(float), diagnostics
+        else:
+            diagnostics["fit_message"] = "pchip_nonmonotone_fallback_to_isotonic"
+            # Attempt isotonic fallback
+            iso_preds, iso_diag = fit_isotonic(df_range, input_data_fort)
+            # If isotonic omitted/failed (returned None)
+            if iso_preds is None:
+                diagnostics["fit_exception"] = iso_diag.get("fit_exception")
+                diagnostics["RMSE"] = iso_diag.get("RMSE")
+                diagnostics["n_obs"] = iso_diag.get("n_obs", int(len(x)))
+                # Propagate too-few-unique-sor token if present
+                if iso_diag.get("fit_message") == "omitted_due_to_too_few_unique_sor":
+                    diagnostics["fit_message"] = "omitted_due_to_too_few_unique_sor"
+                    return None, diagnostics
+                # Otherwise treat as omitted due to nonfinite or fit_exception
+                diagnostics["fit_message"] = iso_diag.get(
+                    "fit_message", "omitted_due_to_nonfinite_predictions"
+                )
+                return None, diagnostics
+            else:
+                # Isotonic succeeded: attach fallback diagnostics and return its preds
+                diagnostics["fallback_isotonic"] = iso_diag
+                diagnostics["fit_message"] = "pchip_nonmonotone_fallback_to_isotonic"
+                return iso_preds, diagnostics
+
+    except Exception as e:
+        diagnostics["fit_exception"] = str(e)
+        diagnostics["fit_message"] = "omitted_due_to_fit_exception"
+        diagnostics["n_obs"] = int(df_means.index.nunique())
+        diagnostics["RMSE"] = None
+        diagnostics["monotonicity_check"] = False
+        return None, diagnostics
 
 
 def regression_analysis(
@@ -1438,6 +1681,61 @@ def regression_analysis(
         df_dict["quadratic_model_output_wls"] = quadratic_model_output_wls
     else:
         df_dict["quadratic_model_output_wls"] = pd.Series([np.nan] * len(sor_sequence))
+
+    # Attempt additional, more stable model fits (isotonic, pchip, robust linear).
+    # Each helper returns (preds_or_none, diagnostics) per design.
+    try:
+        isotonic_preds, isotonic_diag = fit_isotonic(df_range, input_data_fort)
+    except Exception as _e_iso:
+        # Defensive: never let exceptions bubble; record as omitted_due_to_fit_exception
+        isotonic_preds = None
+        isotonic_diag = {
+            "RMSE": None,
+            "n_obs": 0,
+            "monotonicity_check": False,
+            "fit_exception": str(_e_iso),
+            "fit_message": "omitted_due_to_fit_exception",
+        }
+
+    try:
+        pchip_preds, pchip_diag = fit_pchip(df_range, input_data_fort)
+    except Exception as _e_pchip:
+        pchip_preds = None
+        pchip_diag = {
+            "RMSE": None,
+            "n_obs": 0,
+            "monotonicity_check": False,
+            "fit_exception": str(_e_pchip),
+            "fit_message": "omitted_due_to_fit_exception",
+        }
+
+    try:
+        robust_preds, robust_diag = fit_robust_linear(df_range, input_data_fort)
+    except Exception as _e_rob:
+        robust_preds = None
+        robust_diag = {
+            "RMSE": None,
+            "n_obs": 0,
+            "monotonicity_check": False,
+            "fit_exception": str(_e_rob),
+            "fit_message": "omitted_due_to_fit_exception",
+        }
+
+    # Expose diagnostics for the new models at top-level so callers/tests can inspect reasons.
+    diagnostics["isotonic"] = isotonic_diag
+    diagnostics["pchip"] = pchip_diag
+    diagnostics["robust_linear"] = robust_diag
+
+    # Add model output columns only when a model produced finite predictions on the full grid.
+    if isotonic_preds is not None and np.isfinite(isotonic_preds).all():
+        df_dict["isotonic_model_output"] = isotonic_preds
+    # Do not add columns when omitted (per integration policy).
+
+    if pchip_preds is not None and np.isfinite(pchip_preds).all():
+        df_dict["pchip_model_output"] = pchip_preds
+
+    if robust_preds is not None and np.isfinite(robust_preds).all():
+        df_dict["robust_linear_model_output"] = robust_preds
 
     result_df = pd.DataFrame(df_dict).sort_values(by="sor#").reset_index(drop=True)
 
@@ -1836,77 +2134,59 @@ def summarize_and_model(
             return val
 
         # Compute per-model offline costs (model-based = mean_fort - prediction_at_prev_k)
-        offline_cost_lin_ols = None
-        offline_cost_quad_ols = None
-        offline_cost_lin_wls = None
-        offline_cost_quad_wls = None
+        # Map model token -> df_results column name
+        model_to_col = {
+            "robust_linear": "robust_linear_model_output",
+            "isotonic": "isotonic_model_output",
+            "pchip": "pchip_model_output",
+            "ols_linear": "linear_model_output",
+            "wls_linear": "linear_model_output_wls",
+            "ols_quadratic": "quadratic_model_output",
+            "wls_quadratic": "quadratic_model_output_wls",
+        }
 
-        # Linear OLS
-        pred = _prediction_at_prev_k("linear_model_output")
-        if pred is not None:
-            offline_cost_lin_ols = mean_fort - pred
-        else:
-            offline_cost_lin_ols = final_delta_fallback
+        # Build per_model_offline_costs only for models that produce finite predictions at prev_k
+        per_model_offline_costs: dict[str, float] = {}
+        for model_name in MODEL_PRIORITY:
+            col = model_to_col.get(model_name)
+            if col is None:
+                continue
+            pred = _prediction_at_prev_k(col)
+            if pred is not None and np.isfinite(pred):
+                per_model_offline_costs[model_name] = float(mean_fort - pred)
 
-        # Quadratic OLS
-        pred = _prediction_at_prev_k("quadratic_model_output")
-        if pred is not None:
-            offline_cost_quad_ols = mean_fort - pred
-        else:
-            offline_cost_quad_ols = final_delta_fallback
+        # Backward-compatible named offline_cost_* variables (prefer model-based if available)
+        offline_cost_lin_ols = per_model_offline_costs.get(
+            "ols_linear", final_delta_fallback
+        )
+        offline_cost_quad_ols = per_model_offline_costs.get(
+            "ols_quadratic", final_delta_fallback
+        )
+        offline_cost_lin_wls = per_model_offline_costs.get(
+            "wls_linear", final_delta_fallback
+        )
+        offline_cost_quad_wls = per_model_offline_costs.get(
+            "wls_quadratic", final_delta_fallback
+        )
 
-        # Linear WLS (may be present as column of NaNs if WLS fitting failed)
-        pred = _prediction_at_prev_k("linear_model_output_wls")
-        if pred is not None:
-            offline_cost_lin_wls = mean_fort - pred
-        else:
-            offline_cost_lin_wls = final_delta_fallback
-
-        # Quadratic WLS
-        pred = _prediction_at_prev_k("quadratic_model_output_wls")
-        if pred is not None:
-            offline_cost_quad_wls = mean_fort - pred
-        else:
-            offline_cost_quad_wls = final_delta_fallback
-
-        # Ensure finite values: if any computed offline cost is not finite, apply fallback
-        def _ensure_finite_or_fallback(x: Optional[float]) -> Optional[float]:
-            try:
-                if x is None:
-                    return None
-                xf = float(x)
-                if np.isfinite(xf):
-                    return xf
-                return final_delta_fallback
-            except Exception:
-                return final_delta_fallback
-
-        offline_cost_lin_ols = _ensure_finite_or_fallback(offline_cost_lin_ols)
-        offline_cost_quad_ols = _ensure_finite_or_fallback(offline_cost_quad_ols)
-        offline_cost_lin_wls = _ensure_finite_or_fallback(offline_cost_lin_wls)
-        offline_cost_quad_wls = _ensure_finite_or_fallback(offline_cost_quad_wls)
-
-        # Determine authoritative scalar offline_cost for backward compatibility:
-        # prefer linear OLS if finite, else first finite of the others.
+        # Determine authoritative scalar offline_cost by walking MODEL_PRIORITY in order
         chosen_offline_cost = None
-        candidates = [
-            offline_cost_lin_ols,
-            offline_cost_quad_ols,
-            offline_cost_lin_wls,
-            offline_cost_quad_wls,
-            final_delta_fallback,
-        ]
-        for c in candidates:
-            if c is not None and np.isfinite(c):
-                chosen_offline_cost = float(c)
+        for model_name in MODEL_PRIORITY:
+            val = per_model_offline_costs.get(model_name)
+            if val is not None and np.isfinite(val):
+                chosen_offline_cost = float(val)
                 break
+
+        # If none found, fall back to summary final delta
+        if chosen_offline_cost is None:
+            chosen_offline_cost = final_delta_fallback
 
         if chosen_offline_cost is None:
             raise ValueError(
                 "Offline cost could not be computed: no finite model-based or fallback offline cost available."
             )
 
-        offline_cost = chosen_offline_cost
+        offline_cost = float(chosen_offline_cost)
 
     else:
         # Non-model-based (existing behavior): compute df_summary using requested delta_mode
@@ -1945,7 +2225,13 @@ def summarize_and_model(
     # - df_summary
     # - df_results and regression_diagnostics (set in either branch)
     # - offline_cost scalar and per-model offline_cost_* variables (some may be None)
-    # Compute cumulative sums
+    # Ensure per_model_offline_costs exists (empty dict in non-MODEL_BASED path)
+    try:
+        per_model_offline_costs  # type: ignore[name-defined]
+    except NameError:
+        per_model_offline_costs = {}
+
+    # Compute cumulative sums for baseline models
     df_results["sum_lin"] = df_results["linear_model_output"].cumsum()
     df_results["sum_quad"] = df_results["quadratic_model_output"].cumsum()
 
@@ -1981,6 +2267,30 @@ def summarize_and_model(
             df_results["sum_quad_wls"] + _offline_for(offline_cost_quad_wls)
         ) / df_results["sor#"]
 
+    # Additional model sums & cost-per-run columns (only when model produced finite preds)
+    # Use _offline_for to pick per-model offline cost when available, else scalar offline_cost.
+    if "isotonic_model_output" in df_results.columns:
+        df_results["sum_isotonic"] = df_results["isotonic_model_output"].cumsum()
+        df_results["cost_per_run_at_fort_isotonic"] = (
+            df_results["sum_isotonic"]
+            + _offline_for(per_model_offline_costs.get("isotonic"))
+        ) / df_results["sor#"]
+
+    if "pchip_model_output" in df_results.columns:
+        df_results["sum_pchip"] = df_results["pchip_model_output"].cumsum()
+        df_results["cost_per_run_at_fort_pchip"] = (
+            df_results["sum_pchip"] + _offline_for(per_model_offline_costs.get("pchip"))
+        ) / df_results["sor#"]
+
+    if "robust_linear_model_output" in df_results.columns:
+        df_results["sum_robust_linear"] = df_results[
+            "robust_linear_model_output"
+        ].cumsum()
+        df_results["cost_per_run_at_fort_robust_linear"] = (
+            df_results["sum_robust_linear"]
+            + _offline_for(per_model_offline_costs.get("robust_linear"))
+        ) / df_results["sor#"]
+
     # Handle potential all-NA series robustly for small synthetic inputs
     def _safe_idxmin(series: pd.Series) -> int:
         # Prefer to drop NaNs; if all NaN, fall back to first index
@@ -2009,6 +2319,31 @@ def summarize_and_model(
             ]
         )
 
+    # Build sor_min_costs dict for successful additional models only
+    sor_min_costs: dict[str, int] = {}
+    try:
+        # isotonic
+        if "cost_per_run_at_fort_isotonic" in df_results.columns:
+            idx = _safe_idxmin(df_results["cost_per_run_at_fort_isotonic"])
+            sor_min_costs["isotonic"] = int(df_results.loc[idx, "sor#"])
+        # pchip
+        if "cost_per_run_at_fort_pchip" in df_results.columns:
+            idx = _safe_idxmin(df_results["cost_per_run_at_fort_pchip"])
+            sor_min_costs["pchip"] = int(df_results.loc[idx, "sor#"])
+        # robust_linear
+        if "cost_per_run_at_fort_robust_linear" in df_results.columns:
+            idx = _safe_idxmin(df_results["cost_per_run_at_fort_robust_linear"])
+            sor_min_costs["robust_linear"] = int(df_results.loc[idx, "sor#"])
+    except Exception:
+        # Best-effort only; do not fail pipeline for this metadata bookkeeping
+        pass
+
+    # Ensure per_model_offline_costs exists (empty when not computed)
+    try:
+        per_model_offline_costs  # type: ignore[name-defined]
+    except NameError:
+        per_model_offline_costs = {}
+
     return SummaryModelOutputs(
         df_summary=df_summary,
         df_results=df_results,
@@ -2030,6 +2365,8 @@ def summarize_and_model(
         sor_min_cost_quad=sor_min_cost_quad,
         sor_min_cost_lin_wls=sor_min_cost_lin_wls,
         sor_min_cost_quad_wls=sor_min_cost_quad_wls,
+        per_model_offline_costs=per_model_offline_costs,
+        sor_min_costs=sor_min_costs,
     )
 
 
@@ -2255,6 +2592,43 @@ def render_outputs(
             color="#FF2DFF",  # fuchsia/magenta (prediction)
             linewidth=2.2,
             label="Quadratic Model (OLS)",
+        )
+
+    # New model predictions (plot only when prediction layer is enabled and column exists)
+    # Isotonic (monotone step)
+    if (effective_flags & PlotLayer.OLS_PRED_LINEAR) and (
+        "isotonic_model_output" in summary.df_results.columns
+    ):
+        plt.plot(
+            df_summary_filtered["sor#"],
+            df_summary_filtered["isotonic_model_output"],
+            color="#7FFFD4",  # aquamarine (isotonic)
+            linewidth=2.0,
+            label="Isotonic Model",
+        )
+
+    # PCHIP (smooth shape-preserving cubic)
+    if (effective_flags & PlotLayer.OLS_PRED_LINEAR) and (
+        "pchip_model_output" in summary.df_results.columns
+    ):
+        plt.plot(
+            df_summary_filtered["sor#"],
+            df_summary_filtered["pchip_model_output"],
+            color="#FFDAB9",  # peach (pchip)
+            linewidth=2.0,
+            label="PCHIP Model",
+        )
+
+    # Robust linear (Theil-Sen)
+    if (effective_flags & PlotLayer.OLS_PRED_LINEAR) and (
+        "robust_linear_model_output" in summary.df_results.columns
+    ):
+        plt.plot(
+            df_summary_filtered["sor#"],
+            df_summary_filtered["robust_linear_model_output"],
+            color="#00CED1",  # dark turquoise (robust linear)
+            linewidth=2.0,
+            label="Robust Linear (Theil–Sen)",
         )
 
     # WLS predictions
@@ -3203,150 +3577,56 @@ def assemble_text_report(
     parts.append(_fmt_summary(summary.df_summary))
     parts.append("\n")
 
-    # 2) Trim the selected-model tail from the model comparison table
-    #    The original builder appends: "", "Selected model (by policy): …", ""
-    #    We remove the final two trailing lines if present.
-    tbl_lines = table_text.splitlines()
+    # 2) Do not render the Model Comparison table in the textual report.
+    #    Instead, list FORTs for lowest cost/run using models ordered by MODEL_PRIORITY.
+    #    Only include models that were successfully processed (have a non-None sor value).
+    model_label_map = {
+        "robust_linear": "Robust linear",
+        "isotonic": "Isotonic",
+        "pchip": "PCHIP",
+        "ols_linear": "OLS linear",
+        "wls_linear": "WLS linear",
+        "ols_quadratic": "OLS quadratic",
+        "wls_quadratic": "WLS quadratic",
+    }
 
-    def _trim_selected_tail(lines: list[str]) -> list[str]:
-        if not lines:
-            return lines
-        # Remove trailing empty lines first
-        while lines and lines[-1].strip() == "":
-            lines.pop()
-        # If last line starts with Selected model..., drop it
-        if lines and lines[-1].lstrip().startswith("Selected model (by policy):"):
-            lines.pop()
-        # Remove any trailing blank again to keep consistent spacing
-        while lines and lines[-1].strip() == "":
-            lines.pop()
-        # Add exactly one terminating blank line to separate from next section
-        lines.append("")
-        return lines
-
-    trimmed_table_text = "\n".join(_trim_selected_tail(tbl_lines))
-    parts.append(trimmed_table_text)
-
-    # 3) Build a local ranking mirroring build_model_comparison policy
-    #    Tie-breakers: BIC asc, AIC asc, RMSE asc, Adj R² desc, complexity_rank asc, label asc.
-    from typing import NamedTuple
-    from typing import Optional as _Optional
-
-    def _safe_get(d: dict, *keys, default=None):
-        cur = d
-        for k in keys:
-            if not isinstance(cur, dict) or k not in cur:
-                return default
-            cur = cur[k]
-        return cur
-
-    class ModelRow(NamedTuple):
-        label: str
-        rmse: _Optional[float]
-        adj_r2: _Optional[float]
-        aic: _Optional[float]
-        bic: _Optional[float]
-        complexity_rank: int
-        sor_value: _Optional[int]
-
-    def _complexity_rank_for(label: str) -> int:
-        is_linear = "Linear" in label and "Quadratic" not in label
-        is_quadratic = "Quadratic" in label
-        is_wls = "WLS" in label
-        form_rank = 0 if is_linear else (1 if is_quadratic else 2)
-        est_rank = 1 if is_wls else 0
-        return form_rank * 10 + est_rank
-
-    diag = summary.regression_diagnostics
-
-    # Rows spec holds canonical labels and value sources; display labels will be normalized below
-    rows_spec = [
-        ("OLS Linear", ("linear", "ols"), summary.sor_min_cost_lin),
-        ("OLS Quadratic", ("quadratic", "ols"), summary.sor_min_cost_quad),
-        ("WLS Linear (empirical)", ("linear", "wls"), summary.sor_min_cost_lin_wls),
-        (
-            "WLS Quadratic (empirical)",
-            ("quadratic", "wls"),
-            summary.sor_min_cost_quad_wls,
-        ),
-    ]
-
-    # Label normalization to short forms per requirement
-    def _normalize_label(lbl: str) -> str:
-        mapping = {
-            "OLS Linear": "OLS linear",
-            "OLS Quadratic": "OLS quadratic",
-            "WLS Linear (empirical)": "WLS linear",
-            "WLS Quadratic (empirical)": "WLS quadratic",
-        }
-        return mapping.get(lbl, lbl)
-
-    raw_rows: list[ModelRow] = []
-    for label, path, sor_val in rows_spec:
-        node = _safe_get(diag, *path, default={}) or {}
-        rmse = _safe_get(diag, path[0], path[1], "RMSE", default=None)
-        adj_r2 = _safe_get(node, "Adj. R-squared", default=None)
-        aic = _safe_get(node, "aic", default=None)
-        bic = _safe_get(node, "bic", default=None)
-        raw_rows.append(
-            ModelRow(
-                label=label,
-                rmse=float(rmse) if rmse is not None else None,
-                adj_r2=float(adj_r2) if adj_r2 is not None else None,
-                aic=float(aic) if aic is not None else None,
-                bic=float(bic) if bic is not None else None,
-                complexity_rank=_complexity_rank_for(label),
-                sor_value=int(sor_val) if sor_val is not None else None,
-            )
-        )
-
-    def _pos_inf_if_none(x: _Optional[float]) -> float:
-        return float("inf") if x is None or not np.isfinite(x) else float(x)
-
-    def _neg_inf_if_none(x: _Optional[float]) -> float:
-        if x is None:
-            return float("-inf")
-        try:
-            xv = float(x)
-            return xv if np.isfinite(xv) else float("-inf")
-        except Exception:
-            return float("-inf")
-
-    ranked = sorted(
-        raw_rows,
-        key=lambda r: (
-            _pos_inf_if_none(r.bic),
-            _pos_inf_if_none(r.aic),
-            _pos_inf_if_none(r.rmse),
-            -_neg_inf_if_none(r.adj_r2),
-            r.complexity_rank,
-            r.label,
-        ),
-    )
-
-    # 4) Render only the four FORT lines in ranked order with dynamic right-edge alignment.
-    # Robust alignment strategy:
-    # - Build the exact left segment that will be printed per line: f"  ({idx}) {label}: "
-    # - Compute dynamic max widths for label and value strings.
-    # - Pad so that the right-most digit of each value aligns to the same column.
-    def _value_str(val: _Optional[int]) -> str:
+    def _value_str(val):
         return "-" if val is None else str(int(val))
 
-    # Normalize labels and precompute value strings
     rows_disp: list[tuple[str, str]] = []
-    for row in ranked:
-        rows_disp.append((_normalize_label(row.label), _value_str(row.sor_value)))
+    for model_name in MODEL_PRIORITY:
+        if model_name in ("robust_linear", "isotonic", "pchip"):
+            sor_val = summary.sor_min_costs.get(model_name)
+        elif model_name == "ols_linear":
+            sor_val = summary.sor_min_cost_lin
+        elif model_name == "wls_linear":
+            sor_val = summary.sor_min_cost_lin_wls
+        elif model_name == "ols_quadratic":
+            sor_val = summary.sor_min_cost_quad
+        elif model_name == "wls_quadratic":
+            sor_val = summary.sor_min_cost_quad_wls
+        else:
+            sor_val = None
+
+        # Treat missing/None as not successfully processed; skip them
+        if sor_val is None:
+            continue
+        try:
+            sor_int = int(sor_val)
+        except Exception:
+            continue
+        rows_disp.append(
+            (model_label_map.get(model_name, model_name), _value_str(sor_int))
+        )
 
     max_label_len = max((len(lbl) for lbl, _ in rows_disp), default=0)
     max_val_width = max((len(v) for _, v in rows_disp), default=1)
 
-    parts.append("\nFORTs for lowest cost/run (models ordered by fit quality)")
+    parts.append("\nFORTs for lowest cost/run (models ordered by MODEL_PRIORITY)")
 
-    # Render using exact left segment and computed padding
+    # Render using exact left segment and computed padding (preserve original alignment style)
     for idx, (disp_label, val_str) in enumerate(rows_disp, start=1):
         left = f"  ({idx}) {disp_label}: "
-        # Base one space is included in 'left' after the colon; we only need to
-        # add extra padding so that the value's right edge aligns.
         extra_pad = (max_label_len - len(disp_label)) + (max_val_width - len(val_str))
         if extra_pad < 0:
             extra_pad = 0
