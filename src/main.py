@@ -2541,7 +2541,7 @@ def render_outputs(
                 df_summary_filtered[col_lin],
                 color="#FFD60A",  # bright yellow (prediction)
                 linewidth=2.2,
-                label="Linear Model (OLS)",
+                label=model_label_map.get("ols_linear", "ols_linear"),
             )
     if effective_flags & PlotLayer.OLS_PRED_QUAD:
         col_quad = model_output_column("ols_quadratic")
@@ -2551,7 +2551,7 @@ def render_outputs(
                 df_summary_filtered[col_quad],
                 color="#FF2DFF",  # fuchsia/magenta (prediction)
                 linewidth=2.2,
-                label="Quadratic Model (OLS)",
+                label=model_label_map.get("ols_quadratic", "ols_quadratic"),
             )
 
     # New model predictions (plot only when prediction layer is enabled and column exists)
@@ -2565,7 +2565,7 @@ def render_outputs(
             df_summary_filtered[col],
             color="#7FFFD4",  # aquamarine (isotonic)
             linewidth=2.0,
-            label="Isotonic Model",
+            label=model_label_map.get("isotonic", "isotonic"),
         )
 
     # PCHIP (smooth shape-preserving cubic)
@@ -2578,7 +2578,7 @@ def render_outputs(
             df_summary_filtered[col],
             color="#FFDAB9",  # peach (pchip)
             linewidth=2.0,
-            label="PCHIP Model",
+            label=model_label_map.get("pchip", "pchip"),
         )
 
     # Robust linear (Theil-Sen)
@@ -2591,7 +2591,7 @@ def render_outputs(
             df_summary_filtered[col],
             color="#00CED1",  # dark turquoise (robust linear)
             linewidth=2.0,
-            label="Robust Linear (Theil–Sen)",
+            label=model_label_map.get("robust_linear", "robust_linear"),
         )
 
     # WLS predictions
@@ -2603,7 +2603,7 @@ def render_outputs(
             df_summary_filtered["model_output_wls_linear"],
             color="#FF9F0A",  # orange/amber (prediction)
             linewidth=2.0,
-            label="Linear Model (WLS)",
+            label=model_label_map.get("wls_linear", "wls_linear"),
         )
     if (effective_flags & PlotLayer.WLS_PRED_QUAD) and (
         "model_output_wls_quadratic" in summary.df_results.columns
@@ -2613,7 +2613,7 @@ def render_outputs(
             df_summary_filtered["model_output_wls_quadratic"],
             color="#BF5AF2",  # violet (prediction)
             linewidth=2.0,
-            label="Quadratic Model (WLS)",
+            label=model_label_map.get("wls_quadratic", "wls_quadratic"),
         )
 
     # Cost per run curves (solid; distinct palette from prediction lines)
@@ -2632,7 +2632,7 @@ def render_outputs(
                 color=_c_cost_lin_ols,
                 linestyle="-",  # solid per request
                 linewidth=2.2,
-                label="Cost/Run @ FORT (Linear, OLS)",
+                label=f"Cost/Run @ FORT ({model_label_map.get('ols_linear', 'ols_linear')})",
             )
     if effective_flags & PlotLayer.OLS_COST_QUAD:
         cost_col = model_cost_column("ols_quadratic")
@@ -2643,7 +2643,7 @@ def render_outputs(
                 color=_c_cost_quad_ols,
                 linestyle="-",  # solid per request
                 linewidth=2.2,
-                label="Cost/Run @ FORT (Quadratic, OLS)",
+                label=f"Cost/Run @ FORT ({model_label_map.get('ols_quadratic', 'ols_quadratic')})",
             )
 
     # WLS cost-per-run curves (solid)
@@ -2658,7 +2658,7 @@ def render_outputs(
             color=_c_cost_lin_wls,
             linestyle="-",  # solid per request
             linewidth=2.2,
-            label="Cost/Run @ FORT (Linear, WLS)",
+            label=f"Cost/Run @ FORT ({model_label_map.get('wls_linear', 'wls_linear')})",
         )
     if (effective_flags & PlotLayer.WLS_COST_QUAD) and (
         cost_col_wls_quad in summary.df_results.columns
@@ -2669,7 +2669,7 @@ def render_outputs(
             color=_c_cost_quad_wls,
             linestyle="-",  # solid per request
             linewidth=2.2,
-            label="Cost/Run @ FORT (Quadratic, WLS)",
+            label=f"Cost/Run @ FORT ({model_label_map.get('wls_quadratic', 'wls_quadratic')})",
         )
 
     # Min cost verticals: dotted lines using the SAME colors as their corresponding cost curves
@@ -2682,7 +2682,7 @@ def render_outputs(
                 color=_c_cost_lin_ols,
                 linestyle=":",  # dotted per request
                 linewidth=2.0,
-                label="Min Cost (Linear, OLS)",
+                label=f"Min Cost ({model_label_map.get('ols_linear', 'ols_linear')})",
             )
     if effective_flags & PlotLayer.OLS_MIN_QUAD:
         _val = summary.sor_min_costs.get("ols_quadratic")
@@ -2692,7 +2692,7 @@ def render_outputs(
                 color=_c_cost_quad_ols,
                 linestyle=":",  # dotted per request
                 linewidth=2.0,
-                label="Min Cost (Quadratic, OLS)",
+                label=f"Min Cost ({model_label_map.get('ols_quadratic', 'ols_quadratic')})",
             )
 
     if (effective_flags & PlotLayer.WLS_MIN_LINEAR) and (
@@ -2703,7 +2703,7 @@ def render_outputs(
             color=_c_cost_lin_wls,
             linestyle=":",  # dotted per request
             linewidth=2.0,
-            label="Min Cost (Linear, WLS)",
+            label=f"Min Cost ({model_label_map.get('wls_linear', 'wls_linear')})",
         )
     if (effective_flags & PlotLayer.WLS_MIN_QUAD) and (
         summary.sor_min_costs.get("wls_quadratic") is not None
@@ -2713,7 +2713,7 @@ def render_outputs(
             color=_c_cost_quad_wls,
             linestyle=":",  # dotted per request
             linewidth=2.0,
-            label="Min Cost (Quadratic, WLS)",
+            label=f"Min Cost ({model_label_map.get('wls_quadratic', 'wls_quadratic')})",
         )
 
     plt.xlabel("Sequential Online Run #")
