@@ -1244,7 +1244,7 @@ def fit_isotonic(df_range, input_data_fort) -> tuple[np.ndarray, dict]:
         x = df_means.index.to_numpy(dtype=float)
         y = df_means.values.astype(float)
 
-        iso = IsotonicRegression(increasing=True).fit(x, y)
+        iso = IsotonicRegression(increasing=True, out_of_bounds="clip").fit(x, y)
         preds = iso.predict(seq)
 
         # Non-finite predictions check
@@ -1262,6 +1262,9 @@ def fit_isotonic(df_range, input_data_fort) -> tuple[np.ndarray, dict]:
         diagnostics["monotonicity_check"] = True
         diagnostics["fit_message"] = "fit_ok"
         diagnostics["fit_exception"] = None
+        # Record that isotonic predictions beyond the training support are clipped to the
+        # nearest fitted boundary so callers know why boundary predictions are finite.
+        diagnostics["out_of_bounds_handling"] = "clip"
 
         return preds.astype(float), diagnostics
 
