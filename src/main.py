@@ -1040,88 +1040,29 @@ class LoadSliceParams:
 class PlotLayer(IntFlag):
     # Data
     DATA_SCATTER = 1 << 0
-    # New: Excluded-by-zscore data points
+    # Excluded-by-zscore data points (kept at high bit to preserve some historical semantics)
     DATA_SCATTER_EXCLUDED = 1 << 14
 
-    # OLS predictions
-    OLS_PRED_LINEAR = 1 << 1
-    OLS_PRED_QUAD = 1 << 2
-
-    # OLS cost-per-run curves
-    OLS_COST_LINEAR = 1 << 3
-    OLS_COST_QUAD = 1 << 4
-
-    # OLS min-cost markers
-    OLS_MIN_LINEAR = 1 << 5
-    OLS_MIN_QUAD = 1 << 6
-
-    # WLS predictions
-    WLS_PRED_LINEAR = 1 << 7
-    WLS_PRED_QUAD = 1 << 8
-
-    # WLS cost-per-run curves
-    WLS_COST_LINEAR = 1 << 9
-    WLS_COST_QUAD = 1 << 10
-
-    # WLS min-cost markers
-    WLS_MIN_LINEAR = 1 << 11
-    WLS_MIN_QUAD = 1 << 12
+    # Aggregate atomic flags that apply across all enabled models
+    PREDICTION = 1 << 1
+    FORT_COST = 1 << 2
+    MIN_COST = 1 << 3
 
     # Legend visibility
     LEGEND = 1 << 13
     # Draw per-plot filtering legend label (IQR / Z-score)
     LEGEND_FILTERING = 1 << 15
 
-    # Presets
+    # Presets (use aggregate flags + LEGEND where appropriate)
     NONE = 0
     ALL_DATA = DATA_SCATTER
     ALL_SCATTER = DATA_SCATTER | DATA_SCATTER_EXCLUDED
-    ALL_OLS = (
-        OLS_PRED_LINEAR
-        | OLS_PRED_QUAD
-        | OLS_COST_LINEAR
-        | OLS_COST_QUAD
-        | OLS_MIN_LINEAR
-        | OLS_MIN_QUAD
-        | LEGEND
-    )
-    ALL_WLS = (
-        WLS_PRED_LINEAR
-        | WLS_PRED_QUAD
-        | WLS_COST_LINEAR
-        | WLS_COST_QUAD
-        | WLS_MIN_LINEAR
-        | WLS_MIN_QUAD
-        | LEGEND
-    )
-    SCATTER_PREDICTION = (
-        ALL_SCATTER
-        | OLS_PRED_LINEAR
-        | OLS_PRED_QUAD
-        | WLS_PRED_LINEAR
-        | WLS_PRED_QUAD
-        | LEGEND
-    )
-    ALL_PREDICTION = (
-        OLS_PRED_LINEAR | OLS_PRED_QUAD | WLS_PRED_LINEAR | WLS_PRED_QUAD | LEGEND
-    )
-    ALL_COST = (
-        OLS_COST_LINEAR | OLS_COST_QUAD | WLS_COST_LINEAR | WLS_COST_QUAD | LEGEND
-    )
-    MIN_MARKERS_ONLY = (
-        OLS_MIN_LINEAR | OLS_MIN_QUAD | WLS_MIN_LINEAR | WLS_MIN_QUAD | LEGEND
-    )
-    DEFAULT = (
-        DATA_SCATTER
-        | OLS_PRED_LINEAR
-        | OLS_PRED_QUAD
-        | OLS_COST_LINEAR
-        | OLS_COST_QUAD
-        | OLS_MIN_LINEAR
-        | OLS_MIN_QUAD
-        | LEGEND
-    )
-    EVERYTHING = DEFAULT | ALL_WLS | DATA_SCATTER_EXCLUDED
+    ALL_PREDICTION = PREDICTION | LEGEND
+    ALL_FORT_COST = FORT_COST | LEGEND
+    MIN_COST_ONLY = MIN_COST | LEGEND
+    SCATTER_PREDICTION = ALL_SCATTER | PREDICTION | LEGEND
+    DEFAULT = DATA_SCATTER | PREDICTION | FORT_COST | MIN_COST | LEGEND
+    EVERYTHING = DEFAULT | DATA_SCATTER_EXCLUDED
 
 
 @dataclass
@@ -1169,22 +1110,24 @@ class ModelSpec:
         label: human-friendly display label (e.g., 'OLS linear')
         enabled: whether this model is considered by default (when False, excluded from
                  MODEL_PRIORITY/model_label_map derived views)
+        color: hex color string used for plotting this model (e.g., "#FFFFFF")
     """
 
     token: str
     label: str
     enabled: bool = True
+    color: str = "#FFFFFF"
 
 
 # Ordered registry of models (single source of truth).
 MODEL_SPECS: list[ModelSpec] = [
-    ModelSpec("robust_linear", "Robust linear", enabled=True),
-    ModelSpec("isotonic", "Isotonic", enabled=True),
-    ModelSpec("pchip", "PCHIP", enabled=True),
-    ModelSpec("ols_linear", "OLS linear", enabled=True),
-    ModelSpec("wls_linear", "WLS linear", enabled=True),
-    ModelSpec("ols_quadratic", "OLS quadratic", enabled=True),
-    ModelSpec("wls_quadratic", "WLS quadratic", enabled=True),
+    ModelSpec("robust_linear", "Robust linear", enabled=True, color="#00CED1"),
+    ModelSpec("isotonic", "Isotonic", enabled=True, color="#7FFFD4"),
+    ModelSpec("pchip", "PCHIP", enabled=True, color="#FFDAB9"),
+    ModelSpec("ols_linear", "OLS linear", enabled=True, color="#FFD60A"),
+    ModelSpec("wls_linear", "WLS linear", enabled=True, color="#FF9F0A"),
+    ModelSpec("ols_quadratic", "OLS quadratic", enabled=True, color="#FF2DFF"),
+    ModelSpec("wls_quadratic", "WLS quadratic", enabled=True, color="#BF5AF2"),
 ]
 
 # Backwards-compatible derived views:
@@ -1192,6 +1135,34 @@ MODEL_SPECS: list[ModelSpec] = [
 # - model_label_map: mapping token -> human label for enabled models
 MODEL_PRIORITY = tuple(ms.token for ms in MODEL_SPECS if ms.enabled)
 model_label_map = {ms.token: ms.label for ms in MODEL_SPECS if ms.enabled}
+
+# Plot label templates derived from the human-facing model_label_map.
+# These are used to generate prediction / cost / min marker labels deterministically
+# from the canonical model_label_map so labels remain consistent CLI/textual contexts.
+plot_label_map: dict[str, str] = {
+    "prediction": "{} Model",
+    "cost": "Cost/Run @ FORT ({})",
+    "min": "Min Cost ({})",
+}
+
+
+# Model color map derived from MODEL_SPECS (single source of truth).
+# Keep this immutable and small; fall back to white if a token is missing.
+MODEL_COLOR_MAP: dict[str, str] = {
+    ms.token: ms.color for ms in MODEL_SPECS if ms.enabled
+}
+
+
+def _model_plot_label(token: str, kind: str) -> str:
+    """
+    Build a model-specific plot label for the given token and kind.
+    kind: one of 'prediction', 'cost', 'min'
+    """
+    base = model_label_map.get(token, token)
+    fmt = plot_label_map.get(kind)
+    if not fmt:
+        return base
+    return fmt.format(base)
 
 
 # Public helper functions for other modules to derive canonical column names
@@ -2333,23 +2304,16 @@ def _plot_layers_suffix(flags: PlotLayer) -> str:
     Rules:
     - If flags exactly match one of the named presets, return that preset name.
     - Otherwise, return a compact '+'-joined list of the set atomic flags in canonical order.
-
-    Example:
-      PlotLayer.DEFAULT -> "DEFAULT"
-      PlotLayer.WLS_PRED_LINEAR | PlotLayer.WLS_PRED_QUAD | PlotLayer.LEGEND
-        -> "WLS_PRED_LINEAR+WLS_PRED_QUAD+LEGEND"
     """
     # Ordered presets to check for exact equality
     preset_order = [
         "DEFAULT",
         "EVERYTHING",
         "NONE",
-        "ALL_OLS",
-        "ALL_WLS",
         "ALL_DATA",
         "ALL_PREDICTION",
-        "ALL_COST",
-        "MIN_MARKERS_ONLY",
+        "ALL_FORT_COST",
+        "MIN_COST_ONLY",
     ]
     for name in preset_order:
         if hasattr(PlotLayer, name):
@@ -2357,22 +2321,13 @@ def _plot_layers_suffix(flags: PlotLayer) -> str:
             if flags == preset_val:
                 return name
 
-    # Canonical order of atomic flags
+    # Canonical order of atomic flags (aggregate names)
     atomic_order = [
         "DATA_SCATTER",
         "DATA_SCATTER_EXCLUDED",
-        "OLS_PRED_LINEAR",
-        "OLS_PRED_QUAD",
-        "OLS_COST_LINEAR",
-        "OLS_COST_QUAD",
-        "OLS_MIN_LINEAR",
-        "OLS_MIN_QUAD",
-        "WLS_PRED_LINEAR",
-        "WLS_PRED_QUAD",
-        "WLS_COST_LINEAR",
-        "WLS_COST_QUAD",
-        "WLS_MIN_LINEAR",
-        "WLS_MIN_QUAD",
+        "PREDICTION",
+        "FORT_COST",
+        "MIN_COST",
         "LEGEND_FILTERING",
         "LEGEND",
     ]
@@ -2532,189 +2487,49 @@ def render_outputs(
             alpha=0.70 if omit_fort else 0.90,
         )
 
-    # OLS predictions (use canonical helper names so new models stay consistent)
-    if effective_flags & PlotLayer.OLS_PRED_LINEAR:
-        col_lin = model_output_column("ols_linear")
-        if col_lin in df_summary_filtered.columns:
+    # Predictions: draw per-model prediction lines when aggregate PREDICTION flag is set.
+    if effective_flags & PlotLayer.PREDICTION:
+        for token in MODEL_PRIORITY:
+            col = model_output_column(token)
+            if col not in df_summary_filtered.columns:
+                continue
+            # Keep per-model styling (color) but no longer gate on OLS/WLS/linear/quad flags.
             plt.plot(
                 df_summary_filtered["sor#"],
-                df_summary_filtered[col_lin],
-                color="#FFD60A",  # bright yellow (prediction)
-                linewidth=2.2,
-                label=model_label_map.get("ols_linear", "ols_linear"),
-            )
-    if effective_flags & PlotLayer.OLS_PRED_QUAD:
-        col_quad = model_output_column("ols_quadratic")
-        if col_quad in df_summary_filtered.columns:
-            plt.plot(
-                df_summary_filtered["sor#"],
-                df_summary_filtered[col_quad],
-                color="#FF2DFF",  # fuchsia/magenta (prediction)
-                linewidth=2.2,
-                label=model_label_map.get("ols_quadratic", "ols_quadratic"),
+                df_summary_filtered[col],
+                color=MODEL_COLOR_MAP.get(token, "#FFFFFF"),
+                linewidth=2.0,
+                label=_model_plot_label(token, "prediction"),
             )
 
-    # New model predictions (plot only when prediction layer is enabled and column exists)
-    # Isotonic (monotone step)
-    if (effective_flags & PlotLayer.OLS_PRED_LINEAR) and (
-        model_output_column("isotonic") in summary.df_results.columns
-    ):
-        col = model_output_column("isotonic")
-        plt.plot(
-            df_summary_filtered["sor#"],
-            df_summary_filtered[col],
-            color="#7FFFD4",  # aquamarine (isotonic)
-            linewidth=2.0,
-            label=model_label_map.get("isotonic", "isotonic"),
-        )
-
-    # PCHIP (smooth shape-preserving cubic)
-    if (effective_flags & PlotLayer.OLS_PRED_LINEAR) and (
-        model_output_column("pchip") in summary.df_results.columns
-    ):
-        col = model_output_column("pchip")
-        plt.plot(
-            df_summary_filtered["sor#"],
-            df_summary_filtered[col],
-            color="#FFDAB9",  # peach (pchip)
-            linewidth=2.0,
-            label=model_label_map.get("pchip", "pchip"),
-        )
-
-    # Robust linear (Theil-Sen)
-    if (effective_flags & PlotLayer.OLS_PRED_LINEAR) and (
-        model_output_column("robust_linear") in summary.df_results.columns
-    ):
-        col = model_output_column("robust_linear")
-        plt.plot(
-            df_summary_filtered["sor#"],
-            df_summary_filtered[col],
-            color="#00CED1",  # dark turquoise (robust linear)
-            linewidth=2.0,
-            label=model_label_map.get("robust_linear", "robust_linear"),
-        )
-
-    # WLS predictions
-    if (effective_flags & PlotLayer.WLS_PRED_LINEAR) and (
-        "model_output_wls_linear" in summary.df_results.columns
-    ):
-        plt.plot(
-            df_summary_filtered["sor#"],
-            df_summary_filtered["model_output_wls_linear"],
-            color="#FF9F0A",  # orange/amber (prediction)
-            linewidth=2.0,
-            label=model_label_map.get("wls_linear", "wls_linear"),
-        )
-    if (effective_flags & PlotLayer.WLS_PRED_QUAD) and (
-        "model_output_wls_quadratic" in summary.df_results.columns
-    ):
-        plt.plot(
-            df_summary_filtered["sor#"],
-            df_summary_filtered["model_output_wls_quadratic"],
-            color="#BF5AF2",  # violet (prediction)
-            linewidth=2.0,
-            label=model_label_map.get("wls_quadratic", "wls_quadratic"),
-        )
-
-    # Cost per run curves (solid; distinct palette from prediction lines)
-    # Define dedicated colors for cost curves to avoid overlap with prediction hues.
-    _c_cost_lin_ols = "#00FFA2"  # neon mint (distinct from yellow/orange/blue/violet)
-    _c_cost_quad_ols = "#00B3FF"  # azure
-    _c_cost_lin_wls = "#F6FF00"  # neon yellow-green
-    _c_cost_quad_wls = "#FF6BD6"  # pink
-
-    if effective_flags & PlotLayer.OLS_COST_LINEAR:
-        cost_col = model_cost_column("ols_linear")
-        if cost_col in df_summary_filtered.columns:
+    # Cost-per-run curves: draw per-model cost curves when aggregate FORT_COST flag is set.
+    if effective_flags & PlotLayer.FORT_COST:
+        for token in MODEL_PRIORITY:
+            cost_col = model_cost_column(token)
+            if cost_col not in df_summary_filtered.columns:
+                continue
             plt.plot(
                 df_summary_filtered["sor#"],
                 df_summary_filtered[cost_col],
-                color=_c_cost_lin_ols,
-                linestyle="-",  # solid per request
+                color=MODEL_COLOR_MAP.get(token, "#FFFFFF"),
+                linestyle="-",
                 linewidth=2.2,
-                label=f"Cost/Run @ FORT ({model_label_map.get('ols_linear', 'ols_linear')})",
-            )
-    if effective_flags & PlotLayer.OLS_COST_QUAD:
-        cost_col = model_cost_column("ols_quadratic")
-        if cost_col in df_summary_filtered.columns:
-            plt.plot(
-                df_summary_filtered["sor#"],
-                df_summary_filtered[cost_col],
-                color=_c_cost_quad_ols,
-                linestyle="-",  # solid per request
-                linewidth=2.2,
-                label=f"Cost/Run @ FORT ({model_label_map.get('ols_quadratic', 'ols_quadratic')})",
+                label=_model_plot_label(token, "cost"),
             )
 
-    # WLS cost-per-run curves (solid)
-    cost_col_wls_lin = model_cost_column("wls_linear")
-    cost_col_wls_quad = model_cost_column("wls_quadratic")
-    if (effective_flags & PlotLayer.WLS_COST_LINEAR) and (
-        cost_col_wls_lin in summary.df_results.columns
-    ):
-        plt.plot(
-            df_summary_filtered["sor#"],
-            df_summary_filtered[cost_col_wls_lin],
-            color=_c_cost_lin_wls,
-            linestyle="-",  # solid per request
-            linewidth=2.2,
-            label=f"Cost/Run @ FORT ({model_label_map.get('wls_linear', 'wls_linear')})",
-        )
-    if (effective_flags & PlotLayer.WLS_COST_QUAD) and (
-        cost_col_wls_quad in summary.df_results.columns
-    ):
-        plt.plot(
-            df_summary_filtered["sor#"],
-            df_summary_filtered[cost_col_wls_quad],
-            color=_c_cost_quad_wls,
-            linestyle="-",  # solid per request
-            linewidth=2.2,
-            label=f"Cost/Run @ FORT ({model_label_map.get('wls_quadratic', 'wls_quadratic')})",
-        )
-
-    # Min cost verticals: dotted lines using the SAME colors as their corresponding cost curves
-    # Column/field names are authoritative via model_* helpers; per-model minima are in summary.sor_min_costs
-    if effective_flags & PlotLayer.OLS_MIN_LINEAR:
-        _val = summary.sor_min_costs.get("ols_linear")
-        if _val is not None:
+    # Min cost verticals: draw per-model min markers when aggregate MIN_COST flag is set.
+    if effective_flags & PlotLayer.MIN_COST:
+        for token in MODEL_PRIORITY:
+            min_pos = summary.sor_min_costs.get(token)
+            if min_pos is None:
+                continue
             plt.axvline(
-                x=int(_val),
-                color=_c_cost_lin_ols,
-                linestyle=":",  # dotted per request
+                x=int(min_pos),
+                color=MODEL_COLOR_MAP.get(token, "#FFFFFF"),
+                linestyle=":",
                 linewidth=2.0,
-                label=f"Min Cost ({model_label_map.get('ols_linear', 'ols_linear')})",
+                label=_model_plot_label(token, "min"),
             )
-    if effective_flags & PlotLayer.OLS_MIN_QUAD:
-        _val = summary.sor_min_costs.get("ols_quadratic")
-        if _val is not None:
-            plt.axvline(
-                x=int(_val),
-                color=_c_cost_quad_ols,
-                linestyle=":",  # dotted per request
-                linewidth=2.0,
-                label=f"Min Cost ({model_label_map.get('ols_quadratic', 'ols_quadratic')})",
-            )
-
-    if (effective_flags & PlotLayer.WLS_MIN_LINEAR) and (
-        summary.sor_min_costs.get("wls_linear") is not None
-    ):
-        plt.axvline(
-            x=int(summary.sor_min_costs.get("wls_linear")),
-            color=_c_cost_lin_wls,
-            linestyle=":",  # dotted per request
-            linewidth=2.0,
-            label=f"Min Cost ({model_label_map.get('wls_linear', 'wls_linear')})",
-        )
-    if (effective_flags & PlotLayer.WLS_MIN_QUAD) and (
-        summary.sor_min_costs.get("wls_quadratic") is not None
-    ):
-        plt.axvline(
-            x=int(summary.sor_min_costs.get("wls_quadratic")),
-            color=_c_cost_quad_wls,
-            linestyle=":",  # dotted per request
-            linewidth=2.0,
-            label=f"Min Cost ({model_label_map.get('wls_quadratic', 'wls_quadratic')})",
-        )
 
     plt.xlabel("Sequential Online Run #")
     plt.ylabel("Run Time (s)")
@@ -2919,161 +2734,47 @@ def render_master_plots(
                     alpha=0.65,
                 )
 
-            # OLS/WLS predictions and cost curves: draw with iteration color but lighter/dashed styles
-            if flags & PlotLayer.OLS_PRED_LINEAR:
-                col_lin = model_output_column("ols_linear")
-                if col_lin in df_summary_filtered.columns:
+            # Predictions overlay for iterations: use aggregate PREDICTION flag to decide.
+            if flags & PlotLayer.PREDICTION:
+                for token in MODEL_PRIORITY:
+                    col = model_output_column(token)
+                    if col not in df_summary_filtered.columns:
+                        continue
                     ax.plot(
                         df_summary_filtered["sor#"],
-                        df_summary_filtered[col_lin],
+                        df_summary_filtered[col],
                         color=color,
-                        linewidth=1.6,
-                        # linestyle="--",
-                        # alpha=0.9,
-                        label=None,
-                    )
-            if flags & PlotLayer.OLS_PRED_QUAD:
-                col_quad = model_output_column("ols_quadratic")
-                if col_quad in df_summary_filtered.columns:
-                    ax.plot(
-                        df_summary_filtered["sor#"],
-                        df_summary_filtered[col_quad],
-                        color=color,
-                        linewidth=1.6,
-                        # linestyle=":",
-                        # alpha=0.9,
+                        linewidth=1.4,
                         label=None,
                     )
 
-            if (flags & PlotLayer.WLS_PRED_LINEAR) and (
-                model_output_column("wls_linear") in summary.df_results.columns
-            ):
-                ax.plot(
-                    df_summary_filtered["sor#"],
-                    df_summary_filtered[model_output_column("wls_linear")],
-                    color=color,
-                    linewidth=1.2,
-                    # linestyle="-.",
-                    # alpha=0.85,
-                    label=None,
-                )
-            if (flags & PlotLayer.WLS_PRED_QUAD) and (
-                model_output_column("wls_quadratic") in summary.df_results.columns
-            ):
-                ax.plot(
-                    df_summary_filtered["sor#"],
-                    df_summary_filtered[model_output_column("wls_quadratic")],
-                    color=color,
-                    linewidth=1.2,
-                    # linestyle=(0, (1, 1)),
-                    # alpha=0.85,
-                    label=None,
-                )
-
-            # Cost curves: use fainter line style to avoid overpowering overlays
-            _c_cost_lin_ols = "#00FFA2"
-            _c_cost_quad_ols = "#00B3FF"
-            _c_cost_lin_wls = "#F6FF00"
-            _c_cost_quad_wls = "#FF6BD6"
-
-            if flags & PlotLayer.OLS_COST_LINEAR:
-                cost_col = model_cost_column("ols_linear")
-                if cost_col in df_summary_filtered.columns:
+            # Cost curves: draw when aggregate FORT_COST flag is set.
+            if flags & PlotLayer.FORT_COST:
+                for token in MODEL_PRIORITY:
+                    cost_col = model_cost_column(token)
+                    if cost_col not in df_summary_filtered.columns:
+                        continue
                     ax.plot(
                         df_summary_filtered["sor#"],
                         df_summary_filtered[cost_col],
-                        color=_c_cost_lin_ols,
-                        # linestyle="-",
+                        color=color,
                         linewidth=1.3,
-                        # alpha=0.7,
-                        label=None,
-                    )
-            if flags & PlotLayer.OLS_COST_QUAD:
-                cost_col = model_cost_column("ols_quadratic")
-                if cost_col in df_summary_filtered.columns:
-                    ax.plot(
-                        df_summary_filtered["sor#"],
-                        df_summary_filtered[cost_col],
-                        color=_c_cost_quad_ols,
-                        # linestyle="-",
-                        linewidth=1.3,
-                        # alpha=0.7,
                         label=None,
                     )
 
-            cost_col_wls_lin = model_cost_column("wls_linear")
-            cost_col_wls_quad = model_cost_column("wls_quadratic")
-            if (flags & PlotLayer.WLS_COST_LINEAR) and (
-                cost_col_wls_lin in summary.df_results.columns
-            ):
-                ax.plot(
-                    df_summary_filtered["sor#"],
-                    df_summary_filtered[cost_col_wls_lin],
-                    color=_c_cost_lin_wls,
-                    # linestyle="-",
-                    linewidth=1.3,
-                    # alpha=0.7,
-                    label=None,
-                )
-            if (flags & PlotLayer.WLS_COST_QUAD) and (
-                cost_col_wls_quad in summary.df_results.columns
-            ):
-                ax.plot(
-                    df_summary_filtered["sor#"],
-                    df_summary_filtered[cost_col_wls_quad],
-                    color=_c_cost_quad_wls,
-                    # linestyle="-",
-                    linewidth=1.3,
-                    # alpha=0.7,
-                    label=None,
-                )
-
-            # Min cost markers as vertical lines (subtle)
-            # Per-model minima are authoritative in summary.sor_min_costs (keys per MODEL_PRIORITY)
-            if flags & PlotLayer.OLS_MIN_LINEAR:
-                _val = summary.sor_min_costs.get("ols_linear")
-                if _val is not None:
+            # Min cost markers: draw when aggregate MIN_COST flag is set.
+            if flags & PlotLayer.MIN_COST:
+                for token in MODEL_PRIORITY:
+                    min_val = summary.sor_min_costs.get(token)
+                    if min_val is None:
+                        continue
                     ax.axvline(
-                        x=int(_val),
+                        x=int(min_val),
                         color=color,
                         linestyle=":",
                         linewidth=1.0,
-                        # alpha=0.6,
                         label=None,
                     )
-            if flags & PlotLayer.OLS_MIN_QUAD:
-                _val = summary.sor_min_costs.get("ols_quadratic")
-                if _val is not None:
-                    ax.axvline(
-                        x=int(_val),
-                        color=color,
-                        linestyle=":",
-                        linewidth=1.0,
-                        # alpha=0.6,
-                        label=None,
-                    )
-            if (flags & PlotLayer.WLS_MIN_LINEAR) and (
-                summary.sor_min_costs.get("wls_linear") is not None
-            ):
-                ax.axvline(
-                    x=int(summary.sor_min_costs.get("wls_linear")),
-                    color=color,
-                    linestyle=":",
-                    linewidth=1.0,
-                    # alpha=0.6,
-                    label=None,
-                )
-            if (flags & PlotLayer.WLS_MIN_QUAD) and (
-                summary.sor_min_costs.get("wls_quadratic") is not None
-            ):
-                ax.axvline(
-                    x=int(summary.sor_min_costs.get("wls_quadratic")),
-                    color=color,
-                    linestyle=":",
-                    linewidth=1.0,
-                    # alpha=0.6,
-                    label=None,
-                )
 
         ax.set_xlabel("Sequential Online Run #")
         ax.set_ylabel("Run Time (s)")
@@ -3212,10 +2913,10 @@ def get_default_params() -> tuple[LoadSliceParams, TransformParams, List[PlotPar
         )
     )
 
-    # Default 1: cost curves + min markers only
+    # Default 1: fort cost curves + min-cost markers only
     plot_defaults.append(
         PlotParams(
-            plot_layers=PlotLayer.ALL_COST | PlotLayer.MIN_MARKERS_ONLY,
+            plot_layers=PlotLayer.ALL_FORT_COST | PlotLayer.MIN_COST_ONLY,
             x_min=None,
             x_max=None,
             y_min=None,
@@ -3806,7 +3507,7 @@ def _parse_plot_layers(spec: str) -> PlotLayer:
     """
     Parse plot layer specification.
     Accepts preset names (e.g., 'DEFAULT') or '+'-joined atomic names
-    (e.g., 'DATA_SCATTER+OLS_PRED_LINEAR+LEGEND'), case-insensitive.
+    (e.g., 'DATA_SCATTER+PREDICTION+LEGEND'), case-insensitive.
     """
     s = spec.strip().upper()
     if hasattr(PlotLayer, s):
