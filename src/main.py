@@ -1197,20 +1197,27 @@ def model_cost_column(token: str) -> str:
     return f"cost_per_run_at_fort_{token}"
 
 
+def _training_only(df: pd.DataFrame, input_data_fort: int) -> pd.DataFrame:
+    """Return a training-only DataFrame excluding rows where sor# == input_data_fort."""
+    sor_numeric = pd.to_numeric(df["sor#"], errors="coerce")
+    return df.loc[(sor_numeric >= 1) & (sor_numeric < input_data_fort)].copy()
+
+
 def fit_isotonic(df_range, input_data_fort) -> tuple[np.ndarray, dict]:
     # Signature (as requested in task text):
     # def fit_isotonic(df_range, input_data_fort) -> (predictions: np.ndarray, diagnostics: dict)
 
-    # Shared per‑SOR means extraction (coerce sor# -> numeric, drop NaN, mean by sor)
+    # Use training-only subset for means extraction (coerce sor# -> numeric, drop NaN, mean by sor)
+    df_train = _training_only(df_range, input_data_fort)
     df_means = (
-        df_range.assign(sor_numeric=pd.to_numeric(df_range["sor#"], errors="coerce"))
+        df_train.assign(sor_numeric=pd.to_numeric(df_train["sor#"], errors="coerce"))
         .dropna(subset=["sor_numeric"])
         .groupby("sor_numeric", as_index=True)["adjusted_run_time"]
         .mean()
         .sort_index()
     )
 
-    # Use inclusive integer grid
+    # Use inclusive integer grid (predictions still produced on full grid 1..input_data_fort)
     seq = np.arange(1, input_data_fort + 1)
 
     # Initialize diagnostics with sensible defaults
@@ -1268,15 +1275,17 @@ def fit_isotonic(df_range, input_data_fort) -> tuple[np.ndarray, dict]:
 
 
 def fit_robust_linear(df_range, input_data_fort) -> tuple[np.ndarray | None, dict]:
+    # Use training-only subset for computing per-SOR means used to build training x/y
+    df_train = _training_only(df_range, input_data_fort)
     df_means = (
-        df_range.assign(sor_numeric=pd.to_numeric(df_range["sor#"], errors="coerce"))
+        df_train.assign(sor_numeric=pd.to_numeric(df_train["sor#"], errors="coerce"))
         .dropna(subset=["sor_numeric"])
         .groupby("sor_numeric", as_index=True)["adjusted_run_time"]
         .mean()
         .sort_index()
     )
 
-    # Use inclusive integer grid
+    # Use inclusive integer grid (predictions still produced on full grid 1..input_data_fort)
     seq = np.arange(1, input_data_fort + 1)
 
     # Diagnostics dict must include required keys
@@ -1332,15 +1341,17 @@ def fit_robust_linear(df_range, input_data_fort) -> tuple[np.ndarray | None, dic
 
 
 def fit_pchip(df_range, input_data_fort) -> tuple[np.ndarray | None, dict]:
+    # Use training-only subset for computing per-SOR means used to build training x/y
+    df_train = _training_only(df_range, input_data_fort)
     df_means = (
-        df_range.assign(sor_numeric=pd.to_numeric(df_range["sor#"], errors="coerce"))
+        df_train.assign(sor_numeric=pd.to_numeric(df_train["sor#"], errors="coerce"))
         .dropna(subset=["sor_numeric"])
         .groupby("sor_numeric", as_index=True)["adjusted_run_time"]
         .mean()
         .sort_index()
     )
 
-    # Use inclusive integer grid
+    # Use inclusive integer grid (predictions still produced on full grid 1..input_data_fort)
     seq = np.arange(1, input_data_fort + 1)
 
     # Diagnostics must be a dict with required keys
@@ -1391,13 +1402,15 @@ def fit_pchip(df_range, input_data_fort) -> tuple[np.ndarray | None, dict]:
             return preds_seq.astype(float), diagnostics
         else:
             # Per policy: do NOT silently fallback to isotonic.
-            # Return an omission diagnostics entry indicating non-monotone PCHIP output.
-            diagnostics["fit_message"] = "omitted_due_to_nonmonotone"
+            # Return numeric PCHIP predictions even when monotonicity fails so later stages
+            # can inspect the actual curve (e.g., convexity/monotonicity checks on cpr_ columns).
+            diagnostics["fit_message"] = "non-monotonic"
             diagnostics["n_obs"] = int(len(x))
             diagnostics["monotonicity_check"] = False
             diagnostics["fit_exception"] = None
             diagnostics["RMSE"] = None
-            return None, diagnostics
+            # Return numeric predictions (not None) so downstream code can evaluate the raw PCHIP curve.
+            return preds_seq.astype(float), diagnostics
 
     except Exception as e:
         diagnostics["fit_exception"] = str(e)
@@ -1648,11 +1661,13 @@ def regression_analysis(
 
     # Sequence and response
     sor_sequence = np.arange(1, input_data_fort + 1)
-    y = df_range["adjusted_run_time"].to_numpy()
+    # Use training-only subset for all training artifacts (exclude sor == input_data_fort)
+    df_train = _training_only(df_range, input_data_fort)
+    y = df_train["adjusted_run_time"].to_numpy()
 
-    # Base designs
+    # Base designs: training designs built from df_train, prediction designs built from sor_sequence
     X_linear_train, X_quadratic_train, X_linear_pred, X_quadratic_pred = _make_designs(
-        df_range, sor_sequence
+        df_train, sor_sequence
     )
 
     def _attach_or_copy_diag(
@@ -1730,8 +1745,8 @@ def regression_analysis(
     model_output_wls_linear = None
     model_output_wls_quadratic = None
 
-    # Prepare sor_vals and residuals for weight estimation
-    sor_vals = pd.to_numeric(df_range["sor#"], errors="coerce").to_numpy(dtype=float)
+    # Prepare sor_vals and residuals for weight estimation (derived from training-only subset)
+    sor_vals = pd.to_numeric(df_train["sor#"], errors="coerce").to_numpy(dtype=float)
     # Prefer quadratic residuals for variance estimation; fall back to linear residuals
     resid_source = None
     try:
@@ -2401,6 +2416,41 @@ def summarize_and_model(
         per_model_offline_costs  # type: ignore[name-defined]
     except NameError:
         per_model_offline_costs = {}
+
+    # --- Global convexity check for cost-per-run (cpr_) columns ---
+    # For each enabled model token, if a cost column was produced in df_results
+    # compute convexity on the full series. We require all values to be finite;
+    # non-finite/NaN entries mark the series non-convex. Convexity is judged by
+    # checking second differences and allowing a tiny negative tolerance to
+    # accommodate floating-point noise (tol = 1e-12).
+    cpr_convexity: dict[str, bool] = {}
+    tol = 1e-12
+    for token in MODEL_PRIORITY:
+        cost_col = model_cost_column(token)
+        if cost_col not in df_results.columns:
+            continue
+        try:
+            cost_series = df_results[cost_col].to_numpy(dtype=float)
+        except Exception:
+            # Defensive: if conversion fails, mark non-convex
+            cpr_convexity[token] = False
+            continue
+        # Non-finite or NaN anywhere -> non-convex (defensive)
+        if not np.isfinite(cost_series).all():
+            cpr_convexity[token] = False
+            continue
+        # Second differences: convex if all(second_diff >= -tol)
+        second_diff = np.diff(cost_series, n=2)
+        cpr_convexity[token] = bool(np.all(second_diff >= -tol))
+
+    # Attach convexity metadata under top-level diagnostics key "_cpr_convexity"
+    if isinstance(regression_diagnostics, dict):
+        regression_diagnostics["_cpr_convexity"] = cpr_convexity
+        # Also set a per-model convenience flag "cpr_convex" inside per-model diag dicts when present
+        for token, flag in cpr_convexity.items():
+            entry = regression_diagnostics.get(token)
+            if isinstance(entry, dict):
+                entry["cpr_convex"] = bool(flag)
 
     return SummaryModelOutputs(
         df_summary=df_summary,
@@ -3465,9 +3515,6 @@ def assemble_text_report(
 
     for token in MODEL_PRIORITY:
         out_col = model_output_column(token)
-        if out_col in df_cols:
-            # Model produced predictions -> skip
-            continue
 
         fit_message = None
         fit_exception = None
@@ -3492,11 +3539,61 @@ def assemble_text_report(
                             fit_exception = e.get("fit_exception")
                             n_obs = e.get("n_obs")
 
+        # Check global cpr convexity metadata (best-effort; compute once per-token)
+        try:
+            cpr_map = {}
+            if isinstance(reg_diag, dict):
+                cpr_map = reg_diag.get("_cpr_convexity", {}) or {}
+            cpr_non_convex = isinstance(cpr_map, dict) and cpr_map.get(token) is False
+        except Exception:
+            cpr_non_convex = False
+
+        # Determine whether we should report this model in the "Model fit diagnostics" section.
+        # Report when:
+        #  - the model did not produce a prediction column (omitted), OR
+        #  - the fit_message explicitly indicates non-monotone output, OR
+        #  - the cost-per-run curve for this model is globally non-convex.
+        should_report = False
+        if out_col not in df_cols:
+            should_report = True
+        if fit_message == "non-monotonic":
+            should_report = True
+        if cpr_non_convex:
+            should_report = True
+
+        if not should_report:
+            # Model produced valid predictions and no issues flagged -> skip
+            continue
+
         # Build concise reason using fit_message as-is (fallback when missing).
+        reasons: list[str] = []
         if fit_message is None:
-            reason = "omitted: no diagnostics available"
+            # If model was omitted (no column) and no diagnostics, say so.
+            if out_col not in df_cols:
+                reasons.append("omitted: no diagnostics available")
+            else:
+                # Model produced output but no explicit fit_message; note unknown status.
+                reasons.append("status: unknown")
         else:
-            reason = str(fit_message)
+            reasons.append(str(fit_message))
+
+        # Report explicit non-monotone fit helper outcome when present
+        try:
+            if fit_message == "non-monotonic":
+                reasons.append("non-monotonic fit output (fit helper)")
+        except Exception:
+            # Best-effort only; do not fail report rendering
+            pass
+
+        # Report cpr convexity when applicable
+        try:
+            if cpr_non_convex:
+                reasons.append("cpr non-convex")
+        except Exception:
+            pass
+
+        # Join reason pieces
+        reason = "; ".join(reasons)
 
         # Append short excerpt of exception when present.
         if fit_exception:
@@ -3556,6 +3653,19 @@ def assemble_text_report(
         return "-" if val is None else str(int(val))
 
     rows_disp: list[tuple[str, str]] = []
+    # Read convexity metadata defensively (may be absent for older runs)
+    try:
+        reg_diag_top = getattr(summary, "regression_diagnostics", {}) or {}
+        cpr_convex_map = (
+            reg_diag_top.get("_cpr_convexity", {})
+            if isinstance(reg_diag_top, dict)
+            else {}
+        )
+        if cpr_convex_map is None:
+            cpr_convex_map = {}
+    except Exception:
+        cpr_convex_map = {}
+
     for model_name in MODEL_PRIORITY:
         # Use the authoritative per-model minima mapping (sor_min_costs) for all models.
         sor_val = summary.sor_min_costs.get(model_name)
@@ -3563,6 +3673,18 @@ def assemble_text_report(
         # Treat missing/None as not successfully processed; skip them
         if sor_val is None:
             continue
+
+        # If convexity metadata explicitly marks this model non-convex, display 'non-convex'
+        try:
+            if model_name in cpr_convex_map and cpr_convex_map.get(model_name) is False:
+                rows_disp.append(
+                    (model_label_map.get(model_name, model_name), "non-convex")
+                )
+                continue
+        except Exception:
+            # Fall back to numeric behavior on error
+            pass
+
         try:
             sor_int = int(sor_val)
         except Exception:
