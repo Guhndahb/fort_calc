@@ -1080,6 +1080,8 @@ class TransformParams:
     iqr_k_low: float
     iqr_k_high: float
     use_iqr_filtering: bool
+    # Optional override for computed offline cost (seconds)
+    offline_cost_override: Optional[float] = None
 
 
 @dataclass
@@ -2332,6 +2334,15 @@ def summarize_and_model(
 
         offline_cost = float(chosen_offline_cost)
 
+        # Apply CLI override if provided and finite: set scalar offline_cost and replace per-model map
+        try:
+            override = params.offline_cost_override
+        except Exception:
+            override = None
+        if override is not None and np.isfinite(override):
+            offline_cost = float(override)
+            per_model_offline_costs = {token: offline_cost for token in MODEL_PRIORITY}
+
     else:
         # Non-model-based (existing behavior): compute df_summary using requested delta_mode
         df_summary = summarize_run_time_by_sor_range(
@@ -2353,6 +2364,15 @@ def summarize_and_model(
                 "Offline cost could not be computed: final run_time_delta is NaN or not finite."
             )
         offline_cost = float(final_delta)
+
+        # Apply CLI override if provided and finite: set scalar offline_cost and create per-model map
+        try:
+            override = params.offline_cost_override
+        except Exception:
+            override = None
+        if override is not None and np.isfinite(override):
+            offline_cost = float(override)
+            per_model_offline_costs = {token: offline_cost for token in MODEL_PRIORITY}
 
         # Run regression afterwards as before
         df_results, regression_diagnostics = regression_analysis(
@@ -3064,6 +3084,7 @@ def get_default_params() -> tuple[LoadSliceParams, TransformParams, List[PlotPar
         iqr_k_low=1.0,
         iqr_k_high=2.0,
         use_iqr_filtering=True,
+        offline_cost_override=None,
     )
 
     # Canonical default plot list (policy): three plot configurations used when
@@ -3984,6 +4005,12 @@ def _build_cli_parser():
         help="Do not fail when any timestamps fail to parse.",
     )
 
+    g_tr.add_argument(
+        "--offline-cost-override",
+        type=float,
+        help="Override the computed offline cost with this scalar value (seconds).",
+    )
+
     # Validation test runner: allow selecting a validation test scenario (choices defined by ValidationTest)
     g_tr.add_argument(
         "--validation-test",
@@ -4121,6 +4148,9 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
         use_iqr_filtering=get_arg_or_default(
             "use_iqr_filtering", d_trans.use_iqr_filtering
         ),
+        offline_cost_override=get_arg_or_default(
+            "offline_cost_override", d_trans.offline_cost_override
+        ),
     )
 
     # PlotParams
@@ -4186,6 +4216,7 @@ def _build_cli_parser_with_policy_defaults():
         "iqr_k_low": d_trans.iqr_k_low,
         "iqr_k_high": d_trans.iqr_k_high,
         "use_iqr_filtering": d_trans.use_iqr_filtering,
+        "offline_cost_override": None,
         # PlotParams
         # Display only the first canonical plot's layers/limits in help output
         "plot_layers": _plot_layers_suffix(d_plots[0].plot_layers),
@@ -4254,6 +4285,7 @@ def main() -> None:
                 "iqr_k_low": d_trans.iqr_k_low,
                 "iqr_k_high": d_trans.iqr_k_high,
                 "use_iqr_filtering": d_trans.use_iqr_filtering,
+                "offline_cost_override": d_trans.offline_cost_override,
             },
             "PlotParams": [
                 {
