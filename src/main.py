@@ -1082,6 +1082,9 @@ class TransformParams:
     use_iqr_filtering: bool
     # Optional override for computed offline cost (seconds)
     offline_cost_override: Optional[float] = None
+    # Optional simulated fort (positive integer >= 1). When present the pipeline will
+    # treat input_data_fort as this value and filter out any rows with sor# > simulated_fort.
+    simulated_fort: Optional[int] = None
 
 
 @dataclass
@@ -2132,6 +2135,42 @@ def transform_pipeline(
         raise ValueError(
             f"Missing required columns: {', '.join(missing)}. Found columns: {present}"
         )
+
+    # Defensive simulated_fort validation/mutation:
+    # - require integer-typed simulated_fort (do not coerce), warn & ignore when equal to input_data_fort,
+    # - accept when strictly less (requires offline_cost_override non-negative finite),
+    # - reject when strictly greater.
+    if getattr(params, "simulated_fort", None) is not None:
+        sim_val = params.simulated_fort
+        # Require integer-typed value (do not coerce)
+        if not isinstance(sim_val, int):
+            raise ValueError("Invalid simulated_fort: must be an integer >= 1")
+        sim_int = sim_val
+        if sim_int < 1:
+            raise ValueError("Invalid simulated_fort: must be an integer >= 1")
+
+        if sim_int == params.input_data_fort:
+            logger.warning(
+                "Ignoring simulated_fort since it equals input_data_fort (%s)",
+                params.input_data_fort,
+            )
+            params.simulated_fort = None
+        elif sim_int < params.input_data_fort:
+            override = getattr(params, "offline_cost_override", None)
+            if (
+                override is None
+                or not np.isfinite(float(override))
+                or float(override) < 0
+            ):
+                raise ValueError(
+                    "When using simulated_fort < input_data_fort you must provide offline_cost_override with a non-negative finite value"
+                )
+            # Mutate the input_data_fort defensively to the simulated value
+            params.input_data_fort = sim_int
+        else:
+            raise ValueError(
+                f"Invalid simulated_fort: must be strictly less than input_data_fort ({params.input_data_fort})"
+            )
 
     # Build the pipeline step-by-step so we can fail-fast immediately after timestamp parsing
     df_range = df_range.pipe(
@@ -4010,6 +4049,12 @@ def _build_cli_parser():
         type=float,
         help="Override the computed offline cost with this scalar value (seconds).",
     )
+    g_tr.add_argument(
+        "--simulated-fort",
+        type=int,
+        dest="simulated_fort",
+        help="Simulate a smaller input fort; must be an integer >= 1. When < input_data_fort requires --offline-cost-override.",
+    )
 
     # Validation test runner: allow selecting a validation test scenario (choices defined by ValidationTest)
     g_tr.add_argument(
@@ -4151,6 +4196,7 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
         offline_cost_override=get_arg_or_default(
             "offline_cost_override", d_trans.offline_cost_override
         ),
+        simulated_fort=get_arg_or_default("simulated_fort", d_trans.simulated_fort),
     )
 
     # PlotParams
@@ -4179,6 +4225,37 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
                     y_min=base_pp.y_min,
                     y_max=base_pp.y_max,
                 )
+            )
+
+    # CLI-level simulated_fort validation (validate integer-typed input; do not coerce)
+    sim_val = getattr(args, "simulated_fort", None)
+    if sim_val is not None:
+        # Require integer typed value at the CLI level (do not coerce)
+        if not isinstance(sim_val, int):
+            raise ValueError("Invalid --simulated-fort: must be an integer >= 1")
+        sim_int = sim_val
+        candidate_input_fort = transform.input_data_fort
+
+        if sim_int == candidate_input_fort:
+            logger.warning(
+                "Ignoring --simulated-fort since it equals input_data_fort (%s)",
+                candidate_input_fort,
+            )
+            transform.simulated_fort = None
+        elif sim_int < candidate_input_fort:
+            override = transform.offline_cost_override
+            if (
+                override is None
+                or not np.isfinite(float(override))
+                or float(override) < 0
+            ):
+                raise ValueError(
+                    "When using --simulated-fort < input_data_fort you must provide --offline-cost-override with a non-negative finite value"
+                )
+            transform.simulated_fort = sim_int
+        else:
+            raise ValueError(
+                f"Invalid --simulated-fort: must be strictly less than input_data_fort ({candidate_input_fort})"
             )
 
     return load, transform, plot_params_list
