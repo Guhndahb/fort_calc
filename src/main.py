@@ -1124,10 +1124,10 @@ MODEL_SPECS: list[ModelSpec] = [
     ModelSpec("robust_linear", "Robust linear", enabled=True, color="#00CED1"),
     ModelSpec("isotonic", "Isotonic", enabled=True, color="#7FFFD4"),
     ModelSpec("pchip", "PCHIP", enabled=True, color="#FFDAB9"),
-    ModelSpec("ols_linear", "OLS linear", enabled=False, color="#FFD60A"),
-    ModelSpec("wls_linear", "WLS linear", enabled=False, color="#FF9F0A"),
-    ModelSpec("ols_quadratic", "OLS quadratic", enabled=False, color="#FF2DFF"),
-    ModelSpec("wls_quadratic", "WLS quadratic", enabled=False, color="#BF5AF2"),
+    ModelSpec("ols_linear", "OLS linear", enabled=True, color="#FFD60A"),
+    ModelSpec("wls_linear", "WLS linear", enabled=True, color="#FF9F0A"),
+    ModelSpec("ols_quadratic", "OLS quadratic", enabled=True, color="#FF2DFF"),
+    ModelSpec("wls_quadratic", "WLS quadratic", enabled=True, color="#BF5AF2"),
 ]
 
 # Backwards-compatible derived views:
@@ -1390,28 +1390,14 @@ def fit_pchip(df_range, input_data_fort) -> tuple[np.ndarray | None, dict]:
             diagnostics["fit_exception"] = None
             return preds_seq.astype(float), diagnostics
         else:
-            diagnostics["fit_message"] = "pchip_nonmonotone_fallback_to_isotonic"
-            # Attempt isotonic fallback
-            iso_preds, iso_diag = fit_isotonic(df_range, input_data_fort)
-            # If isotonic omitted/failed (returned None)
-            if iso_preds is None:
-                diagnostics["fit_exception"] = iso_diag.get("fit_exception")
-                diagnostics["RMSE"] = iso_diag.get("RMSE")
-                diagnostics["n_obs"] = iso_diag.get("n_obs", int(len(x)))
-                # Propagate too-few-unique-sor token if present
-                if iso_diag.get("fit_message") == "omitted_due_to_too_few_unique_sor":
-                    diagnostics["fit_message"] = "omitted_due_to_too_few_unique_sor"
-                    return None, diagnostics
-                # Otherwise treat as omitted due to nonfinite or fit_exception
-                diagnostics["fit_message"] = iso_diag.get(
-                    "fit_message", "omitted_due_to_nonfinite_predictions"
-                )
-                return None, diagnostics
-            else:
-                # Isotonic succeeded: attach fallback diagnostics and return its preds
-                diagnostics["fallback_isotonic"] = iso_diag
-                diagnostics["fit_message"] = "pchip_nonmonotone_fallback_to_isotonic"
-                return iso_preds, diagnostics
+            # Per policy: do NOT silently fallback to isotonic.
+            # Return an omission diagnostics entry indicating non-monotone PCHIP output.
+            diagnostics["fit_message"] = "omitted_due_to_nonmonotone"
+            diagnostics["n_obs"] = int(len(x))
+            diagnostics["monotonicity_check"] = False
+            diagnostics["fit_exception"] = None
+            diagnostics["RMSE"] = None
+            return None, diagnostics
 
     except Exception as e:
         diagnostics["fit_exception"] = str(e)
@@ -1420,6 +1406,164 @@ def fit_pchip(df_range, input_data_fort) -> tuple[np.ndarray | None, dict]:
         diagnostics["RMSE"] = None
         diagnostics["monotonicity_check"] = False
         return None, diagnostics
+
+
+# Helper-style fits for OLS/WLS so all models return (preds_or_None, diagnostics, fitted_result, optional_extra)
+def fit_ols_generic(y, X_train, X_pred):
+    """
+    Fit OLS using statsmodels and return (preds_on_X_pred, diagnostics_dict, fitted_result_or_None)
+    Diagnostics keys mirror existing helper style: RMSE, n_obs, monotonicity_check, fit_exception, fit_message
+    This helper never raises - it returns (None, diagnostics, None) on failure.
+    """
+    diagnostics = {
+        "RMSE": None,
+        "n_obs": 0,
+        "monotonicity_check": False,
+        "fit_exception": None,
+        "fit_message": None,
+    }
+    try:
+        res = sm.OLS(y, X_train).fit()
+        # Align prediction matrix to trained exog names and predict
+        X_pred_aligned = X_pred.reindex(columns=res.model.exog_names)
+        preds = res.predict(X_pred_aligned)
+        # In-sample RMSE
+        rmse = (
+            float(np.sqrt(np.mean(np.square(res.resid))))
+            if hasattr(res, "resid")
+            else None
+        )
+        diagnostics["RMSE"] = rmse
+        diagnostics["n_obs"] = int(len(y)) if hasattr(y, "__len__") else 0
+        diagnostics["monotonicity_check"] = False
+        diagnostics["fit_message"] = "fit_ok"
+        diagnostics["fit_exception"] = None
+        return preds.astype(float), diagnostics, res
+    except Exception as e:
+        diagnostics["fit_exception"] = str(e)
+        diagnostics["fit_message"] = "omitted_due_to_fit_exception"
+        try:
+            diagnostics["n_obs"] = int(len(y))
+        except Exception:
+            diagnostics["n_obs"] = 0
+        diagnostics["RMSE"] = None
+        return None, diagnostics, None
+
+
+def fit_wls(y, X_train, X_pred, sor_vals, residuals):
+    """
+    Empirical WLS helper.
+    Inputs:
+      - y: response array
+      - X_train: design matrix used for fitting (pandas DataFrame)
+      - X_pred: prediction design matrix (pandas DataFrame) aligned to seq
+      - sor_vals: 1D numpy array of sor# corresponding to training rows (used for variance power)
+      - residuals: residuals array from an OLS fit (must align to sor_vals length)
+    Returns:
+      - preds (np.ndarray) or None on omission
+      - diagnostics dict (canonical helper keys)
+      - fitted_result (statsmodels WLS result) or None
+      - weights vector used (np.ndarray) or None
+    Behavior:
+      - Never raises. On any inability to compute weights or fit, returns (None, diagnostics, None, None)
+      - diagnostics["fit_message"] indicates the reason for omission.
+    """
+    diagnostics = {
+        "RMSE": None,
+        "n_obs": 0,
+        "monotonicity_check": False,
+        "fit_exception": None,
+        "fit_message": None,
+    }
+
+    # Validate required inputs
+    try:
+        if residuals is None:
+            diagnostics["fit_message"] = "omitted_due_to_missing_ols_results"
+            diagnostics["n_obs"] = int(len(y)) if hasattr(y, "__len__") else 0
+            return None, diagnostics, None, None
+        if sor_vals is None or len(sor_vals) != len(residuals):
+            diagnostics["fit_message"] = "omitted_due_to_missing_ols_results"
+            diagnostics["n_obs"] = int(len(y)) if hasattr(y, "__len__") else 0
+            return None, diagnostics, None, None
+    except Exception:
+        diagnostics["fit_message"] = "omitted_due_to_missing_ols_results"
+        diagnostics["n_obs"] = int(len(y)) if hasattr(y, "__len__") else 0
+        return None, diagnostics, None, None
+
+    try:
+        eps = 1e-12
+        with np.errstate(invalid="ignore", divide="ignore"):
+            z = np.log(np.square(np.asarray(residuals, dtype=float)) + eps)
+            x = np.log(np.asarray(sor_vals, dtype=float))
+
+        mask = np.isfinite(z) & np.isfinite(x) & (np.asarray(sor_vals, dtype=float) > 0)
+        finite_count = int(np.count_nonzero(mask))
+        diagnostics["n_obs"] = int(len(y)) if hasattr(y, "__len__") else 0
+
+        if finite_count < 3:
+            diagnostics["fit_message"] = "omitted_due_to_insufficient_finite_weights"
+            diagnostics["fit_exception"] = None
+            diagnostics["RMSE"] = None
+            return None, diagnostics, None, None
+
+        # Fit variance-power regression: z ~ log(sor)
+        X_var = sm.add_constant(x[mask], has_constant="add")
+        var_fit = sm.OLS(z[mask], X_var).fit()
+        p_hat = (
+            float(var_fit.params[1])
+            if len(var_fit.params) >= 2
+            else float(var_fit.params[0])
+        )
+
+        # Compute empirical weights: w = 1 / (sor#^p_hat)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            w = 1.0 / np.where(
+                np.isfinite(sor_vals) & (np.asarray(sor_vals, dtype=float) > 0),
+                np.power(sor_vals, p_hat),
+                np.nan,
+            )
+
+        finite_mask = np.isfinite(w)
+        if finite_mask.sum() < 3:
+            diagnostics["fit_message"] = "omitted_due_to_insufficient_finite_weights"
+            diagnostics["fit_exception"] = None
+            diagnostics["RMSE"] = None
+            return None, diagnostics, None, None
+
+        # Replace NaN/Inf weights with median finite weight
+        median_w = float(np.nanmedian(w[finite_mask]))
+        w = np.where(
+            np.isfinite(w),
+            w,
+            median_w if np.isfinite(median_w) and median_w > 0 else 1.0,
+        )
+
+        # Fit empirical WLS
+        lin_wls = sm.WLS(y, X_train, weights=w).fit()
+        # Align pred exog and predict
+        X_pred_aligned = X_pred.reindex(columns=lin_wls.model.exog_names)
+        preds_seq = lin_wls.predict(X_pred_aligned)
+
+        # Build diagnostics
+        try:
+            resid_lin_wls = y - lin_wls.fittedvalues
+            rmse = float(np.sqrt(np.mean(np.square(resid_lin_wls))))
+        except Exception:
+            rmse = None
+
+        diagnostics["RMSE"] = rmse
+        diagnostics["n_obs"] = int(len(y)) if hasattr(y, "__len__") else 0
+        diagnostics["fit_message"] = "fit_ok"
+        diagnostics["fit_exception"] = None
+
+        return preds_seq.astype(float), diagnostics, lin_wls, w
+    except Exception as e:
+        diagnostics["fit_exception"] = str(e)
+        diagnostics["fit_message"] = "omitted_due_to_fit_exception"
+        diagnostics["n_obs"] = int(len(y)) if hasattr(y, "__len__") else 0
+        diagnostics["RMSE"] = None
+        return None, diagnostics, None, None
 
 
 def regression_analysis(
@@ -1511,45 +1655,66 @@ def regression_analysis(
         df_range, sor_sequence
     )
 
-    # Baseline OLS fits
-    lin_ols = sm.OLS(y, X_linear_train).fit()
-    quad_ols = sm.OLS(y, X_quadratic_train).fit()
+    def _attach_or_copy_diag(
+        container: dict, family: str, variant: str, helper_diag: dict, res_obj
+    ):
+        """
+        Helper to attach diagnostics into nested diagnostics container.
+        If a fitted result object is available, prefer the richer _stats_dict output;
+        otherwise attach the helper-style diagnostics dict.
+        """
+        if family not in container:
+            container[family] = {}
+        if res_obj is not None:
+            try:
+                container[family][variant] = _stats_dict(res_obj)
+            except Exception:
+                container[family][variant] = helper_diag
+        else:
+            container[family][variant] = helper_diag
 
-    # Align prediction matrices to trained exog names (order only)
-    X_linear_pred = X_linear_pred.reindex(columns=lin_ols.model.exog_names)
-    X_quadratic_pred = X_quadratic_pred.reindex(columns=quad_ols.model.exog_names)
+    # Baseline OLS fits via helper (returns preds_on_pred, helper_diag, fitted_result_or_None)
+    model_output_ols_linear, ols_lin_diag, lin_res = fit_ols_generic(
+        y, X_linear_train, X_linear_pred
+    )
+    model_output_ols_quadratic, ols_quad_diag, quad_res = fit_ols_generic(
+        y, X_quadratic_train, X_quadratic_pred
+    )
 
-    # Baseline predictions used in result_df
-    model_output_ols_linear = lin_ols.predict(X_linear_pred)
-    model_output_ols_quadratic = quad_ols.predict(X_quadratic_pred)
+    # Diagnostics container with baseline 'ols' (attach helper diagnostics or richer stats when available)
+    diagnostics: Dict[str, Dict[str, Any]] = {}
+    _attach_or_copy_diag(diagnostics, "linear", "ols", ols_lin_diag, lin_res)
+    _attach_or_copy_diag(diagnostics, "quadratic", "ols", ols_quad_diag, quad_res)
 
-    # Diagnostics container with baseline 'ols'
-    diagnostics: Dict[str, Dict[str, Any]] = {
-        "linear": {"ols": _stats_dict(lin_ols)},
-        "quadratic": {"ols": _stats_dict(quad_ols)},
-    }
-
-    # Attach AIC/BIC for baseline OLS fits
+    # Attach AIC/BIC for baseline OLS fits (when available)
     try:
-        diagnostics["linear"]["ols"]["aic"] = float(lin_ols.aic)
-        diagnostics["linear"]["ols"]["bic"] = float(lin_ols.bic)
+        if lin_res is not None:
+            diagnostics["linear"]["ols"]["aic"] = float(getattr(lin_res, "aic", np.nan))
+            diagnostics["linear"]["ols"]["bic"] = float(getattr(lin_res, "bic", np.nan))
     except Exception as _e_aicbic_lin_ols:
         diagnostics["linear"]["ols"]["aicbic_exception"] = str(_e_aicbic_lin_ols)
     try:
-        diagnostics["quadratic"]["ols"]["aic"] = float(quad_ols.aic)
-        diagnostics["quadratic"]["ols"]["bic"] = float(quad_ols.bic)
+        if quad_res is not None:
+            diagnostics["quadratic"]["ols"]["aic"] = float(
+                getattr(quad_res, "aic", np.nan)
+            )
+            diagnostics["quadratic"]["ols"]["bic"] = float(
+                getattr(quad_res, "bic", np.nan)
+            )
     except Exception as _e_aicbic_quad_ols:
         diagnostics["quadratic"]["ols"]["aicbic_exception"] = str(_e_aicbic_quad_ols)
 
-    # Compute in-sample RMSEs for baseline OLS fits (common, unweighted)
+    # Compute in-sample RMSEs for baseline OLS fits (common, unweighted) when residuals are present
     try:
-        rmse_lin_ols = float(np.sqrt(np.mean(np.square(lin_ols.resid))))
-        rmse_quad_ols = float(np.sqrt(np.mean(np.square(quad_ols.resid))))
-        diagnostics["linear"]["ols"]["RMSE"] = rmse_lin_ols
-        diagnostics["quadratic"]["ols"]["RMSE"] = rmse_quad_ols
+        if lin_res is not None and hasattr(lin_res, "resid"):
+            rmse_lin_ols = float(np.sqrt(np.mean(np.square(lin_res.resid))))
+            diagnostics["linear"]["ols"]["RMSE"] = rmse_lin_ols
+        if quad_res is not None and hasattr(quad_res, "resid"):
+            rmse_quad_ols = float(np.sqrt(np.mean(np.square(quad_res.resid))))
+            diagnostics["quadratic"]["ols"]["RMSE"] = rmse_quad_ols
     except Exception as _e_rmse_ols:
-        diagnostics["linear"]["ols"]["rmse_exception"] = str(_e_rmse_ols)
-        diagnostics["quadratic"]["ols"]["rmse_exception"] = str(_e_rmse_ols)
+        diagnostics.setdefault("linear", {})["rmse_exception"] = str(_e_rmse_ols)
+        diagnostics.setdefault("quadratic", {})["rmse_exception"] = str(_e_rmse_ols)
 
     # Variant: OLS with robust SEs (HC1)
     try:
@@ -1562,127 +1727,77 @@ def regression_analysis(
         diagnostics.setdefault("quadratic", {})["ols_hc1_error"] = str(e)
 
     # Variant: Empirical WLS (replace fixed 1/(sor#^2))
-    # Estimate variance-power p via log(resid^2 + eps) ~ log(sor#), then weights = 1 / (sor#^p)
     model_output_wls_linear = None
     model_output_wls_quadratic = None
+
+    # Prepare sor_vals and residuals for weight estimation
+    sor_vals = pd.to_numeric(df_range["sor#"], errors="coerce").to_numpy(dtype=float)
+    # Prefer quadratic residuals for variance estimation; fall back to linear residuals
+    resid_source = None
     try:
-        sor_vals = pd.to_numeric(df_range["sor#"], errors="coerce").to_numpy(
-            dtype=float
-        )
-
-        # Choose residuals from the model whose mean structure we'll weight.
-        # Use quadratic residuals to allow curvature; fallback to linear if needed.
-        resid_source = quad_ols.resid if hasattr(quad_ols, "resid") else lin_ols.resid
-        resid = np.asarray(resid_source, dtype=float)
-
-        # Build design for variance-power regression: z = log(resid^2 + eps), x = log(sor)
-        eps = 1e-12
-        with np.errstate(invalid="ignore", divide="ignore"):
-            z = np.log(np.square(resid) + eps)
-            x = np.log(sor_vals)
-
-        # Keep only finite pairs and sor_vals > 0
-        mask = np.isfinite(z) & np.isfinite(x) & (sor_vals > 0)
-        if mask.sum() < 3:
-            raise ValueError("Insufficient finite points to estimate variance power")
-
-        X_var = sm.add_constant(x[mask], has_constant="add")
-        var_fit = sm.OLS(z[mask], X_var).fit()
-        p_hat = (
-            float(var_fit.params[1])
-            if len(var_fit.params) >= 2
-            else float(var_fit.params[0])
-        )
-
-        # Compute empirical weights: w = 1 / (sor#^p_hat)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            w = 1.0 / np.where(
-                np.isfinite(sor_vals) & (sor_vals > 0),
-                np.power(sor_vals, p_hat),
-                np.nan,
-            )
-
-        # Replace NaN/Inf weights with median finite weight to keep WLS stable
-        if not np.isfinite(w).any():
-            w = np.ones_like(sor_vals, dtype=float)
+        if quad_res is not None and hasattr(quad_res, "resid"):
+            resid_source = np.asarray(quad_res.resid, dtype=float)
+        elif lin_res is not None and hasattr(lin_res, "resid"):
+            resid_source = np.asarray(lin_res.resid, dtype=float)
         else:
-            finite_mask = np.isfinite(w)
-            median_w = float(np.nanmedian(w[finite_mask]))
-            w = np.where(
-                np.isfinite(w),
-                w,
-                median_w if np.isfinite(median_w) and median_w > 0 else 1.0,
-            )
+            resid_source = None
+    except Exception:
+        resid_source = None
 
-        # Fit empirical WLS
-        lin_wls = sm.WLS(y, X_linear_train, weights=w).fit()
-        quad_wls = sm.WLS(y, X_quadratic_train, weights=w).fit()
-        # Backward-compatible keys expected by tests: expose empirical WLS under 'wls' and 'wls_hc1'
-        diagnostics["linear"]["wls"] = {
-            **_stats_dict(lin_wls),
-            "weights_spec": f"1/(sor#^{p_hat:.6g})",
-            "p_hat": p_hat,
-        }
-        diagnostics["quadratic"]["wls"] = {
-            **_stats_dict(quad_wls),
-            "weights_spec": f"1/(sor#^{p_hat:.6g})",
-            "p_hat": p_hat,
-        }
+    # Fit empirical WLS for linear family
+    wls_lin_preds, wls_lin_diag, lin_wls_res, lin_w = fit_wls(
+        y, X_linear_train, X_linear_pred, sor_vals, resid_source
+    )
+    # Attach diagnostics under the nested family slot (preserve existing structure)
+    diagnostics.setdefault("linear", {})["wls"] = wls_lin_diag or {}
+    if lin_wls_res is not None:
+        model_output_wls_linear = wls_lin_preds
 
-        # Attach AIC/BIC for empirical WLS fits
-        try:
-            diagnostics["linear"]["wls"]["aic"] = float(lin_wls.aic)
-            diagnostics["linear"]["wls"]["bic"] = float(lin_wls.bic)
-        except Exception as _e_aicbic_lin_wls:
-            diagnostics["linear"]["wls"]["aicbic_exception"] = str(_e_aicbic_lin_wls)
-        try:
-            diagnostics["quadratic"]["wls"]["aic"] = float(quad_wls.aic)
-            diagnostics["quadratic"]["wls"]["bic"] = float(quad_wls.bic)
-        except Exception as _e_aicbic_quad_wls:
-            diagnostics["quadratic"]["wls"]["aicbic_exception"] = str(
-                _e_aicbic_quad_wls
-            )
+    # Fit empirical WLS for quadratic family
+    wls_quad_preds, wls_quad_diag, quad_wls_res, quad_w = fit_wls(
+        y, X_quadratic_train, X_quadratic_pred, sor_vals, resid_source
+    )
+    diagnostics.setdefault("quadratic", {})["wls"] = wls_quad_diag or {}
+    if quad_wls_res is not None:
+        model_output_wls_quadratic = wls_quad_preds
 
-        # In-sample RMSEs using unweighted residuals for comparability
-        try:
-            resid_lin_wls = y - lin_wls.fittedvalues
-            resid_quad_wls = y - quad_wls.fittedvalues
-            diagnostics["linear"]["wls"]["RMSE"] = float(
-                np.sqrt(np.mean(np.square(resid_lin_wls)))
-            )
-            diagnostics["quadratic"]["wls"]["RMSE"] = float(
-                np.sqrt(np.mean(np.square(resid_quad_wls)))
-            )
-        except Exception as _e_rmse_wls:
-            diagnostics["linear"]["wls"]["rmse_exception"] = str(_e_rmse_wls)
-            diagnostics["quadratic"]["wls"]["rmse_exception"] = str(_e_rmse_wls)
-
-        # Predictions (align exog)
-        X_linear_pred_wls = X_linear_pred.reindex(columns=lin_wls.model.exog_names)
-        X_quadratic_pred_wls = X_quadratic_pred.reindex(
-            columns=quad_wls.model.exog_names
-        )
-        model_output_wls_linear = lin_wls.predict(X_linear_pred_wls)
-        model_output_wls_quadratic = quad_wls.predict(X_quadratic_pred_wls)
-
-        # Empirical WLS + robust SEs (HC1)
-        try:
-            lin_wls_hc1 = sm.WLS(y, X_linear_train, weights=w).fit(cov_type="HC1")
-            quad_wls_hc1 = sm.WLS(y, X_quadratic_train, weights=w).fit(cov_type="HC1")
-            diagnostics["linear"]["wls_hc1"] = {
-                **_stats_dict(lin_wls_hc1),
-                "weights_spec": f"1/(sor#^{p_hat:.6g})",
-                "p_hat": p_hat,
-            }
-            diagnostics["quadratic"]["wls_hc1"] = {
-                **_stats_dict(quad_wls_hc1),
-                "weights_spec": f"1/(sor#^{p_hat:.6g})",
-                "p_hat": p_hat,
-            }
-        except Exception as e:
-            diagnostics["linear"]["wls_hc1_error"] = str(e)
-            diagnostics["quadratic"]["wls_hc1_error"] = str(e)
+    # Attempt empirical WLS HC1 (robust SEs) only when a weights vector is available.
+    # Use the weights returned by the linear+quadratic WLS helper when present.
+    try:
+        if lin_w is not None:
+            try:
+                lin_wls_hc1 = sm.WLS(y, X_linear_train, weights=lin_w).fit(
+                    cov_type="HC1"
+                )
+                diagnostics["linear"]["wls_hc1"] = {
+                    **_stats_dict(lin_wls_hc1),
+                    "weights_spec": diagnostics["linear"]["wls"].get("weights_spec")
+                    if isinstance(diagnostics["linear"]["wls"], dict)
+                    else None,
+                    "p_hat": diagnostics["linear"]["wls"].get("p_hat")
+                    if isinstance(diagnostics["linear"]["wls"], dict)
+                    else None,
+                }
+            except Exception as e:
+                diagnostics["linear"]["wls_hc1_error"] = str(e)
+        if quad_w is not None:
+            try:
+                quad_wls_hc1 = sm.WLS(y, X_quadratic_train, weights=quad_w).fit(
+                    cov_type="HC1"
+                )
+                diagnostics["quadratic"]["wls_hc1"] = {
+                    **_stats_dict(quad_wls_hc1),
+                    "weights_spec": diagnostics["quadratic"]["wls"].get("weights_spec")
+                    if isinstance(diagnostics["quadratic"]["wls"], dict)
+                    else None,
+                    "p_hat": diagnostics["quadratic"]["wls"].get("p_hat")
+                    if isinstance(diagnostics["quadratic"]["wls"], dict)
+                    else None,
+                }
+            except Exception as e:
+                diagnostics["quadratic"]["wls_hc1_error"] = str(e)
     except Exception as e:
+        # Best-effort only; record top-level wls_error keys for visibility
         diagnostics.setdefault("linear", {})["wls_error"] = str(e)
         diagnostics.setdefault("quadratic", {})["wls_error"] = str(e)
 
@@ -3202,9 +3317,10 @@ def assemble_text_report(
     # 1.5) Insert model results preview (head and tail) with shortened headers
     def _shorten_headers(df: pd.DataFrame) -> pd.DataFrame:
         """
-        Return a shallow header-renamed view for display only.
-        Programmatic mapping derived from MODEL_PRIORITY and canonical helpers so
-        new model tokens are handled automatically.
+        Return a shallow, display-only DataFrame containing only the SOR column and
+        model-related columns for models enabled in MODEL_PRIORITY. Shorten headers
+        for readability while omitting prediction columns from disabled models.
+
         This does not mutate the original DataFrame.
         """
         # Keep the canonical short for the SOR column
@@ -3241,9 +3357,11 @@ def assemble_text_report(
                     short = t if len(t) <= 12 else t[:12]
             return short
 
-        # Build candidate mapping only for columns that exist
+        # Build candidate mapping only for columns that exist and are for enabled models.
         candidate_map: dict[str, str] = {}
         seen_targets: dict[str, list[str]] = {}
+
+        # Only consider tokens that are enabled (MODEL_PRIORITY is authoritative)
         for token in MODEL_PRIORITY:
             out_col = model_output_column(token)
             sum_col = model_sum_column(token)
@@ -3282,10 +3400,27 @@ def assemble_text_report(
                 else:
                     remap[src_col] = src_col
 
-        # Merge base map (sor) with remap and only keep present columns
+        # Build the list of allowed columns: always include 'sor#', then for each enabled model
+        # include its prediction/sum/cost columns only if they exist in the DataFrame.
+        allowed_cols: list[str] = ["sor#"]
+        for token in MODEL_PRIORITY:
+            for col in (
+                model_output_column(token),
+                model_sum_column(token),
+                model_cost_column(token),
+            ):
+                if col in df.columns:
+                    allowed_cols.append(col)
+
+        # Create the rename mapping only for allowed columns (merge base_map + remap)
         final_map = {**base_map, **remap}
-        present = {k: v for k, v in final_map.items() if k in df.columns}
-        return df.rename(columns=present)
+        present_map = {k: v for k, v in final_map.items() if k in allowed_cols}
+
+        # Return a view containing only the allowed columns with shortened headers
+        # If none of the model columns are present, this will still return the SOR column.
+        return df.loc[:, [c for c in allowed_cols if c in df.columns]].rename(
+            columns=present_map
+        )
 
     def _fmt_table(df: pd.DataFrame, n: int = 10) -> str:
         """
@@ -3302,7 +3437,7 @@ def assemble_text_report(
         return f"{head_txt}\n...\n{tail_txt}"
 
     parts.append("Model results (head/tail):")
-    parts.append(_fmt_table(summary.df_results, n=5))
+    parts.append(_fmt_table(summary.df_results, n=100))
     parts.append("\n")
 
     # 1.6) Insert summary of run-time by SOR range (df_summary) right after results
