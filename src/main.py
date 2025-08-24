@@ -1409,7 +1409,7 @@ def fit_pchip(df_range, input_data_fort) -> tuple[np.ndarray | None, dict]:
             # Per policy: do NOT silently fallback to isotonic.
             # Return numeric PCHIP predictions even when monotonicity fails so later stages
             # can inspect the actual curve (e.g., convexity/monotonicity checks on cpr_ columns).
-            diagnostics["fit_message"] = "non-monotonic"
+            diagnostics["fit_message"] = "fit_nonmonotonic"
             diagnostics["n_obs"] = int(len(x))
             diagnostics["monotonicity_check"] = False
             diagnostics["fit_exception"] = None
@@ -3580,7 +3580,7 @@ def assemble_text_report(
         should_report = False
         if out_col not in df_cols:
             should_report = True
-        if fit_message == "non-monotonic":
+        if fit_message == "fit_nonmonotonic":
             should_report = True
         if cpr_non_convex:
             should_report = True
@@ -3603,7 +3603,7 @@ def assemble_text_report(
 
         # Report explicit non-monotone fit helper outcome when present
         try:
-            if fit_message == "non-monotonic":
+            if fit_message == "fit_nonmonotonic":
                 reasons.append("non-monotonic fit output (fit helper)")
         except Exception:
             # Best-effort only; do not fail report rendering
