@@ -1055,11 +1055,11 @@ class PlotLayer(IntFlag):
 
     # Presets (use aggregate flags + LEGEND where appropriate)
     NONE = 0
-    ALL_DATA = DATA_SCATTER
+    ALL_DATA = DATA_SCATTER | LEGEND
     ALL_SCATTER = DATA_SCATTER | DATA_SCATTER_EXCLUDED
     ALL_PREDICTION = PREDICTION | LEGEND
     ALL_FORT_COST = FORT_COST | LEGEND
-    MIN_COST_ONLY = MIN_COST | LEGEND
+    ALL_MIN_COST = MIN_COST | LEGEND
     SCATTER_PREDICTION = ALL_SCATTER | PREDICTION | LEGEND
     DEFAULT = DATA_SCATTER | PREDICTION | FORT_COST | MIN_COST | LEGEND
     EVERYTHING = DEFAULT | DATA_SCATTER_EXCLUDED
@@ -1124,10 +1124,10 @@ MODEL_SPECS: list[ModelSpec] = [
     ModelSpec("robust_linear", "Robust linear", enabled=True, color="#00CED1"),
     ModelSpec("isotonic", "Isotonic", enabled=True, color="#7FFFD4"),
     ModelSpec("pchip", "PCHIP", enabled=True, color="#FFDAB9"),
-    ModelSpec("ols_linear", "OLS linear", enabled=True, color="#FFD60A"),
-    ModelSpec("wls_linear", "WLS linear", enabled=True, color="#FF9F0A"),
-    ModelSpec("ols_quadratic", "OLS quadratic", enabled=True, color="#FF2DFF"),
-    ModelSpec("wls_quadratic", "WLS quadratic", enabled=True, color="#BF5AF2"),
+    ModelSpec("ols_linear", "OLS linear", enabled=False, color="#FFD60A"),
+    ModelSpec("wls_linear", "WLS linear", enabled=False, color="#FF9F0A"),
+    ModelSpec("ols_quadratic", "OLS quadratic", enabled=False, color="#FF2DFF"),
+    ModelSpec("wls_quadratic", "WLS quadratic", enabled=False, color="#BF5AF2"),
 ]
 
 # Backwards-compatible derived views:
@@ -2313,7 +2313,7 @@ def _plot_layers_suffix(flags: PlotLayer) -> str:
         "ALL_DATA",
         "ALL_PREDICTION",
         "ALL_FORT_COST",
-        "MIN_COST_ONLY",
+        "ALL_MIN_COST",
     ]
     for name in preset_order:
         if hasattr(PlotLayer, name):
@@ -2916,7 +2916,7 @@ def get_default_params() -> tuple[LoadSliceParams, TransformParams, List[PlotPar
     # Default 1: fort cost curves + min-cost markers only
     plot_defaults.append(
         PlotParams(
-            plot_layers=PlotLayer.ALL_FORT_COST | PlotLayer.MIN_COST_ONLY,
+            plot_layers=PlotLayer.ALL_FORT_COST | PlotLayer.ALL_MIN_COST,
             x_min=None,
             x_max=None,
             y_min=None,
