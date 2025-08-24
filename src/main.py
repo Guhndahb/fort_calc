@@ -3276,24 +3276,29 @@ def assemble_text_report(
     parts: list[str] = []
     parts.append("\n")
 
-    def _fmt_head_tail(df: pd.DataFrame, n: int = 10) -> str:
+    def _fmt_head_tail(df: pd.DataFrame, n: int = 10) -> tuple[str, str]:
         """
-        Render head and tail with original headers and no index.
-        If rows <= 2n, show only head to avoid duplication.
+        Render head and tail and return a (label, text) tuple.
+
+        Contract:
+          - If df.empty -> ("all rows", "(no rows)")
+          - If len(df) <= 2*n -> ("all rows", full_frame_text)
+          - Else -> ("head/tail", "head\n...\ntail")
         """
         if df.empty:
-            return "(no rows)"
+            return ("all rows", "(no rows)")
         head_txt = df.head(n).to_string(index=False)
         tail_txt = df.tail(n).to_string(index=False)
         if len(df) <= 2 * n:
-            return head_txt
-        return f"{head_txt}\n...\n{tail_txt}"
+            # Show the entire frame when small enough
+            return ("all rows", df.to_string(index=False))
+        return ("head/tail", f"{head_txt}\n...\n{tail_txt}")
 
-    parts.append(f"Input data (head/tail):\n{_fmt_head_tail(input_df, n=5)}")
+    lbl, txt = _fmt_head_tail(input_df, n=5)
+    parts.append(f"Input data ({lbl}):\n{txt}")
     parts.append("\n")
-    parts.append(
-        f"Filtered data (head/tail):\n{_fmt_head_tail(transformed.df_range, n=5)}"
-    )
+    lbl, txt = _fmt_head_tail(transformed.df_range, n=5)
+    parts.append(f"Filtered data ({lbl}):\n{txt}")
     parts.append("\n")
     # Excluded data: show full excluded DataFrame when verbose_filtering is enabled,
     # otherwise preserve previous head/tail behavior.
@@ -3309,9 +3314,8 @@ def assemble_text_report(
                     + transformed.df_excluded.to_string(index=False)
                 )
     else:
-        parts.append(
-            f"Excluded data (head/tail):\n{_fmt_head_tail(transformed.df_excluded, n=5)}"
-        )
+        lbl, txt = _fmt_head_tail(transformed.df_excluded, n=5)
+        parts.append(f"Excluded data ({lbl}):\n{txt}")
     parts.append("\n")
 
     # 1.5) Insert model results preview (head and tail) with shortened headers
@@ -3422,22 +3426,102 @@ def assemble_text_report(
             columns=present_map
         )
 
-    def _fmt_table(df: pd.DataFrame, n: int = 10) -> str:
+    def _fmt_table(df: pd.DataFrame, n: int = 10) -> tuple[str, str]:
         """
-        Render head and tail with no index for compactness.
+        Render head and tail for shortened headers and return (label, text).
+
+        Contract:
+          - If df.empty -> ("all rows", "(no rows)")
+          - If len(df) <= 2*n -> ("all rows", full_table_text)
+          - Else -> ("head/tail", "head\n...\ntail")
         """
         if df.empty:
-            return "(no rows)"
+            return ("all rows", "(no rows)")
         df_disp = _shorten_headers(df)
         head_txt = df_disp.head(n).to_string(index=False)
         tail_txt = df_disp.tail(n).to_string(index=False)
-        # If total rows <= 2n, head and tail overlap; show only head
+        # If total rows <= 2n, show the full (shortened-headers) table
         if len(df) <= 2 * n:
-            return head_txt
-        return f"{head_txt}\n...\n{tail_txt}"
+            return ("all rows", df_disp.to_string(index=False))
+        return ("head/tail", f"{head_txt}\n...\n{tail_txt}")
 
-    parts.append("Model results (head/tail):")
-    parts.append(_fmt_table(summary.df_results, n=100))
+    lbl, txt = _fmt_table(summary.df_results, n=100)
+    parts.append(f"Model results ({lbl}):")
+    parts.append(txt)
+    parts.append("\n")
+
+    # Model fit diagnostics: list any models from MODEL_PRIORITY that did not produce output.
+    # Use the fit_message value from regression_diagnostics directly so new messages don't require edits.
+    try:
+        reg_diag = getattr(summary, "regression_diagnostics", {}) or {}
+    except Exception:
+        reg_diag = {}
+    omitted_lines: list[str] = []
+    df_cols = set(
+        getattr(summary, "df_results", pd.DataFrame()).columns
+        if hasattr(summary, "df_results")
+        else []
+    )
+
+    for token in MODEL_PRIORITY:
+        out_col = model_output_column(token)
+        if out_col in df_cols:
+            # Model produced predictions -> skip
+            continue
+
+        fit_message = None
+        fit_exception = None
+        n_obs = None
+
+        # Try to read diagnostics conservatively from a few common shapes.
+        if isinstance(reg_diag, dict):
+            entry = reg_diag.get(token)
+            if isinstance(entry, dict):
+                fit_message = entry.get("fit_message")
+                fit_exception = entry.get("fit_exception")
+                n_obs = entry.get("n_obs")
+            else:
+                # Try nested family/variant layout used by regression_analysis (e.g., diagnostics["linear"]["ols"])
+                if "_" in token:
+                    variant, family = token.split("_", 1)
+                    fam = reg_diag.get(family)
+                    if isinstance(fam, dict):
+                        e = fam.get(variant)
+                        if isinstance(e, dict):
+                            fit_message = e.get("fit_message")
+                            fit_exception = e.get("fit_exception")
+                            n_obs = e.get("n_obs")
+
+        # Build concise reason using fit_message as-is (fallback when missing).
+        if fit_message is None:
+            reason = "omitted: no diagnostics available"
+        else:
+            reason = str(fit_message)
+
+        # Append short excerpt of exception when present.
+        if fit_exception:
+            try:
+                ex_excerpt = str(fit_exception)[:200]
+                if ex_excerpt:
+                    reason = f"{reason}: {ex_excerpt}"
+            except Exception:
+                pass
+
+        # Append n_obs when available.
+        try:
+            if n_obs is not None:
+                reason = f"{reason} (n_obs={int(n_obs)})"
+        except Exception:
+            pass
+
+        label = model_label_map.get(token, token)
+        omitted_lines.append(f" - {label} ({token}): {reason}")
+
+    parts.append("Model fit diagnostics:")
+    if not omitted_lines:
+        parts.append("All optional models produced valid fits.")
+    else:
+        parts.extend(omitted_lines)
     parts.append("\n")
 
     # 1.6) Insert summary of run-time by SOR range (df_summary) right after results
