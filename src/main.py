@@ -38,6 +38,9 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import TheilSenRegressor
 
 # Support both package and script execution modes
+# Prefer explicit package-qualified imports to ensure a single canonical module object
+# is loaded into sys.modules (avoids duplicate Enum/class identity when different import
+# styles are mixed in the same process).
 try:
     # When run as a package: python -m src.main
     from .csv_processor import CSVRangeProcessor
@@ -49,9 +52,12 @@ try:
         write_manifest,
     )
 except ImportError:
-    # When run directly: python src/main.py
-    from csv_processor import CSVRangeProcessor
-    from utils import (
+    # Fallback: prefer absolute package imports rather than bare names to avoid loading
+    # the same source under multiple module names (e.g., csv_processor vs src.csv_processor).
+    # This preserves compatibility when code is executed as a script but other modules
+    # import the package form.
+    from src.csv_processor import CSVRangeProcessor
+    from src.utils import (
         build_effective_parameters,
         canonical_json_hash,
         normalize_abs_posix,

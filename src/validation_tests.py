@@ -58,15 +58,16 @@ def validate_fort_ladder_down(
     import sys
 
     def _resolve_main_module():
-        # Try absolute import first to avoid package-relative failures when main is run as a script.
-        for candidate in ("src.main", "main"):
+        # Try absolute import first (prefer package import) to avoid loading the module under
+        # an alternate top-level name which would create duplicate class identities.
+        for candidate in ("src.main",):
             try:
                 return importlib.import_module(candidate)
             except Exception:
                 pass
 
-        # Next, check sys.modules for a previously-loaded module under common names.
-        for candidate in ("src.main", "main", "__main__"):
+        # Next, check sys.modules for a previously-loaded module under the canonical package name.
+        for candidate in ("src.main", "__main__"):
             if candidate in sys.modules:
                 return sys.modules[candidate]
 
@@ -79,7 +80,7 @@ def validate_fort_ladder_down(
             pass
 
         raise ImportError(
-            "Could not import main module for validation tests (tried absolute imports and sys.modules)"
+            "Could not import main module for validation tests (tried package imports and sys.modules)"
         )
 
     _main = _resolve_main_module()
@@ -514,12 +515,13 @@ def _summarize_with_cached_models(df_range, params, cache: dict | None):
     import sys
 
     def _resolve_main_module():
-        for candidate in ("src.main", "main"):
+        # Prefer importing the canonical package module only to avoid duplicate module objects.
+        for candidate in ("src.main",):
             try:
                 return importlib.import_module(candidate)
             except Exception:
                 pass
-        for candidate in ("src.main", "main", "__main__"):
+        for candidate in ("src.main", "__main__"):
             if candidate in sys.modules:
                 return sys.modules[candidate]
         try:
@@ -529,7 +531,7 @@ def _summarize_with_cached_models(df_range, params, cache: dict | None):
         except Exception:
             pass
         raise ImportError(
-            "Could not import main module for validation tests (tried absolute imports and sys.modules)"
+            "Could not import main module for validation tests (tried package imports and sys.modules)"
         )
 
     _main = _resolve_main_module()
@@ -680,12 +682,13 @@ def validate_fort_ladder_down_fixed_model(
     import sys
 
     def _resolve_main_module():
-        for candidate in ("src.main", "main"):
+        # Prefer the canonical package import only to avoid creating a second module object.
+        for candidate in ("src.main",):
             try:
                 return importlib.import_module(candidate)
             except Exception:
                 pass
-        for candidate in ("src.main", "main", "__main__"):
+        for candidate in ("src.main", "__main__"):
             if candidate in sys.modules:
                 return sys.modules[candidate]
         try:
@@ -695,7 +698,7 @@ def validate_fort_ladder_down_fixed_model(
         except Exception:
             pass
         raise ImportError(
-            "Could not import main module for validation tests (tried absolute imports and sys.modules)"
+            "Could not import main module for validation tests (tried package imports and sys.modules)"
         )
 
     _main = _resolve_main_module()

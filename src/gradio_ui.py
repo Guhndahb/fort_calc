@@ -31,7 +31,8 @@ try:
         transform_pipeline,
     )
 except Exception:
-    from main import (  # type: ignore
+    # Prefer absolute package import to avoid loading a second copy of the module
+    from src.main import (  # type: ignore
         OMIT_FORT,
         LoadSliceParams,
         PlotParams,
