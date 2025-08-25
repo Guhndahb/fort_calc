@@ -945,14 +945,14 @@ def summarize_run_time_by_sor_range(
             delta = np.nan
         else:
             if (
-                delta_mode is DeltaMode.PREVIOUS_CHUNK
-                or delta_mode is DeltaMode.MODEL_BASED
+                delta_mode == DeltaMode.PREVIOUS_CHUNK
+                or delta_mode == DeltaMode.MODEL_BASED
             ):
                 # MODEL_BASED intentionally treated the same as PREVIOUS_CHUNK for baseline selection.
                 baseline = rows[-1][
                     2
                 ]  # previous chunk mean (MODEL_BASED -> previous chunk)
-            elif delta_mode is DeltaMode.FIRST_CHUNK:
+            elif delta_mode == DeltaMode.FIRST_CHUNK:
                 baseline = rows[0][2]  # first chunk mean
             else:
                 # Defensive: fail fast on unexpected enum variants so misuse is detected.
@@ -976,12 +976,12 @@ def summarize_run_time_by_sor_range(
         delta_final = np.nan
     else:
         if (
-            delta_mode is DeltaMode.PREVIOUS_CHUNK
-            or delta_mode is DeltaMode.MODEL_BASED
+            delta_mode == DeltaMode.PREVIOUS_CHUNK
+            or delta_mode == DeltaMode.MODEL_BASED
         ):
             # MODEL_BASED intentionally treated the same as PREVIOUS_CHUNK for baseline selection.
             baseline_final = rows[-1][2]
-        elif delta_mode is DeltaMode.FIRST_CHUNK:
+        elif delta_mode == DeltaMode.FIRST_CHUNK:
             baseline_final = rows[0][2]
         else:
             # Defensive: fail fast on unexpected enum variants so misuse is detected.
@@ -2447,7 +2447,7 @@ def summarize_and_model(
         )
 
     # MODEL_BASED path: use model predictions to compute per-model offline costs.
-    if params.delta_mode is DeltaMode.MODEL_BASED:
+    if params.delta_mode == DeltaMode.MODEL_BASED:
         # Produce a summary for diagnostics / contract validation. Use PREVIOUS_CHUNK baseline
         # for summary delta computation (the model-based offline cost will not rely on that delta
         # except as a fallback).
