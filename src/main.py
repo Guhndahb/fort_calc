@@ -946,10 +946,8 @@ def summarize_run_time_by_sor_range(
         else:
             if delta_mode is DeltaMode.PREVIOUS_CHUNK:
                 baseline = rows[-1][2]  # previous chunk mean
-            elif DeltaMode.FIRST_CHUNK:
+            else:  # DeltaMode.FIRST_CHUNK
                 baseline = rows[0][2]  # first chunk mean
-            else:
-                raise ValueError("Invalid DeltaMode")
             # baseline may be NaN if previous chunk had no data; subtraction yields NaN
             delta = (
                 mean_runtime - float(baseline)  # type: ignore[arg-type]
@@ -968,10 +966,8 @@ def summarize_run_time_by_sor_range(
     else:
         if delta_mode is DeltaMode.PREVIOUS_CHUNK:
             baseline_final = rows[-1][2]
-        elif delta_mode is DeltaMode.FIRST_CHUNK:
-            baseline_final = rows[0][2]
         else:
-            raise ValueError("Invalid DeltaMode")
+            baseline_final = rows[0][2]
         # baseline_final element can be float | int | None due to list storage; guard with pd.notna
         delta_final = (
             mean_fort - float(baseline_final)  # type: ignore[arg-type]
