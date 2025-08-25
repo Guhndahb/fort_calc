@@ -4019,9 +4019,44 @@ def synthesize_data(
     # Obtain model prediction column and lookup mapping from sor# -> pred
     pred_col = model_output_column(model_token)
     df_results = getattr(summary, "df_results", pd.DataFrame())
-    if pred_col in df_results.columns:
+
+    # If the available df_results does not cover the requested synth_fort (or is empty),
+    # perform a dedicated regression_analysis(original_df, synth_fort) to obtain an
+    # extended prediction frame for synthesis only. This preserves the canonical
+    # 'summary' returned to the rest of the pipeline and avoids mutating downstream
+    # consumers (plots, minima, convexity checks, reports).
+    try:
+        need_extended = False
+        if df_results is None or df_results.empty:
+            need_extended = True
+        else:
+            if "sor#" in df_results.columns:
+                try:
+                    max_sor = int(
+                        pd.to_numeric(df_results["sor#"], errors="coerce").max()
+                    )
+                except Exception:
+                    max_sor = 0
+                if max_sor < synth_fort:
+                    need_extended = True
+            else:
+                need_extended = True
+    except Exception:
+        need_extended = True
+
+    if need_extended:
+        try:
+            df_results_synth, _ = regression_analysis(original_df, synth_fort)
+            df_results_for_synth = df_results_synth
+        except Exception:
+            # If extended regression fails for any reason, fall back to the canonical summary.
+            df_results_for_synth = df_results
+    else:
+        df_results_for_synth = df_results
+
+    if pred_col in df_results_for_synth.columns:
         preds_series = pd.to_numeric(
-            df_results.set_index("sor#")[pred_col], errors="coerce"
+            df_results_for_synth.set_index("sor#")[pred_col], errors="coerce"
         )
     else:
         # All missing predictions -> series empty
