@@ -3715,7 +3715,9 @@ def assemble_text_report(
     def _value_str(val):
         return "-" if val is None else str(int(val))
 
-    rows_disp: list[tuple[str, str]] = []
+    # Build rows for the FORTs table: include per-model Off Cost values.
+    # Each row tuple: (display_label, fort_rec_str, off_cost_value_or_None)
+    rows_disp: list[tuple[str, str, float | None]] = []
     # Read convexity metadata defensively (may be absent for older runs)
     try:
         reg_diag_top = getattr(summary, "regression_diagnostics", {}) or {}
@@ -3729,6 +3731,10 @@ def assemble_text_report(
     except Exception:
         cpr_convex_map = {}
 
+    # Prefer per-model offline costs mapping when available; fall back to scalar offline_cost.
+    per_model_map = getattr(summary, "per_model_offline_costs", {}) or {}
+    scalar_offline = getattr(summary, "offline_cost", None)
+
     for model_name in MODEL_PRIORITY:
         # Use the authoritative per-model minima mapping (sor_min_costs) for all models.
         sor_val = summary.sor_min_costs.get(model_name)
@@ -3737,12 +3743,19 @@ def assemble_text_report(
         if sor_val is None:
             continue
 
-        # If convexity metadata explicitly marks this model non-convex, display 'non-convex'
+        display_label = model_label_map.get(model_name, model_name)
+
+        # If convexity metadata explicitly marks this model non-convex, show 'non-convex' in FORT Rec.
         try:
             if model_name in cpr_convex_map and cpr_convex_map.get(model_name) is False:
-                rows_disp.append(
-                    (model_label_map.get(model_name, model_name), "non-convex")
-                )
+                # Determine off-cost value for this model (may be None)
+                off_val = per_model_map.get(model_name)
+                # If per-model missing or non-finite, fall back to scalar offline cost when available
+                if (
+                    off_val is None or not np.isfinite(off_val)
+                ) and scalar_offline is not None:
+                    off_val = float(scalar_offline)
+                rows_disp.append((display_label, "non-convex", off_val))
                 continue
         except Exception:
             # Fall back to numeric behavior on error
@@ -3752,22 +3765,66 @@ def assemble_text_report(
             sor_int = int(sor_val)
         except Exception:
             continue
-        rows_disp.append(
-            (model_label_map.get(model_name, model_name), _value_str(sor_int))
-        )
 
-    max_label_len = max((len(lbl) for lbl, _ in rows_disp), default=0)
-    max_val_width = max((len(v) for _, v in rows_disp), default=1)
+        # Compute per-model off cost (prefer per_model_offline_costs dict; fallback to scalar offline_cost)
+        off_val = per_model_map.get(model_name)
+        if off_val is None or not np.isfinite(off_val):
+            # Use scalar offline cost as fallback when available (mirrors downstream logic)
+            if scalar_offline is not None and np.isfinite(float(scalar_offline)):
+                off_val = float(scalar_offline)
+            else:
+                off_val = None
+
+        rows_disp.append((display_label, _value_str(sor_int), off_val))
+
+    # Prepare widths for columns
+    # Pr column width (right-justified integers)
+    n_rows = len(rows_disp)
+    pr_width = max(len("Pr"), len(str(n_rows))) if n_rows > 0 else len("Pr")
+    # Model column width (left-justified strings)
+    model_width = max(
+        len("Model"), max((len(lbl) for lbl, _, _ in rows_disp), default=0)
+    )
+    # FORT Rec column width (right-justified ints or strings like 'non-convex')
+    fort_values = [fort for _, fort, _ in rows_disp]
+    fort_width = max(
+        len("FORT Rec"), max((len(str(f)) for f in fort_values), default=0)
+    )
+
+    # Build Off Cost formatted strings (two decimals) and compute width so decimals align vertically.
+    # Gather the numeric values (may include None) and format accordingly.
+    off_values = [off for _, _, off in rows_disp]
+    # Format numeric values with exactly two decimals; missing -> '-' placeholder.
+    # This ensures all numeric strings have two fractional digits so right-justifying them aligns decimal points.
+    off_formatted = [
+        f"{v:.2f}" if (v is not None and np.isfinite(v)) else "-" for v in off_values
+    ]
+    # Compute width that accommodates header and all formatted values (right-justify to align decimal points).
+    off_cost_width = max([len(s) for s in off_formatted] + [len("Off Cost")])
 
     parts.append("FORTs for lowest cost/run (models ordered by MODEL_PRIORITY)")
 
-    # Render using exact left segment and computed padding (preserve original alignment style)
-    for idx, (disp_label, val_str) in enumerate(rows_disp, start=1):
-        left = f"  ({idx}) {disp_label}: "
-        extra_pad = (max_label_len - len(disp_label)) + (max_val_width - len(val_str))
-        if extra_pad < 0:
-            extra_pad = 0
-        parts.append(f"{left}{' ' * extra_pad}{val_str}")
+    # Header row following requested column headings and alignment rules:
+    # - "Pr"      — integer, right-justified
+    # - "Model"   — left-justified
+    # - "FORT Rec"— integer or string, right-justified
+    # - "Off Cost"— float with 2 decimals, decimals vertically aligned (we right-justify fixed-precision strings)
+    header_line = f"{'Pr':>{pr_width}}  {'Model':<{model_width}}  {'FORT Rec':>{fort_width}}  {'Off Cost':>{off_cost_width}}"
+    sep_line = "-" * len(header_line)
+    parts.append(header_line)
+    parts.append(sep_line)
+
+    # Render rows using computed widths. Off cost strings are right-justified to off_cost_width so decimals align.
+    for idx, (disp_label, fort_str, off_val) in enumerate(rows_disp, start=1):
+        pr_str = str(idx).rjust(pr_width)  # right-justify index
+        model_str = f"{disp_label:<{model_width}}"  # left-justify model label
+        fort_display = (
+            f"{fort_str:>{fort_width}}"  # right-justify fort record (int or text)
+        )
+        # Render off cost: pick preformatted string and right-justify to off_cost_width.
+        formatted_off = off_formatted[idx - 1]  # aligned with rows_disp order
+        off_display = formatted_off.rjust(off_cost_width)
+        parts.append(f"{pr_str}  {model_str}  {fort_display}  {off_display}")
 
     return "\n".join(parts)
 
