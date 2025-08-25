@@ -3558,7 +3558,7 @@ def assemble_text_report(
             return ("all rows", df_disp.to_string(index=False))
         return ("head/tail", f"{head_txt}\n...\n{tail_txt}")
 
-    lbl, txt = _fmt_table(summary.df_results, n=100)
+    lbl, txt = _fmt_table(summary.df_results, n=10)
     parts.append(f"Model results ({lbl}):")
     parts.append(txt)
     parts.append("\n")
@@ -4052,12 +4052,14 @@ def _build_cli_parser():
         "--ignore-resetticks",
         dest="ignore_resetticks",
         action="store_true",
+        default=None,
         help="Ignore resetticks when computing adjusted_run_time.",
     )
     g_tr.add_argument(
         "--use-resetticks",
         dest="ignore_resetticks",
         action="store_false",
+        default=None,
         help="Subtract resetticks from runticks when computing adjusted_run_time.",
     )
     g_tr.add_argument(
@@ -4074,6 +4076,7 @@ def _build_cli_parser():
     g_tr.add_argument(
         "--verbose-filtering",
         action="store_true",
+        default=None,
         help="Enable verbose diagnostics during filtering.",
     )
     g_tr.add_argument(
@@ -4086,18 +4089,21 @@ def _build_cli_parser():
         "--use-iqr-filtering",
         dest="use_iqr_filtering",
         action="store_true",
+        default=None,
         help="Use IQR-based filtering instead of z-score filtering.",
     )
     g_tr.add_argument(
         "--use-zscore-filtering",
         dest="use_iqr_filtering",
         action="store_false",
+        default=None,
         help="Use z-score filtering instead of IQR filtering.",
     )
     g_tr.add_argument(
         "--no-fail-on-invalid-ts",
         dest="fail_on_any_invalid_timestamps",
         action="store_false",
+        default=None,
         help="Do not fail when any timestamps fail to parse.",
     )
 
