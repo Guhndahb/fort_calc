@@ -3116,7 +3116,7 @@ def get_default_params() -> tuple[LoadSliceParams, TransformParams, List[PlotPar
         zscore_max=2.5,
         input_data_fort=100,
         ignore_resetticks=True,
-        delta_mode=DeltaMode.PREVIOUS_CHUNK,
+        delta_mode=DeltaMode.MODEL_BASED,
         exclude_timestamp_ranges=None,
         verbose_filtering=False,
         fail_on_any_invalid_timestamps=True,
