@@ -3128,6 +3128,7 @@ def get_default_params() -> tuple[LoadSliceParams, TransformParams, List[PlotPar
         iqr_k_high=2.0,
         use_iqr_filtering=True,
         offline_cost_override=None,
+        simulated_fort=None,
     )
 
     # Canonical default plot list (policy): three plot configurations used when
