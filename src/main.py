@@ -944,10 +944,21 @@ def summarize_run_time_by_sor_range(
         if i == 0:
             delta = np.nan
         else:
-            if delta_mode is DeltaMode.PREVIOUS_CHUNK:
-                baseline = rows[-1][2]  # previous chunk mean
-            else:  # DeltaMode.FIRST_CHUNK
+            if (
+                delta_mode is DeltaMode.PREVIOUS_CHUNK
+                or delta_mode is DeltaMode.MODEL_BASED
+            ):
+                # MODEL_BASED intentionally treated the same as PREVIOUS_CHUNK for baseline selection.
+                baseline = rows[-1][
+                    2
+                ]  # previous chunk mean (MODEL_BASED -> previous chunk)
+            elif delta_mode is DeltaMode.FIRST_CHUNK:
                 baseline = rows[0][2]  # first chunk mean
+            else:
+                # Defensive: fail fast on unexpected enum variants so misuse is detected.
+                raise ValueError(
+                    f"Unexpected delta_mode in summarize_run_time_by_sor_range: {delta_mode!r}"
+                )
             # baseline may be NaN if previous chunk had no data; subtraction yields NaN
             delta = (
                 mean_runtime - float(baseline)  # type: ignore[arg-type]
@@ -964,10 +975,19 @@ def summarize_run_time_by_sor_range(
         # should remain NaN; previous-chunk also yields NaN.
         delta_final = np.nan
     else:
-        if delta_mode is DeltaMode.PREVIOUS_CHUNK:
+        if (
+            delta_mode is DeltaMode.PREVIOUS_CHUNK
+            or delta_mode is DeltaMode.MODEL_BASED
+        ):
+            # MODEL_BASED intentionally treated the same as PREVIOUS_CHUNK for baseline selection.
             baseline_final = rows[-1][2]
-        else:
+        elif delta_mode is DeltaMode.FIRST_CHUNK:
             baseline_final = rows[0][2]
+        else:
+            # Defensive: fail fast on unexpected enum variants so misuse is detected.
+            raise ValueError(
+                f"Unexpected delta_mode in summarize_run_time_by_sor_range: {delta_mode!r}"
+            )
         # baseline_final element can be float | int | None due to list storage; guard with pd.notna
         delta_final = (
             mean_fort - float(baseline_final)  # type: ignore[arg-type]
