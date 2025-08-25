@@ -1897,6 +1897,10 @@ def regression_analysis(
             "fit_message": "omitted_due_to_fit_exception",
         }
 
+    # Failed diagnostic test
+    # out = generate_model_residuals(df_range, "robust_linear", input_data_fort)
+    # out.to_csv(Path("output") / "residuals.csv", index=False)
+
     # Expose diagnostics for the new models at top-level so callers/tests can inspect reasons.
     diagnostics["isotonic"] = isotonic_diag
     diagnostics["pchip"] = pchip_diag
@@ -1917,6 +1921,128 @@ def regression_analysis(
     result_df = pd.DataFrame(df_dict).sort_values(by="sor#").reset_index(drop=True)
 
     return result_df, diagnostics
+
+
+def generate_model_residuals(
+    df: pd.DataFrame, model_token: str, input_data_fort: int | None = None
+) -> pd.DataFrame:
+    """
+    Diagnostic helper (standalone) to train/score a single model and produce a
+    per-row DataFrame suitable for inspection.
+
+    Parameters:
+      - df: DataFrame containing at least columns 'sor#' and 'adjusted_run_time'.
+            'runticks' is not required for this helper.
+      - model_token: one of the ModelSpec.token values (e.g., 'pchip', 'robust_linear',
+                     'isotonic', 'ols_linear', 'wls_quadratic', etc.)
+      - input_data_fort: optional integer. When not provided the function infers
+                         the fort as the integer maximum of the provided 'sor#' values.
+
+    Returns:
+      - DataFrame with columns:
+          ['sor#', 'adjusted_run_time', 'predicted_<model_token>', 'residual_<model_token>']
+        where residual = adjusted_run_time - predicted.
+    Notes:
+      - This helper is intentionally kept separate from the main pipeline. It uses the
+        existing fitter helpers (fit_pchip, fit_isotonic, fit_robust_linear) and
+        regression_analysis for OLS/WLS variants so behavior mirrors the pipeline.
+      - Predictions are produced by evaluating the model on each row's sor# using
+        the canonical grid 1..input_data_fort produced by the helpers / regression.
+    """
+    # Validate inputs
+    if "sor#" not in df.columns or "adjusted_run_time" not in df.columns:
+        raise ValueError(
+            "Input DataFrame must contain 'sor#' and 'adjusted_run_time' columns"
+        )
+
+    # Prepare numeric SOR array and adjusted run times
+    sor_series = pd.to_numeric(df["sor#"], errors="coerce")
+    sor_arr = sor_series.to_numpy(dtype=float)
+    adj_arr = pd.to_numeric(df["adjusted_run_time"], errors="coerce").to_numpy(
+        dtype=float
+    )
+
+    # Infer input_data_fort if not provided
+    if input_data_fort is None:
+        if np.isnan(sor_arr).all():
+            raise ValueError(
+                "Cannot infer input_data_fort from 'sor#' column (all values NaN)"
+            )
+        input_data_fort = int(np.nanmax(sor_arr))
+    if not (isinstance(input_data_fort, (int, np.integer)) and input_data_fort >= 1):
+        raise ValueError("input_data_fort must be an integer >= 1")
+
+    token = model_token.strip()
+
+    # Helper to convert a sequence of predictions on 1..input_data_fort into per-row preds
+    def _preds_seq_to_per_row(
+        preds_seq: np.ndarray, sor_values: np.ndarray
+    ) -> np.ndarray:
+        preds_out = np.full(len(sor_values), np.nan, dtype=float)
+        if preds_seq is None:
+            return preds_out
+        valid_mask = (
+            np.isfinite(sor_values) & (sor_values >= 1) & (sor_values <= len(preds_seq))
+        )
+        if valid_mask.any():
+            # integer index (1-based sor -> zero-based index)
+            idx = sor_values[valid_mask].astype(int) - 1
+            preds_out[valid_mask] = np.asarray(preds_seq, dtype=float)[idx]
+        return preds_out
+
+    preds_seq = None
+
+    # Regression-style models (OLS/WLS variants) are easiest to obtain from regression_analysis
+    regression_tokens = {
+        "ols_linear",
+        "ols_quadratic",
+        "wls_linear",
+        "wls_quadratic",
+    }
+
+    if token in regression_tokens:
+        # Use regression_analysis which returns canonical model_output_* columns on the grid 1..input_data_fort
+        df_results, reg_diag = regression_analysis(df.copy(), input_data_fort)
+        pred_col = model_output_column(token)
+        if pred_col in df_results.columns:
+            # Ensure a numpy array in canonical order 1..input_data_fort
+            preds_seq = (
+                df_results.set_index("sor#", drop=False)
+                .reindex(range(1, int(input_data_fort) + 1))[pred_col]
+                .to_numpy(dtype=float)
+            )
+        else:
+            preds_seq = None
+    else:
+        # Use the individual fitter helpers for isotonic/pchip/robust_linear
+        if token == "pchip":
+            preds_seq, diag = fit_pchip(df.copy(), input_data_fort)
+        elif token == "isotonic":
+            preds_seq, diag = fit_isotonic(df.copy(), input_data_fort)
+        elif token == "robust_linear":
+            preds_seq, diag = fit_robust_linear(df.copy(), input_data_fort)
+        else:
+            raise ValueError(f"Unknown model_token: {token}")
+
+    # Build per-row predicted values and residuals
+    per_row_preds = _preds_seq_to_per_row(preds_seq, sor_arr)
+    residuals = adj_arr - per_row_preds
+
+    # Assemble diagnostic DataFrame for inspection (preserve original sor# ordering)
+    pred_col_name = f"predicted_{token}"
+    resid_col_name = f"residual_{token}"
+    out_df = pd.DataFrame(
+        {
+            "sor#": df[
+                "sor#"
+            ].to_numpy(),  # preserve original non-numeric values if present
+            "adjusted_run_time": adj_arr,
+            pred_col_name: per_row_preds,
+            resid_col_name: residuals,
+        }
+    )
+
+    return out_df
 
 
 def load_and_slice_csv(params: LoadSliceParams) -> pd.DataFrame:
