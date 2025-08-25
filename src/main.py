@@ -14,7 +14,7 @@ global state mutation. Logging kept for internal diagnostics but functions are p
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum, IntFlag, auto
 from pathlib import Path
@@ -4213,7 +4213,20 @@ def _orchestrate(
             summary, params_transform, transformed.df_range
         )
         # Re-run summary/modeling on the synthesized frame
-        summary = summarize_and_model(synthesized_outputs.df_range, params_transform)
+        # Use a shallow copy of params_transform with input_data_fort set to the synth target
+        synth_fort = (
+            params_transform.synthesize_fort
+            if params_transform.synthesize_fort is not None
+            else params_transform.input_data_fort
+        )
+        try:
+            params_for_synth = replace(
+                params_transform, input_data_fort=int(synth_fort)
+            )
+        except Exception:
+            # Fallback: if replace fails for any reason, use the original params_transform
+            params_for_synth = params_transform
+        summary = summarize_and_model(synthesized_outputs.df_range, params_for_synth)
         # Attach diagnostics about synthesis
         try:
             if isinstance(summary.regression_diagnostics, dict):
