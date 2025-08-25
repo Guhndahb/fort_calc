@@ -1096,6 +1096,12 @@ class TransformParams:
     # Optional simulated fort (positive integer >= 1). When present the pipeline will
     # treat input_data_fort as this value and filter out any rows with sor# > simulated_fort.
     simulated_fort: Optional[int] = None
+    # Synthesize support (optional):
+    # - synthesize_model: token of the model to use for synthetic predictions (e.g., 'robust_linear')
+    # - synthesize_fort: maximum sor# to generate synthetic SORs (positive integer). When None,
+    #   synthesize_data will default to params.input_data_fort.
+    synthesize_model: Optional[str] = None
+    synthesize_fort: Optional[int] = None
 
 
 @dataclass
@@ -3967,6 +3973,183 @@ def assemble_text_report(
     return "\n".join(parts)
 
 
+def synthesize_enabled(params: TransformParams) -> bool:
+    """Return True when synthetic-data generation is requested via params."""
+    try:
+        return params.synthesize_model is not None
+    except Exception:
+        return False
+
+
+def synthesize_data(
+    summary: SummaryModelOutputs, params: TransformParams, original_df: pd.DataFrame
+) -> tuple[TransformOutputs, dict]:
+    """
+    Generate a synthetic TransformOutputs.df_range using model predictions + sampled residuals.
+
+    Returns (TransformOutputs, diagnostics_dict).
+    """
+    # Validate model token
+    model_token = params.synthesize_model
+    if model_token is None:
+        raise ValueError("synthesize_model must be provided to synthesize_data()")
+    if model_token not in MODEL_PRIORITY:
+        raise ValueError(
+            f"Invalid synthesize_model token: '{model_token}'. Allowed: {', '.join(MODEL_PRIORITY)}"
+        )
+
+    # Determine fort to synthesize up to
+    synth_fort = (
+        params.synthesize_fort
+        if params.synthesize_fort is not None
+        else params.input_data_fort
+    )
+    if not isinstance(synth_fort, int) or synth_fort < 1:
+        raise ValueError("synthesize_fort must be a positive integer >= 1")
+
+    N = int(len(original_df))
+
+    # Build repeating sor# sequence 1..synth_fort to length N
+    seq = np.arange(1, synth_fort + 1, dtype=int)
+    if len(seq) == 0:
+        raise ValueError("synthesize_fort must be >= 1")
+    reps = int(np.ceil(N / len(seq))) if N > 0 else 1
+    sor_arr = np.tile(seq, reps)[:N].astype(int)
+
+    # Obtain model prediction column and lookup mapping from sor# -> pred
+    pred_col = model_output_column(model_token)
+    df_results = getattr(summary, "df_results", pd.DataFrame())
+    if pred_col in df_results.columns:
+        preds_series = pd.to_numeric(
+            df_results.set_index("sor#")[pred_col], errors="coerce"
+        )
+    else:
+        # All missing predictions -> series empty
+        preds_series = pd.Series(dtype=float)
+
+    # Compute residuals from original_df where both observed and predicted are finite
+    observed = pd.to_numeric(
+        original_df.get("adjusted_run_time", pd.Series(dtype=float)), errors="coerce"
+    )
+    observed_sor = pd.to_numeric(
+        original_df.get("sor#", pd.Series(dtype=float)), errors="coerce"
+    )
+
+    # Map predictions to each observed row (preserve original ordering)
+    mapped_preds = []
+    for s in observed_sor.fillna(-1).to_numpy():
+        try:
+            if np.isfinite(s) and int(s) in preds_series.index:
+                v = preds_series.loc[int(s)]
+                mapped_preds.append(float(v) if np.isfinite(v) else np.nan)
+            else:
+                mapped_preds.append(np.nan)
+        except Exception:
+            mapped_preds.append(np.nan)
+    mapped_preds = np.asarray(mapped_preds, dtype=float)
+
+    # Compute residuals and exclude rows that were not used for training (sor == input_data_fort).
+    resid = observed.to_numpy(dtype=float) - mapped_preds
+    sor_vals = observed_sor.to_numpy(dtype=float)
+    mask_non_fort = np.isfinite(sor_vals) & (sor_vals != float(params.input_data_fort))
+    finite_resid_mask = np.isfinite(resid) & mask_non_fort
+
+    if finite_resid_mask.any():
+        residuals = resid[finite_resid_mask].astype(float)
+    else:
+        raise ValueError(
+            "No finite residuals available for synthesis after excluding fort rows; cannot synthesize data."
+        )
+
+    # Prepare offline cost to apply at boundary sor == synth_fort
+    per_model_costs = getattr(summary, "per_model_offline_costs", {}) or {}
+    offline_cost_for_model = per_model_costs.get(model_token)
+    if offline_cost_for_model is None or not np.isfinite(float(offline_cost_for_model)):
+        offline_cost_to_apply = float(getattr(summary, "offline_cost", 0.0))
+    else:
+        offline_cost_to_apply = float(offline_cost_for_model)
+
+    print(f"offline_cost_to_apply: {offline_cost_to_apply}")
+
+    # Build synthetic adjusted_run_time by model prediction + sampled residual
+    synthetic_adjusted = []
+    for s in sor_arr:
+        # prediction for this sor from df_results (if present)
+        pred_val = np.nan
+        try:
+            if s in preds_series.index:
+                pv = preds_series.loc[s]
+                pred_val = float(pv) if np.isfinite(pv) else np.nan
+        except Exception:
+            pred_val = np.nan
+
+        if not np.isfinite(pred_val):
+            # Fallback to 0.0 to keep adjusted_run_time finite when residual added
+            pred_val = 0.0
+
+        # Apply offline cost when sor equals the synth_fort boundary
+        if int(s) == int(synth_fort):
+            pred_val = float(pred_val) + offline_cost_to_apply
+
+        sampled = float(np.random.choice(residuals, size=1)[0])
+        synth_val = pred_val + sampled
+
+        # Ensure numeric; if not finite, coerce to NaN (later steps may inspect)
+        if not np.isfinite(synth_val):
+            synth_val = np.nan
+        synthetic_adjusted.append(float(synth_val))
+        # if sampled > 10:
+        #     logger.info(f"s: {s} sampled: {sampled} synth_val: {synth_val}")
+
+    synthetic_adjusted = np.asarray(synthetic_adjusted, dtype=float)
+
+    # Build synthetic DataFrame with same columns as original_df when possible
+    cols = list(original_df.columns)
+    if "sor#" not in cols:
+        cols = ["sor#"] + cols
+    if "adjusted_run_time" not in cols:
+        cols.append("adjusted_run_time")
+    if "runticks" not in cols:
+        cols.append("runticks")
+
+    data: dict = {}
+    for col in cols:
+        if col == "sor#":
+            data[col] = sor_arr
+        elif col == "adjusted_run_time":
+            data[col] = synthetic_adjusted
+        elif col == "runticks":
+            # convert seconds -> ticks (ms) and use pandas nullable Int64
+            runticks = np.round(synthetic_adjusted * 1000.0)
+            # Replace non-finite with <NA>
+            runticks = pd.array(
+                [int(x) if np.isfinite(x) else pd.NA for x in runticks], dtype="Int64"
+            )
+            data[col] = runticks
+        else:
+            # Fill other columns with pd.NA to preserve schema
+            data[col] = pd.array([pd.NA] * N)
+
+    synthetic_df = pd.DataFrame(data)
+    # Ensure index reset and canonical ordering
+    synthetic_df = synthetic_df.reset_index(drop=True)
+
+    # Diagnostics
+    diagnostics: dict = {
+        "synthesized": {
+            "rows": int(len(synthetic_df)),
+            "fort": int(synth_fort),
+            "model_used": model_token,
+            "offline_cost_applied": float(offline_cost_to_apply),
+        }
+    }
+
+    synth_out = TransformOutputs(
+        df_range=synthetic_df, df_excluded=original_df.iloc[0:0].copy()
+    )
+    return synth_out, diagnostics
+
+
 def _orchestrate(
     params_load: LoadSliceParams,
     params_transform: TransformParams,
@@ -3988,6 +4171,32 @@ def _orchestrate(
     df_range = load_and_slice_csv(params_load)
     transformed = transform_pipeline(df_range, params_transform)
     summary = summarize_and_model(transformed.df_range, params_transform)
+
+    # Synthetic-data integration: when requested, synthesize and re-run modeling on the synthetic frame.
+    if synthesize_enabled(params_transform):
+        synthesized_outputs, synth_diag = synthesize_data(
+            summary, params_transform, transformed.df_range
+        )
+        # Re-run summary/modeling on the synthesized frame
+        summary = summarize_and_model(synthesized_outputs.df_range, params_transform)
+        # Attach diagnostics about synthesis
+        try:
+            if isinstance(summary.regression_diagnostics, dict):
+                summary.regression_diagnostics["synthesized"] = synth_diag.get(
+                    "synthesized", synth_diag
+                )
+        except Exception:
+            # best-effort: ensure regression_diagnostics is a dict
+            try:
+                summary.regression_diagnostics = {
+                    "synthesized": synth_diag.get("synthesized", synth_diag)
+                }
+            except Exception:
+                summary.regression_diagnostics = {"synthesized": synth_diag}
+        # Use synthesized outputs for rendering/manifests
+        transformed = synthesized_outputs
+        # Replace df_range variable to reflect the dataset used for rendering/manifests
+        df_range = transformed.df_range
 
     best_label, table_text = build_model_comparison(summary.regression_diagnostics)
 
@@ -4251,6 +4460,16 @@ def _build_cli_parser():
         help="Override the computed offline cost with this scalar value (seconds).",
     )
     g_tr.add_argument(
+        "--synthesize-model",
+        type=str,
+        help="Model token to use for synthetic runticks (e.g., 'robust_linear').",
+    )
+    g_tr.add_argument(
+        "--synthesize-fort",
+        type=int,
+        help="Max sor# for synthetic data (positive integer).",
+    )
+    g_tr.add_argument(
         "--simulated-fort",
         type=int,
         dest="simulated_fort",
@@ -4398,6 +4617,8 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
             "offline_cost_override", d_trans.offline_cost_override
         ),
         simulated_fort=get_arg_or_default("simulated_fort", d_trans.simulated_fort),
+        synthesize_model=get_arg_or_default("synthesize_model", None),
+        synthesize_fort=get_arg_or_default("synthesize_fort", None),
     )
 
     # PlotParams
@@ -4458,6 +4679,24 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
             raise ValueError(
                 f"Invalid --simulated-fort: must be strictly less than input_data_fort ({candidate_input_fort})"
             )
+
+    # CLI-level synthesize flags validation
+    synth_model_arg = getattr(args, "synthesize_model", None)
+    if synth_model_arg is not None:
+        if not isinstance(synth_model_arg, str):
+            raise ValueError("Invalid --synthesize-model: must be a model token string")
+        if synth_model_arg not in MODEL_PRIORITY:
+            raise ValueError(
+                f"Invalid --synthesize-model: '{synth_model_arg}'. Allowed tokens: {', '.join(MODEL_PRIORITY)}"
+            )
+        transform.synthesize_model = synth_model_arg
+    synth_fort_arg = getattr(args, "synthesize_fort", None)
+    if synth_fort_arg is not None:
+        if not isinstance(synth_fort_arg, int) or synth_fort_arg < 1:
+            raise ValueError(
+                "Invalid --synthesize-fort: must be a positive integer >= 1"
+            )
+        transform.synthesize_fort = synth_fort_arg
 
     return load, transform, plot_params_list
 
