@@ -3875,15 +3875,30 @@ def assemble_text_report(
     parts.append(_fmt_summary(summary.df_summary))
     parts.append("\n")
 
-    # 2) Do not render the Model Comparison table in the textual report.
-    #    Instead, list FORTs for lowest cost/run using models ordered by MODEL_PRIORITY.
-    #    Only include models that were successfully processed (have a non-None sor value).
     def _value_str(val):
         return "-" if val is None else str(int(val))
 
     # Build rows for the FORTs table: include per-model Off Cost values.
     # Each row tuple: (display_label, fort_rec_str, off_cost_value_or_None)
     rows_disp: list[tuple[str, str, float | None]] = []
+
+    # --- Infer the original input_data_fort from the provided input_df's "sor#" column.
+    #     Use pd.to_numeric(errors="coerce") and only consider finite values. If a finite
+    #     integer max can be determined, use it; otherwise treat as unavailable (None).
+    try:
+        sor_series = pd.to_numeric(input_df["sor#"], errors="coerce")
+        finite_mask = np.isfinite(sor_series.to_numpy(dtype=float))
+        if finite_mask.any():
+            inferred_max = int(np.nanmax(sor_series.to_numpy(dtype=float)[finite_mask]))
+            input_fort_inferred: int | None = int(inferred_max)
+        else:
+            input_fort_inferred = None
+    except Exception:
+        input_fort_inferred = None
+
+    # Track whether we appended any asterisks (to decide on footnote later)
+    _added_asterisk = False
+
     # Read convexity metadata defensively (may be absent for older runs)
     try:
         reg_diag_top = getattr(summary, "regression_diagnostics", {}) or {}
@@ -3941,7 +3956,14 @@ def assemble_text_report(
             else:
                 off_val = None
 
-        rows_disp.append((display_label, _value_str(sor_int), off_val))
+        # Prepare the fort display string; append '*' when this FORT equals the inferred input boundary.
+        fort_display_str = _value_str(sor_int)
+        if input_fort_inferred is not None and sor_int == int(input_fort_inferred):
+            # Append single asterisk immediately to the right of the rendered FORT value.
+            fort_display_str = f"{fort_display_str}*"
+            _added_asterisk = True
+
+        rows_disp.append((display_label, fort_display_str, off_val))
 
     # Prepare widths for columns
     # Pr column width (right-justified integers)
@@ -3951,7 +3973,7 @@ def assemble_text_report(
     model_width = max(
         len("Model"), max((len(lbl) for lbl, _, _ in rows_disp), default=0)
     )
-    # FORT Rec column width (right-justified ints or strings like 'non-convex')
+    # FORT Rec column width (right-justified ints or strings like 'non-convex' or with asterisk)
     fort_values = [fort for _, fort, _ in rows_disp]
     fort_width = max(
         len("FORT Rec"), max((len(str(f)) for f in fort_values), default=0)
@@ -3991,6 +4013,11 @@ def assemble_text_report(
         formatted_off = off_formatted[idx - 1]  # aligned with rows_disp order
         off_display = formatted_off.rjust(off_cost_width)
         parts.append(f"{pr_str}  {model_str}  {fort_display}  {off_display}")
+
+    # If any asterisk was added for boundary recommendations, append the exact footnote line below the table.
+    if _added_asterisk:
+        parts.append("")  # blank line separating table from footnote
+        parts.append("* at data boundary, recommendation is likely higher")
 
     return "\n".join(parts)
 
