@@ -714,7 +714,11 @@ def filter_by_adjusted_run_time_zscore(
         return df.copy(), df.iloc[0:0].copy()
 
     # Build mask for non-fort rows and collect their finite adjusted_run_time values
-    mask_non_fort = df["sor#"] != input_data_fort
+    # Coerce the 'sor#' column to numeric first to avoid string/int comparison surprises
+    # (e.g., "100" != 100). Treat only finite numeric SORs as non-fort candidates.
+    sor_numeric = pd.to_numeric(df["sor#"], errors="coerce")
+    # SORs and fort values are positive integers; compare using int for clarity and correctness.
+    mask_non_fort = (sor_numeric != int(input_data_fort)) & sor_numeric.notna()
     vals_non_fort = df.loc[mask_non_fort, "adjusted_run_time"].dropna()
 
     # Default degenerate handling: set zscore column and produce mask that will keep only fort
@@ -736,8 +740,8 @@ def filter_by_adjusted_run_time_zscore(
             # Rows with NaN adjusted_run_time will produce NaN zscores -> treated as excluded by mask
             mask_zscore = (zscores >= zscore_min) & (zscores <= zscore_max)
 
-    # Always preserve fort row(s)
-    mask_keep_sor = df["sor#"] == input_data_fort
+    # Always preserve fort row(s) using numeric comparison
+    mask_keep_sor = sor_numeric == int(input_data_fort)
     mask = mask_zscore | mask_keep_sor
 
     df_filtered = df[mask].copy()
@@ -780,7 +784,10 @@ def filter_by_adjusted_run_time_iqr(
         )
 
     # Compute quartiles on non-fort values only (drop NaN)
-    mask_non_fort = df["sor#"] != input_data_fort
+    # Coerce 'sor#' to numeric first to avoid string/int comparison issues.
+    sor_numeric = pd.to_numeric(df["sor#"], errors="coerce")
+    # SORs and fort values are positive integers; compare using int for clarity and correctness.
+    mask_non_fort = (sor_numeric != int(input_data_fort)) & sor_numeric.notna()
     vals_non_fort = df.loc[mask_non_fort, "adjusted_run_time"].dropna()
 
     if vals_non_fort.empty:
@@ -810,8 +817,8 @@ def filter_by_adjusted_run_time_iqr(
             )
             mask_iqr = df["iqr_flag"]
 
-    # Always preserve fort row(s)
-    mask_keep_sor = df["sor#"] == input_data_fort
+    # Always preserve fort row(s) using numeric comparison
+    mask_keep_sor = sor_numeric == int(input_data_fort)
     mask = mask_iqr | mask_keep_sor
 
     df_filtered = df[mask].copy()
