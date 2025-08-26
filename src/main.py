@@ -1376,6 +1376,21 @@ def fit_robust_linear(df_range, input_data_fort) -> tuple[np.ndarray | None, dic
         diagnostics["fit_message"] = "fit_ok"
         diagnostics["fit_exception"] = None
 
+        # Populate Coefficients for robust linear (intercept + slope) so callers can render algebraic formulae.
+        try:
+            intercept = float(getattr(model, "intercept_", np.nan))
+            coef_arr = getattr(model, "coef_", None)
+            slope = (
+                float(coef_arr[0])
+                if (coef_arr is not None and len(coef_arr) > 0)
+                else np.nan
+            )
+            if np.isfinite(intercept) and np.isfinite(slope):
+                diagnostics["Coefficients"] = {"const": intercept, "sor#": slope}
+        except Exception:
+            # Best-effort only; do not fail the fit when coefficient extraction fails.
+            pass
+
         return preds_seq.astype(float), diagnostics
 
     except Exception as e:
@@ -1616,6 +1631,17 @@ def fit_wls(y, X_train, X_pred, sor_vals, residuals):
         diagnostics["n_obs"] = int(len(y)) if hasattr(y, "__len__") else 0
         diagnostics["fit_message"] = "fit_ok"
         diagnostics["fit_exception"] = None
+
+        # Populate Coefficients so callers (e.g., report formatter) can render algebraic formulae.
+        try:
+            # lin_wls.params is typically a pandas Series mapping exog names to values (e.g., 'const','sor#','sor2')
+            params = getattr(lin_wls, "params", None)
+            if params is not None:
+                # Store as-is (Series / mapping) for maximal compatibility with formatter
+                diagnostics["Coefficients"] = params
+        except Exception:
+            # Best-effort only; do not fail the fit when coefficient extraction fails.
+            pass
 
         return preds_seq.astype(float), diagnostics, lin_wls, w
     except Exception as e:
