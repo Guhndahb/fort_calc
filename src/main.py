@@ -4079,11 +4079,11 @@ def assemble_text_report(
     # Each row tuple: (display_label, fort_rec_str, off_cost_value_or_None)
     rows_disp: list[tuple[str, str, float | None]] = []
 
-    # --- Infer the original input_data_fort from the provided input_df's "sor#" column.
+    # --- Infer the original input_data_fort from the provided inputransformed.df_range_df's "sor#" column.
     #     Use pd.to_numeric(errors="coerce") and only consider finite values. If a finite
     #     integer max can be determined, use it; otherwise treat as unavailable (None).
     try:
-        sor_series = pd.to_numeric(input_df["sor#"], errors="coerce")
+        sor_series = pd.to_numeric(transformed.df_range["sor#"], errors="coerce")
         finite_mask = np.isfinite(sor_series.to_numpy(dtype=float))
         if finite_mask.any():
             inferred_max = int(np.nanmax(sor_series.to_numpy(dtype=float)[finite_mask]))
