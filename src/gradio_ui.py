@@ -318,6 +318,10 @@ def _run_pipeline(
     col_sor: Optional[int] = None,
     col_ticks: Optional[int] = None,
     plot_specs_raw: Optional[str] = None,
+    offline_cost_override: Optional[float] = None,
+    simulated_fort: Optional[int] = None,
+    synthesize_model: Optional[str] = None,
+    synthesize_fort: Optional[int] = None,
 ):
     """
     Execute pipeline and return (html_embed, zip_path, report_text) or (error_html, None, error_html) on failure.
@@ -368,6 +372,10 @@ def _run_pipeline(
         iqr_k_low=iqr_k_low if iqr_k_low is not None else d_trans.iqr_k_low,
         iqr_k_high=iqr_k_high if iqr_k_high is not None else d_trans.iqr_k_high,
         use_iqr_filtering=use_iqr_filtering,
+        offline_cost_override=offline_cost_override,
+        simulated_fort=simulated_fort,
+        synthesize_model=synthesize_model,
+        synthesize_fort=synthesize_fort,
     )
     logger.debug(f"Built TransformParams -> {tp}")
 
@@ -606,7 +614,7 @@ def _build_ui():
             )
             delta = gr.Radio(
                 label="delta_mode",
-                choices=["PREVIOUS_CHUNK", "FIRST_CHUNK"],
+                choices=["PREVIOUS_CHUNK", "FIRST_CHUNK", "MODEL_BASED"],
                 value=d_trans.delta_mode.name,
             )
             verbose = gr.Checkbox(label="verbose_filtering", value=False)
@@ -670,6 +678,61 @@ def _build_ui():
             outputs=[iqr_k_low, iqr_k_high, zmin, zmax],
         )
 
+        # Additional TransformParams controls
+        with gr.Row():
+            offline_cost_override = gr.Number(
+                label="offline_cost_override (optional)",
+                value=d_trans.offline_cost_override,
+                precision=2,
+                placeholder="leave blank to disable",
+            )
+            # simulated_fort is only editable when offline_cost_override is a finite float > 0
+            simulated_fort = gr.Number(
+                label="simulated_fort (optional, < input_data_fort, offline_cost_override required)",
+                value=d_trans.simulated_fort,
+                precision=0,
+                placeholder="leave blank to disable",
+                interactive=True
+                if (
+                    d_trans.offline_cost_override is not None
+                    and float(d_trans.offline_cost_override) > 0
+                )
+                else False,
+            )
+            synthesize_model = gr.Textbox(
+                label="synthesize_model (optional)",
+                value=d_trans.synthesize_model,
+                lines=1,
+                placeholder="token e.g. robust_linear",
+            )
+            synthesize_fort = gr.Number(
+                label="synthesize_fort (optional)",
+                value=d_trans.synthesize_fort,
+                precision=0,
+                placeholder="leave blank to default to input_data_fort",
+            )
+
+        def _toggle_simulated_fort_interactivity(offline_val):
+            try:
+                import math
+
+                if offline_val is None:
+                    return gr.update(interactive=False)
+                # Accept numeric strings or floats from Gradio
+                v = float(offline_val)
+                if math.isfinite(v) and v > 0:
+                    return gr.update(interactive=True)
+                return gr.update(interactive=False)
+            except Exception:
+                return gr.update(interactive=False)
+
+        # Wire offline_cost_override -> simulated_fort interactivity toggle
+        offline_cost_override.change(
+            _toggle_simulated_fort_interactivity,
+            inputs=[offline_cost_override],
+            outputs=[simulated_fort],
+        )
+
         # Build a default multiline plot-spec value from the canonical default plot list
         plot_default_lines: list[str] = []
         for pp in d_plots:
@@ -719,6 +782,10 @@ def _build_ui():
             use_iqr_v,
             delta_v,
             plot_specs_raw,
+            offline_cost_override_v,
+            simulated_fort_v,
+            synthesize_model_v,
+            synthesize_fort_v,
         ):
             # gr.File returns a dict with "name" and "tmp_path" in some versions; accept both
             path = None
@@ -749,6 +816,10 @@ def _build_ui():
                 col_sor_v,
                 col_ticks_v,
                 plot_specs_raw,
+                offline_cost_override_v,
+                simulated_fort_v,
+                synthesize_model_v,
+                synthesize_fort_v,
             )
             # gr.File accepts None to indicate no file available
             file_out = zip_p if zip_p is not None else None
@@ -773,6 +844,10 @@ def _build_ui():
                 use_iqr,
                 delta,
                 plot_specs,
+                offline_cost_override,
+                simulated_fort,
+                synthesize_model,
+                synthesize_fort,
             ],
             outputs=[output_html, output_zip, report_code],
         )
