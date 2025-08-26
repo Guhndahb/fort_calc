@@ -15,6 +15,7 @@ from typing import List, Optional
 
 try:
     from .main import (
+        MODEL_PRIORITY,
         OMIT_FORT,
         LoadSliceParams,
         PlotParams,
@@ -35,6 +36,7 @@ try:
 except Exception:
     # Prefer absolute package import to avoid loading a second copy of the module
     from src.main import (  # type: ignore
+        MODEL_PRIORITY,
         OMIT_FORT,
         LoadSliceParams,
         PlotParams,
@@ -405,6 +407,20 @@ def _run_pipeline(
         synthesize_fort=synth_fort_parsed,
     )
     logger.debug(f"Built TransformParams -> {tp}")
+
+    # UI-level validation: invalid synthesize_model token should fail fast with a user-facing message.
+    if synth_model_parsed is not None and synth_model_parsed not in MODEL_PRIORITY:
+        msg = f"Error: Invalid synthesize_model token: '{synth_model_parsed}'. Allowed: {', '.join(MODEL_PRIORITY)}"
+        logger.debug("_run_pipeline EARLY_EXIT invalid synthesize_model")
+        return msg, None, msg
+
+    # UI-level mutual-exclusion: simulated_fort cannot be combined with synthesize options.
+    if tp.simulated_fort is not None and (
+        synth_model_parsed is not None or tp.synthesize_fort is not None
+    ):
+        msg = "Error: simulated_fort and synthesize_model/synthesize_fort are mutually exclusive"
+        logger.debug("_run_pipeline EARLY_EXIT mutual exclusion simulated/synthesize")
+        return msg, None, msg
 
     try:
         logger.debug("Calling build_run_identity...")
@@ -781,6 +797,38 @@ def _build_ui():
         offline_cost_override.change(
             _toggle_simulated_fort_interactivity,
             inputs=[offline_cost_override],
+            outputs=[simulated_fort],
+        )
+
+        # When the user types a synthesize_model token, disable & clear the simulated_fort control.
+        # When synthesize_model is cleared, restore simulated_fort interactivity based on the
+        # default offline_cost_override policy (d_trans.offline_cost_override).
+        def _toggle_simulated_on_synth_model(value):
+            try:
+                # Determine default interactivity based on canonical offline_cost_override default
+                try:
+                    interactive_default = (
+                        d_trans.offline_cost_override is not None
+                        and float(d_trans.offline_cost_override) > 0
+                    )
+                except Exception:
+                    interactive_default = False
+
+                if value is None:
+                    # No value -> treat as cleared: restore interactivity, keep value as-is
+                    return gr.update(interactive=interactive_default)
+                if isinstance(value, str) and value.strip() != "":
+                    # Non-empty token -> disable and clear simulated_fort
+                    return gr.update(interactive=False, value=None)
+                # Empty string -> restore interactivity default
+                return gr.update(interactive=interactive_default)
+            except Exception:
+                return gr.update(interactive=False, value=None)
+
+        # Wire synthesize_model -> simulated_fort interactivity toggle (clear when non-empty)
+        synthesize_model.change(
+            _toggle_simulated_on_synth_model,
+            inputs=[synthesize_model],
             outputs=[simulated_fort],
         )
 

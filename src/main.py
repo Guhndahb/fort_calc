@@ -2340,6 +2340,15 @@ def transform_pipeline(
         if sim_int < 1:
             raise ValueError("Invalid simulated_fort: must be an integer >= 1")
 
+        # Mutual-exclusion: simulated_fort cannot be combined with synthesis options.
+        if getattr(params, "simulated_fort", None) is not None and (
+            getattr(params, "synthesize_model", None) is not None
+            or getattr(params, "synthesize_fort", None) is not None
+        ):
+            raise ValueError(
+                "simulated_fort and synthesize_model/synthesize_fort are mutually exclusive"
+            )
+
         if sim_int == params.input_data_fort:
             logger.warning(
                 "Ignoring simulated_fort since it equals input_data_fort (%s)",
@@ -5002,6 +5011,14 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
                 "Invalid --synthesize-fort: must be a positive integer >= 1"
             )
         transform.synthesize_fort = synth_fort_arg
+
+    # CLI-level mutual-exclusion validation: simulated_fort cannot be combined with synthesis options.
+    if transform.simulated_fort is not None and (
+        transform.synthesize_model is not None or transform.synthesize_fort is not None
+    ):
+        raise ValueError(
+            "simulated_fort and synthesize_model/synthesize_fort are mutually exclusive"
+        )
 
     return load, transform, plot_params_list
 
