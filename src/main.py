@@ -3914,6 +3914,31 @@ def assemble_text_report(
     parts.append(txt)
     parts.append("\n")
 
+    # 1.6) Insert summary of run-time by SOR range (df_summary) right after results
+    def _shorten_summary_headers(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Display-only header shortening for df_summary.
+        """
+        rename_map = {
+            "sorr_start": "start",
+            "sorr_end": "end",
+            "run_time_mean": "rt_mean",
+            "run_time_delta": "rt_delta",
+        }
+        present = {k: v for k, v in rename_map.items() if k in df.columns}
+        return df.rename(columns=present)
+
+    def _fmt_summary(df: pd.DataFrame) -> str:
+        if df.empty:
+            return "(no summary rows)"
+        df_disp = _shorten_summary_headers(df)
+        # Show full summary; it's only a handful of rows (<=5)
+        return df_disp.to_string(index=False)
+
+    parts.append("Run-time summary by SOR range:")
+    parts.append(_fmt_summary(summary.df_summary))
+    parts.append("\n")
+
     # Model fit diagnostics: list any models from MODEL_PRIORITY that did not produce output.
     # Use the fit_message value from regression_diagnostics directly so new messages don't require edits.
     try:
@@ -4038,7 +4063,8 @@ def assemble_text_report(
     # Algebraic model formulas: attempt to present simple closed-form coefficients
     parts.append("Algebraic model formulas (simple closed forms):")
     try:
-        formula_lines: list[str] = []
+        # Collect (prefix, formula) pairs so we can compute the prefix width at runtime
+        pairs: list[tuple[str, str]] = []
         for token in MODEL_PRIORITY:
             try:
                 formula = _format_model_formula(reg_diag, token)
@@ -4046,39 +4072,18 @@ def assemble_text_report(
                 formula = None
             if formula:
                 label = model_label_map.get(token, token)
-                formula_lines.append(f" - {label} ({token}): {formula}")
-        if formula_lines:
-            parts.extend(formula_lines)
+                prefix = f" - {label} ({token}):"
+                pairs.append((prefix, formula))
+        if pairs:
+            # Compute maximum prefix length and left-justify prefixes so formulas align vertically
+            max_prefix_len = max((len(p) for p, _ in pairs), default=0)
+            for prefix, formula in pairs:
+                parts.append(prefix.ljust(max_prefix_len) + " " + formula)
         else:
             parts.append("No simple algebraic formulas available for enabled models.")
     except Exception:
         # Best-effort only; do not fail report rendering
         parts.append("No simple algebraic formulas available for enabled models.")
-    parts.append("\n")
-
-    # 1.6) Insert summary of run-time by SOR range (df_summary) right after results
-    def _shorten_summary_headers(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Display-only header shortening for df_summary.
-        """
-        rename_map = {
-            "sorr_start": "start",
-            "sorr_end": "end",
-            "run_time_mean": "rt_mean",
-            "run_time_delta": "rt_delta",
-        }
-        present = {k: v for k, v in rename_map.items() if k in df.columns}
-        return df.rename(columns=present)
-
-    def _fmt_summary(df: pd.DataFrame) -> str:
-        if df.empty:
-            return "(no summary rows)"
-        df_disp = _shorten_summary_headers(df)
-        # Show full summary; it's only a handful of rows (<=5)
-        return df_disp.to_string(index=False)
-
-    parts.append("Run-time summary by SOR range:")
-    parts.append(_fmt_summary(summary.df_summary))
     parts.append("\n")
 
     def _value_str(val):
