@@ -66,7 +66,7 @@ Minimum required:
 
 Examples:
 
-- python -m src.main --log-path ./log.csv --fort 100 --ignore-resetticks --zscore-min -1.5 --zscore-max 3
+- python -m src.main --log-path ./log.csv --fort 100
 - python -m src.main --log-path ./log.csv --fort 50 --ignore-resetticks --header-map run:sor# --header-map "duration ms:runticks"
 - Multiple plots in one run:
   - python -m src.main --log-path ./log.csv --plot-spec layers=DEFAULT --plot-spec layers=ALL_FORT_COST,x_min=0
@@ -98,9 +98,10 @@ Transform & filtering
 - --synthesize-model STRING — Model token to use when generating synthetic runticks (example: 'robust_linear')
 - --synthesize-fort INT — Maximum sor# to generate for synthetic data (positive integer). If omitted, synthesize up to the input_data_fort
 
-- If --simulated-fort < input_data_fort then --offline-cost-override must be provided and be a non-negative finite value
-- --synthesize-model / --synthesize-fort are mutually exclusive with --simulated-fort
-- Synthesis model tokens
+  If --simulated-fort < input_data_fort then --offline-cost-override must be provided and be a non-negative finite value
+  --synthesize-model / --synthesize-fort are mutually exclusive with --simulated-fort
+  Synthesis model tokens
+
   - robust_linear
   - isotonic
   - pchip
