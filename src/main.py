@@ -3031,6 +3031,36 @@ def render_plots(
     return artifact_paths
 
 
+def write_range_csv(
+    df_range: pd.DataFrame, run_output_dir: Path, short_hash: str
+) -> str:
+    """
+    Write a two-column CSV containing only ['sor#', 'adjusted_run_time'] from the
+    provided DataFrame into run_output_dir as "range-{short_hash}.csv" (UTF-8, index=False).
+
+    Returns:
+        The string path of the written CSV.
+
+    Raises:
+        ValueError: if either required column is missing from df_range.
+    """
+    # Ensure output directory exists
+    run_output_dir.mkdir(parents=True, exist_ok=True)
+
+    required = ["sor#", "adjusted_run_time"]
+    missing = [c for c in required if c not in df_range.columns]
+    if missing:
+        raise ValueError(
+            f"DataFrame missing required column(s) for range CSV: {missing}"
+        )
+
+    out_df = df_range.loc[:, required]
+    out_path = run_output_dir / f"range-{short_hash}.csv"
+    out_df.to_csv(out_path, encoding="utf-8", index=False)
+    logger.info("Wrote range CSV: %s", str(out_path))
+    return str(out_path)
+
+
 def render_master_plots(
     list_plot_params: list[PlotParams],
     per_iteration_inputs: list[dict],
@@ -4306,6 +4336,17 @@ def _orchestrate(
         df_excluded=transformed.df_excluded,
         output_dir=str(run_output_dir),
     )
+
+    # Write a simple 2-column range CSV and include it in artifacts so it appears in the manifest.
+    range_csv_path = write_range_csv(transformed.df_range, run_output_dir, short_hash)
+    artifact_paths.append(str(range_csv_path))
+
+    # Also write a CSV of the training-only rows (exclude the final fort) and include it as an artifact.
+    training_df = _training_only(transformed.df_range, params_transform.input_data_fort)
+    training_csv_path = write_range_csv(
+        training_df, run_output_dir, f"training-{short_hash}"
+    )
+    artifact_paths.append(str(training_csv_path))
 
     total_input_rows = int(len(df_range))
     processed_row_count = int(len(transformed.df_range))
