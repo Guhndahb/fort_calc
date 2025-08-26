@@ -26,6 +26,7 @@ try:
         build_model_comparison,
         build_run_identity,
         get_default_params,
+        infer_input_data_fort,
         load_and_slice_csv,
         render_plots,
         summarize_and_model,
@@ -47,6 +48,7 @@ except Exception:
         build_model_comparison,
         build_run_identity,
         get_default_params,
+        infer_input_data_fort,
         load_and_slice_csv,
         render_plots,
         summarize_and_model,
@@ -643,6 +645,78 @@ def _build_ui():
 """)
         with gr.Row():
             file_input = gr.File(label="Upload CSV file", file_types=[".csv"])
+
+        # Callback: when a CSV file is accepted/uploaded, attempt to infer the input_data_fort
+        # and update the fort field automatically only when safe to do so (per UI policy).
+        def _on_file_accepted(file_obj, current_fort_value):
+            # Normalize file_obj -> filesystem path (reuse logic from _click)
+            path = None
+            # If the user removed/cleared the file input, reset the fort field to the canonical default
+            # so the next upload can auto-infer. Be defensive if d_trans is unavailable.
+            if file_obj is None:
+                try:
+                    return gr.update(value=d_trans.input_data_fort)
+                except Exception:
+                    return gr.update(value=current_fort_value)
+            elif isinstance(file_obj, dict):
+                path = file_obj.get("name") or file_obj.get("tmp_path")
+            elif isinstance(file_obj, str):
+                path = file_obj
+            else:
+                try:
+                    path = file_obj.name
+                except Exception:
+                    path = None
+
+            if not path:
+                return gr.update(value=current_fort_value)
+
+            # Build minimal LoadSliceParams to load the CSV slice (header preserved)
+            try:
+                lp = LoadSliceParams(
+                    log_path=Path(path).resolve(),
+                    start_line=None,
+                    end_line=None,
+                    include_header=True,
+                    col_sor=None,
+                    col_ticks=None,
+                    header_map={},
+                )
+            except Exception:
+                return gr.update(value=current_fort_value)
+
+            try:
+                df = load_and_slice_csv(lp)
+            except Exception:
+                return gr.update(value=current_fort_value)
+
+            try:
+                inferred = infer_input_data_fort(df)
+            except Exception:
+                inferred = None
+
+            if inferred is None:
+                return gr.update(value=current_fort_value)
+
+            try:
+                cur_val = (
+                    None if current_fort_value is None else int(current_fort_value)
+                )
+            except Exception:
+                cur_val = None
+
+            # Only auto-update when current value is unset or equals canonical default
+            if cur_val is None or cur_val == d_trans.input_data_fort:
+                logger.debug(
+                    f"Inferred input_data_fort={inferred} from uploaded CSV; updating UI fort field"
+                )
+                return gr.update(value=int(inferred))
+            else:
+                logger.debug(
+                    f"Inferred input_data_fort={inferred} but UI fort value is user-set ({cur_val}); not overriding"
+                )
+                return gr.update(value=current_fort_value)
+
         with gr.Row():
             start_line = gr.Number(
                 label="start_line (optional)",
@@ -675,6 +749,17 @@ def _build_ui():
                 precision=0,
                 placeholder="this must match the FORT used in data collection - all data processed must have the same FORT",
             )
+            # Wire the callback so inference happens immediately when a file is accepted/uploaded.
+            # Place wiring here after `fort` is defined so the variable exists in scope.
+            try:
+                file_input.change(
+                    _on_file_accepted, inputs=[file_input, fort], outputs=[fort]
+                )
+            except Exception:
+                # Best-effort wiring; do not fail UI creation if binding fails.
+                logger.debug(
+                    "Failed to wire file_input.change for fort inference callback"
+                )
             ignore = gr.Checkbox(
                 label="ignore_resetticks",
                 value=d_trans.ignore_resetticks,

@@ -3721,6 +3721,24 @@ def _format_model_formula(reg_diag: dict, token: str) -> Optional[str]:
         return None
 
 
+def infer_input_data_fort(df: pd.DataFrame) -> int | None:
+    """
+    Infer the input_data_fort (max SOR) from a DataFrame's 'sor#' column.
+    Safe to call from external modules (e.g., Gradio UI). Returns an integer
+    max SOR when determinable, otherwise None. Defensive: returns None on exception.
+    """
+    try:
+        sor_series = pd.to_numeric(df["sor#"], errors="coerce")
+        arr = sor_series.to_numpy(dtype=float)
+        finite_mask = np.isfinite(arr)
+        if finite_mask.any():
+            inferred_max = int(np.nanmax(arr[finite_mask]))
+            return inferred_max
+        return None
+    except Exception:
+        return None
+
+
 def assemble_text_report(
     input_df: pd.DataFrame,
     transformed: TransformOutputs,
@@ -4094,16 +4112,9 @@ def assemble_text_report(
     rows_disp: list[tuple[str, str, float | None]] = []
 
     # --- Infer the original input_data_fort from the provided inputransformed.df_range_df's "sor#" column.
-    #     Use pd.to_numeric(errors="coerce") and only consider finite values. If a finite
-    #     integer max can be determined, use it; otherwise treat as unavailable (None).
+    #     Delegate to helper to centralize inference logic and make callable from external modules.
     try:
-        sor_series = pd.to_numeric(transformed.df_range["sor#"], errors="coerce")
-        finite_mask = np.isfinite(sor_series.to_numpy(dtype=float))
-        if finite_mask.any():
-            inferred_max = int(np.nanmax(sor_series.to_numpy(dtype=float)[finite_mask]))
-            input_fort_inferred: int | None = int(inferred_max)
-        else:
-            input_fort_inferred = None
+        input_fort_inferred = infer_input_data_fort(transformed.df_range)
     except Exception:
         input_fort_inferred = None
 
