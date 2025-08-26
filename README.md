@@ -15,7 +15,7 @@ short_description: Idle Champions Optimal FORT Calculator
 
 ## Why FORT matters
 
-When gem farming in Idle Champions of the Forgotten Realms, repeated online runs gradually slow down due to _reasons_. A restart (usually an offline Briv stack) resets those degradations but costs a fixed amount of time. You want a cadence that amortizes the restart cost against the increasing online run durations. Because measurements are noisy, we model the online trend with regression, estimate offline restart cost, then compute the average cost curve to pick the best FORT.
+In _Idle Champions of the Forgotten Realms_, repeated online runs gradually slow down as game mechanics add overhead to each successive run. Restarting (commonly with an offline Briv stack) resets those degradations but costs a fixed amount of time. The goal is to find the optimal “FORT” (Force Offline Run Threshold): the cadence that balances the restart cost against the growing online run durations. Because measurements are noisy, this tool models the online trend with regression, estimates the offline restart cost, and computes an average cost curve to recommend the best FORT.
 
 ## How to log
 
