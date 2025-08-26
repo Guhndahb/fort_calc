@@ -6,6 +6,7 @@ Provides a simple interface to upload CSV and run pipeline producing SVGs and ZI
 import os
 import shutil
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from typing import List, Optional
 
@@ -28,6 +29,8 @@ try:
         load_and_slice_csv,
         render_plots,
         summarize_and_model,
+        synthesize_data,
+        synthesize_enabled,
         transform_pipeline,
     )
 except Exception:
@@ -46,6 +49,8 @@ except Exception:
         load_and_slice_csv,
         render_plots,
         summarize_and_model,
+        synthesize_data,
+        synthesize_enabled,
         transform_pipeline,
     )
 
@@ -358,6 +363,19 @@ def _run_pipeline(
         # Fallback to whatever default is present
         delta_mode_enum = d_trans.delta_mode
 
+    # Normalize potential numeric-like inputs from Gradio into the canonical types expected
+    # by TransformParams (especially integer-only fields).
+    sim_fort_parsed = _parse_optional_int(simulated_fort)
+    synth_fort_parsed = _parse_optional_int(synthesize_fort)
+    # Normalize synthesize_model: treat empty strings as None
+    synth_model_parsed = None
+    if synthesize_model is not None:
+        try:
+            if isinstance(synthesize_model, str) and synthesize_model.strip() != "":
+                synth_model_parsed = synthesize_model.strip()
+        except Exception:
+            synth_model_parsed = None
+
     tp = TransformParams(
         zscore_min=zscore_min if zscore_min is not None else d_trans.zscore_min,
         zscore_max=zscore_max if zscore_max is not None else d_trans.zscore_max,
@@ -373,9 +391,9 @@ def _run_pipeline(
         iqr_k_high=iqr_k_high if iqr_k_high is not None else d_trans.iqr_k_high,
         use_iqr_filtering=use_iqr_filtering,
         offline_cost_override=offline_cost_override,
-        simulated_fort=simulated_fort,
-        synthesize_model=synthesize_model,
-        synthesize_fort=synthesize_fort,
+        simulated_fort=sim_fort_parsed,
+        synthesize_model=synth_model_parsed,
+        synthesize_fort=synth_fort_parsed,
     )
     logger.debug(f"Built TransformParams -> {tp}")
 
@@ -406,6 +424,44 @@ def _run_pipeline(
         logger.debug("Calling summarize_and_model...")
         summary = summarize_and_model(transformed.df_range, tp)
         logger.debug("summarize_and_model complete")
+
+        # Synthetic-data integration for Gradio UI: when requested, synthesize and re-run modeling on the synthetic frame.
+        try:
+            if synthesize_enabled(tp):
+                logger.debug("Synthesis requested via UI - running synthesize_data()")
+                synthesized_outputs, synth_diag = synthesize_data(
+                    summary, tp, transformed.df_range
+                )
+                # Determine synth_fort and create a params copy with input_data_fort set to synth target
+                synth_fort = (
+                    tp.synthesize_fort
+                    if tp.synthesize_fort is not None
+                    else tp.input_data_fort
+                )
+                try:
+                    params_for_synth = replace(tp, input_data_fort=int(synth_fort))
+                except Exception:
+                    params_for_synth = tp
+                # Re-run summary/modeling on the synthesized frame
+                summary = summarize_and_model(
+                    synthesized_outputs.df_range, params_for_synth
+                )
+                try:
+                    if isinstance(summary.regression_diagnostics, dict):
+                        summary.regression_diagnostics["synthesized"] = synth_diag.get(
+                            "synthesized", synth_diag
+                        )
+                except Exception:
+                    try:
+                        summary.regression_diagnostics = {
+                            "synthesized": synth_diag.get("synthesized", synth_diag)
+                        }
+                    except Exception:
+                        summary.regression_diagnostics = {"synthesized": synth_diag}
+                # Use synthesized outputs for rendering/manifests
+                transformed = synthesized_outputs
+        except Exception as _e_synth:
+            logger.debug(f"Synthesis failed: {_e_synth}")
 
         # Build textual report from pipeline outputs
         try:
