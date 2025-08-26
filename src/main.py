@@ -3566,6 +3566,126 @@ def build_manifest_dict(
     }
 
 
+def _format_model_formula(reg_diag: dict, token: str) -> Optional[str]:
+    """
+    Attempt to build a simple algebraic formula string (linear or quadratic) from
+    regression diagnostics for the given model token.
+
+    Returns a formula string like "y = 1.23456 + 0.00567*x" on success, or None when
+    a simple closed form cannot be produced. This function is defensive and will
+    never raise; on unexpected structures it returns None.
+    """
+    try:
+        if not isinstance(reg_diag, dict):
+            return None
+
+        # Primary lookup: reg_diag[token]
+        entry = reg_diag.get(token)
+
+        # Fallback lookup: split token into variant/family and inspect reg_diag[family][variant]
+        if not isinstance(entry, dict) and isinstance(token, str) and "_" in token:
+            try:
+                variant, family = token.split("_", 1)
+                fam = reg_diag.get(family, {})
+                if isinstance(fam, dict):
+                    possible = fam.get(variant)
+                    if isinstance(possible, dict):
+                        entry = possible
+            except Exception:
+                # any unexpected shape -> treat as unavailable
+                entry = entry
+
+        if not isinstance(entry, dict):
+            return None
+
+        coefs_raw = entry.get("Coefficients")
+        if coefs_raw is None:
+            return None
+
+        # Normalize coefficients into a plain dict: support pd.Series, dict-like, or mapping.
+        coef_map: dict = {}
+        try:
+            # pandas Series has to_dict()
+            if hasattr(coefs_raw, "to_dict"):
+                coef_map = dict(coefs_raw.to_dict())  # type: ignore[arg-type]
+            elif isinstance(coefs_raw, dict):
+                coef_map = dict(coefs_raw)
+            elif hasattr(coefs_raw, "items"):
+                coef_map = {k: v for k, v in coefs_raw.items()}  # type: ignore[misc]
+            else:
+                # Unknown shape
+                return None
+        except Exception:
+            return None
+
+        if not coef_map:
+            return None
+
+        # Identify keys robustly (case-insensitive)
+        const_key = None
+        lin_key = None
+        quad_key = None
+
+        for k in coef_map.keys():
+            try:
+                kl = str(k).lower()
+            except Exception:
+                continue
+            # constant term
+            if const_key is None and ("const" in kl or "intercept" in kl):
+                const_key = k
+            # quadratic: sor^2 / sor2
+            if quad_key is None and ("sor2" in kl or "sor^2" in kl):
+                quad_key = k
+            # linear: contains 'sor' but avoid matching sor2
+            if (
+                lin_key is None
+                and ("sor" in kl)
+                and not ("sor2" in kl or "sor^2" in kl)
+            ):
+                lin_key = k
+
+        def _to_finite_float(k):
+            if k is None:
+                return None
+            try:
+                v = coef_map.get(k)
+                # Some coef containers may have numpy scalar types
+                f = float(v)
+                if np.isfinite(f):
+                    return float(f)
+                return None
+            except Exception:
+                return None
+
+        const_val = _to_finite_float(const_key)
+        lin_val = _to_finite_float(lin_key)
+        quad_val = _to_finite_float(quad_key)
+
+        # Only produce linear formula when constant + linear are present and finite.
+        if const_val is not None and lin_val is not None and quad_val is None:
+            const_s = f"{const_val:.5f}"
+            lin_s = f"{abs(lin_val):.5f}"
+            if lin_val >= 0:
+                return f"y = {const_s} + {lin_s}*x"
+            else:
+                return f"y = {const_s} - {lin_s}*x"
+
+        # Produce quadratic formula when const, linear, and quadratic present.
+        if const_val is not None and lin_val is not None and quad_val is not None:
+            const_s = f"{const_val:.5f}"
+            lin_s = f"{abs(lin_val):.5f}"
+            quad_s = f"{abs(quad_val):.5f}"
+            lin_sign = "+" if lin_val >= 0 else "-"
+            quad_sign = "+" if quad_val >= 0 else "-"
+            return f"y = {const_s} {lin_sign} {lin_s}*x {quad_sign} {quad_s}*x^2"
+
+        # If we cannot build either a linear or simple quadratic closed form, return None.
+        return None
+    except Exception:
+        return None
+
+
 def assemble_text_report(
     input_df: pd.DataFrame,
     transformed: TransformOutputs,
@@ -3878,6 +3998,27 @@ def assemble_text_report(
         parts.append("All optional models produced valid fits.")
     else:
         parts.extend(omitted_lines)
+    parts.append("\n")
+
+    # Algebraic model formulas: attempt to present simple closed-form coefficients
+    parts.append("Algebraic model formulas (simple closed forms):")
+    try:
+        formula_lines: list[str] = []
+        for token in MODEL_PRIORITY:
+            try:
+                formula = _format_model_formula(reg_diag, token)
+            except Exception:
+                formula = None
+            if formula:
+                label = model_label_map.get(token, token)
+                formula_lines.append(f" - {label} ({token}): {formula}")
+        if formula_lines:
+            parts.extend(formula_lines)
+        else:
+            parts.append("No simple algebraic formulas available for enabled models.")
+    except Exception:
+        # Best-effort only; do not fail report rendering
+        parts.append("No simple algebraic formulas available for enabled models.")
     parts.append("\n")
 
     # 1.6) Insert summary of run-time by SOR range (df_summary) right after results
