@@ -4,6 +4,7 @@ import dataclasses
 import datetime as _dt
 import hashlib
 import json
+import threading
 from pathlib import Path
 from typing import Any, Dict
 
@@ -206,3 +207,116 @@ def utc_timestamp_seconds() -> str:
     ISO-8601 UTC timestamp with seconds precision and Z suffix.
     """
     return _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
+# -------------------------
+# Small orchestration helpers (shared by CLI and Gradio UI)
+# -------------------------
+def ensure_run_dir(base: Path | str = ".", prefix: str = "output_gradio") -> Path:
+    """
+    Ensure and return a per-run directory under `base`/`prefix`/<timestamp>.
+
+    Uses the same timestamp format as the existing UI code:
+      time.strftime("%Y%m%dT%H%M%S", time.localtime())
+
+    Returns:
+        Path to the created run directory (exists on return).
+    """
+    import logging
+    import time
+
+    logger = logging.getLogger(__name__)
+    base_path = Path(base)
+    run_ts = time.strftime("%Y%m%dT%H%M%S", time.localtime())
+    run_dir = base_path / prefix / run_ts
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        logger.debug("Ensured run_dir=%s", str(run_dir))
+    except Exception as e:
+        # Best-effort: log and re-raise only on unexpected critical failure
+        logger.debug("Failed to ensure run_dir %s: %s", str(run_dir), e)
+        try:
+            # attempt a final mkdir without swallowing unexpected errors
+            run_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            # If this still fails, surface the original exception to caller
+            raise
+    return run_dir
+
+
+def create_zip_async(zip_path: str, artifact_paths: list[Path]) -> "threading.Thread":
+    """
+    Create a ZIP archive at zip_path containing artifact_paths in a background daemon thread.
+
+    The returned Thread is already started. Exceptions inside the thread are caught and
+    logged; the thread will not raise to the caller.
+
+    Args:
+        zip_path: target zip file path (string).
+        artifact_paths: list of Path-like objects to include in the zip.
+
+    Returns:
+        threading.Thread: started daemon thread performing the zip operation.
+    """
+    import logging
+    import threading
+    import zipfile
+    from pathlib import Path as _Path
+
+    logger = logging.getLogger(__name__)
+
+    def _worker(zip_path_local: str, paths: list[Path]) -> None:
+        try:
+            with zipfile.ZipFile(
+                zip_path_local, "w", compression=zipfile.ZIP_DEFLATED
+            ) as zf:
+                for p in paths:
+                    try:
+                        pth = _Path(p)
+                        if pth.exists():
+                            zf.write(str(pth), arcname=pth.name)
+                        else:
+                            logger.debug(
+                                "Skipping missing artifact for zip: %s", str(pth)
+                            )
+                    except Exception as e_item:
+                        logger.debug(
+                            "Failed to add %s to zip %s: %s",
+                            str(p),
+                            zip_path_local,
+                            e_item,
+                        )
+            logger.debug("Async zip created at %s", zip_path_local)
+        except Exception as e:
+            logger.debug("Async zip failed for %s: %s", zip_path_local, e)
+
+    thread = threading.Thread(
+        target=_worker, args=(zip_path, list(artifact_paths)), daemon=True
+    )
+    thread.start()
+    return thread
+
+
+def write_text_report(report_text: str, run_dir: Path, short_hash: str) -> Path:
+    """
+    Write the textual report into run_dir/report-<short_hash>.txt using UTF-8.
+
+    This is best-effort: on IO failures the error is logged and the function returns
+    the intended Path (which may not exist if the write failed).
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    try:
+        target = Path(run_dir) / f"report-{short_hash}.txt"
+        target.write_text(report_text, encoding="utf-8")
+        logger.debug("Wrote textual report to %s", str(target))
+        return target
+    except Exception as e:
+        # Log and return the intended path so callers can still reference it as an artifact to include.
+        try:
+            target = Path(run_dir) / f"report-{short_hash}.txt"
+        except Exception:
+            target = Path(f"report-{short_hash}.txt")
+        logger.debug("Failed to write textual report to %s: %s", str(target), e)
+        return target

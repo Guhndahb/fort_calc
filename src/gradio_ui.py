@@ -5,7 +5,6 @@ Provides a simple interface to upload CSV and run pipeline producing SVGs and ZI
 
 import os
 import shutil
-import zipfile
 from dataclasses import replace
 from pathlib import Path
 from typing import List, Optional
@@ -52,6 +51,16 @@ except Exception:
         synthesize_data,
         synthesize_enabled,
         transform_pipeline,
+    )
+
+try:
+    from .utils import create_zip_async, ensure_run_dir, write_text_report
+except Exception:
+    # Prefer absolute package import to avoid loading a second copy of the module
+    from src.utils import (  # type: ignore
+        create_zip_async,
+        ensure_run_dir,
+        write_text_report,
     )
 
 import logging
@@ -405,9 +414,7 @@ def _run_pipeline(
         logger.debug(f"build_run_identity returned short_hash={short_hash}")
 
         # Ensure run directory (use per-run output_gradio/<timestamp> like main)
-        run_ts = time.strftime("%Y%m%dT%H%M%S", time.localtime())
-        run_dir = Path("output_gradio") / run_ts
-        run_dir.mkdir(parents=True, exist_ok=True)
+        run_dir = ensure_run_dir(Path("."), prefix="output_gradio")
         logger.debug(f"Ensured run_dir={run_dir}")
 
         # Execute pipeline
@@ -476,11 +483,15 @@ def _run_pipeline(
             # Save textual report into the run directory so it can be archived with the plots.
             # Use UTF-8 encoding and best-effort logging on failure (do not fail the pipeline).
             try:
-                report_path = run_dir / f"report-{short_hash}.txt"
-                report_path.write_text(report_text, encoding="utf-8")
+                report_path = write_text_report(report_text, run_dir, short_hash)
                 logger.debug(f"Saved textual report to {report_path}")
             except Exception:
-                logger.debug(f"Failed to write textual report to {report_path}")
+                try:
+                    logger.debug(
+                        f"Failed to write textual report to {run_dir / f'report-{short_hash}.txt'}"
+                    )
+                except Exception:
+                    logger.debug("Failed to write textual report (and to format path)")
         except Exception:
             rpt_tb = traceback.format_exc()
             report_text = f"Failed to assemble report: {rpt_tb}"
@@ -561,29 +572,13 @@ def _run_pipeline(
         # To avoid blocking the Gradio worker (which appeared to hang for some users),
         # create the zip archive asynchronously in a daemon thread and return immediately.
         # The UI will still display generated SVGs; the ZIP will be produced shortly.
-        import threading
 
         zip_base = run_dir / f"plots-{short_hash}"
         zip_path = str(zip_base) + ".zip"
 
-        def _create_zip_async(zip_path_local: str, svgs: list[Path]):
-            try:
-                with zipfile.ZipFile(
-                    zip_path_local, "w", compression=zipfile.ZIP_DEFLATED
-                ) as zf:
-                    for svg in svgs:
-                        zf.write(svg, arcname=svg.name)
-                logger.debug(f"Async zip created at {zip_path_local}")
-            except Exception as e_zip:
-                logger.debug(f"Async zip failed: {e_zip}")
-
+        # Create zip archive asynchronously using shared helper to avoid blocking Gradio worker
         try:
-            thread = threading.Thread(
-                target=_create_zip_async,
-                args=(zip_path, list(artifacts_for_zip)),
-                daemon=True,
-            )
-            thread.start()
+            thread = create_zip_async(zip_path, list(artifacts_for_zip))
             logger.debug("Zip creation started in background thread")
         except Exception as _e_thread:
             logger.debug(f"Failed to start async zip thread: {_e_thread}")
