@@ -11,11 +11,18 @@ license: cc0-1.0
 short_description: Idle Champions Optimal FORT Calculator
 ---
 
+# Idle Champions Optimal FORT Calculator
+
 ## Why FORT matters
 
-When gem farming in Idle Champions of the Forgotten Realms, repeated online runs gradually slow down due to _reasons_. A restart (usually an offline Briv stack) resets those degradations but costs a fixed amount of time. You want a cadence that amortizes the restart cost against the increasing online run durations. Because measurements are noisy, we model the online trend with regression, estimate offline restart cost from observed data at the fort boundary, then compute the average cost curve to pick the best FORT.
+When gem farming in Idle Champions of the Forgotten Realms, repeated online runs gradually slow down due to _reasons_. A restart (usually an offline Briv stack) resets those degradations but costs a fixed amount of time. You want a cadence that amortizes the restart cost against the increasing online run durations. Because measurements are noisy, we model the online trend with regression, estimate offline restart cost, then compute the average cost curve to pick the best FORT.
 
-# Idle Champions Optimal FORT Calculator
+## How to log
+
+While fort_calc supports CSV files with any format that includes the required data (see below), recommended ScriptHub edits for generating data specifically for this tool is available at:
+https://discord.com/channels/357247482247380994/1399820912311799953/1401030488822386869
+
+## What fort_calc does in a nutshell
 
 Estimate the optimal number of online runs before performing a restart (FORT) to minimize average time per run. The tool models run-time drift, estimates restart (offline) cost, and finds the run count k that minimizes:
 average_cost(k) = (sum of predicted run times for runs 1..k + offline_cost) / k
@@ -69,7 +76,7 @@ Examples:
 
 Slicing and column selection
 
-- --log-path PATH (CSV file)
+- --log-path PATH (required CSV file)
 - --start-line N / --end-line M — 1-based inclusive data-row slice (header excluded)
 - --header-map OLD:NEW — repeatable; remap input header OLD → NEW (case-insensitive)
 - --col-sor INT — zero-based column index to use for the SOR/run index (overrides header mapping)
@@ -88,6 +95,19 @@ Transform & filtering
 - --no-fail-on-invalid-ts — relax strict timestamp parsing failures
 - --offline-cost-override FLOAT — force a scalar offline cost
 - --simulated-fort INT — simulate a smaller fort (requires --offline-cost-override)
+- --synthesize-model STRING — Model token to use when generating synthetic runticks (example: 'robust_linear')
+- --synthesize-fort INT — Maximum sor# to generate for synthetic data (positive integer). If omitted, synthesize up to the input_data_fort
+
+- If --simulated-fort < input_data_fort then --offline-cost-override must be provided and be a non-negative finite value
+- --synthesize-model / --synthesize-fort are mutually exclusive with --simulated-fort
+- Synthesis model tokens
+  - robust_linear
+  - isotonic
+  - pchip
+  - ols_linear
+  - wls_linear
+  - ols_quadratic
+  - wls_quadratic
 
 Plotting
 
@@ -200,6 +220,8 @@ Files written:
 
 - manifest-{short_hash}.json — run manifest with counts, effective params, and artifact list
 - plot-{short_hash}-{ii}-{suffix}.svg — plot files (ii is zero-based index, suffix reflects chosen layers)
+- range-{short_hash}.csv — two-column CSV (['sor#','adjusted_run_time']) of the included runs
+- training-{short_hash}.csv — training-only CSV (excluded final fort row) used for model fitting
 - report-{short_hash}.txt — human-readable report printed to stdout and saved in the run directory
 
 ## Multi-plot usage
