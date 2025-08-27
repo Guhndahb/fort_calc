@@ -32,10 +32,12 @@ import pandas as pd
 import statsmodels.api as sm
 from matplotlib.lines import Line2D
 from scipy.interpolate import PchipInterpolator
+from scipy.stats import spearmanr
 
 # Modeling helpers added for isotonic / pchip / robust regressors
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import TheilSenRegressor
+from statsmodels.stats.diagnostic import het_breuschpagan
 
 # Support both package and script execution modes
 # Prefer explicit package-qualified imports to ensure a single canonical module object
@@ -1590,6 +1592,14 @@ def fit_wls(y, X_train, X_pred, sor_vals, residuals):
             if len(var_fit.params) >= 2
             else float(var_fit.params[0])
         )
+        # Record estimated variance-power slope for diagnostics (best-effort)
+        try:
+            diagnostics["p_hat"] = float(p_hat)
+            # human-readable weights spec for downstream consumers
+            diagnostics["weights_spec"] = f"1/sor^{float(p_hat):.6g}"
+        except Exception:
+            # Do not fail the WLS helper for auxiliary diagnostics bookkeeping
+            pass
 
         # Compute empirical weights: w = 1 / (sor#^p_hat)
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -1650,6 +1660,121 @@ def fit_wls(y, X_train, X_pred, sor_vals, residuals):
         diagnostics["n_obs"] = int(len(y)) if hasattr(y, "__len__") else 0
         diagnostics["RMSE"] = None
         return None, diagnostics, None, None
+
+
+def _compute_hetero_metrics(resid, sor_vals, exog) -> dict:
+    """
+    Best-effort heteroskedasticity diagnostics helper.
+
+    Inputs:
+      - resid: 1D residual array-like
+      - sor_vals: 1D sor# array-like (same order as resid)
+      - exog: 2D design matrix or pandas DataFrame (may include const)
+
+    Returns dict with keys:
+      - bp_stat, bp_pvalue (Breusch–Pagan) or None
+      - het_R2 (auxiliary R^2 on resid^2) or None
+      - gamma (power-law slope from log-log regression) or None
+      - spearman_rho, spearman_p or None
+    This function never raises; it returns None for metrics that cannot be computed.
+    """
+    metrics = {
+        "bp_stat": None,
+        "bp_pvalue": None,
+        "het_R2": None,
+        "gamma": None,
+        "spearman_rho": None,
+        "spearman_p": None,
+    }
+    try:
+        resid_arr = np.asarray(resid, dtype=float)
+        sor_arr = np.asarray(sor_vals, dtype=float)
+
+        # Convert exog to numpy 2D
+        if isinstance(exog, pd.DataFrame):
+            exog_arr = exog.to_numpy(dtype=float)
+        else:
+            exog_arr = np.asarray(exog, dtype=float)
+
+        # Mask rows where any required value is non-finite
+        mask = np.isfinite(resid_arr) & np.isfinite(sor_arr)
+        if exog_arr.ndim == 2:
+            mask = mask & np.all(np.isfinite(exog_arr), axis=1)
+        else:
+            mask = mask & np.isfinite(exog_arr)
+
+        if int(np.count_nonzero(mask)) < 3:
+            return metrics
+
+        resid_m = resid_arr[mask]
+        sor_m = sor_arr[mask]
+        exog_m = exog_arr[mask]
+
+        # --- Breusch-Pagan test (LM) ---
+        try:
+            bp_res = het_breuschpagan(resid_m, exog_m)
+            # het_breuschpagan returns (lm, lm_pvalue, fvalue, f_pvalue)
+            lm_stat = float(bp_res[0])
+            lm_p = float(bp_res[1])
+            metrics["bp_stat"] = lm_stat
+            metrics["bp_pvalue"] = lm_p
+        except Exception:
+            metrics["bp_stat"] = None
+            metrics["bp_pvalue"] = None
+
+        # --- Auxiliary OLS on residual^2 for het_R2 ---
+        try:
+            with np.errstate(invalid="ignore"):
+                y_aux = np.square(resid_m)
+            # statsmodels requires 2D exog; exog_m should already be 2D
+            try:
+                aux_res = sm.OLS(y_aux, exog_m).fit()
+                metrics["het_R2"] = float(aux_res.rsquared)
+            except Exception:
+                # Try adding constant if needed
+                try:
+                    aux_X = sm.add_constant(exog_m, has_constant="add")
+                    aux_res = sm.OLS(y_aux, aux_X).fit()
+                    metrics["het_R2"] = float(aux_res.rsquared)
+                except Exception:
+                    metrics["het_R2"] = None
+        except Exception:
+            metrics["het_R2"] = None
+
+        # --- Gamma: power-law slope from log-log regression of resid^2 on sor ---
+        try:
+            eps = 1e-12
+            with np.errstate(invalid="ignore", divide="ignore"):
+                z = np.log(np.square(resid_m) + eps)
+                x = np.log(sor_m)
+            mask2 = np.isfinite(z) & np.isfinite(x) & (sor_m > 0)
+            if int(np.count_nonzero(mask2)) >= 3:
+                Xv = sm.add_constant(x[mask2], has_constant="add")
+                vf = sm.OLS(z[mask2], Xv).fit()
+                p_hat = (
+                    float(vf.params[1]) if len(vf.params) >= 2 else float(vf.params[0])
+                )
+                metrics["gamma"] = float(p_hat)
+            else:
+                metrics["gamma"] = None
+        except Exception:
+            metrics["gamma"] = None
+
+        # --- Spearman correlation between |resid| and sor ---
+        try:
+            abs_resid = np.abs(resid_m)
+            rho, pval = spearmanr(abs_resid, sor_m, nan_policy="omit")
+            metrics["spearman_rho"] = float(rho) if np.isfinite(rho) else None
+            metrics["spearman_p"] = float(pval) if np.isfinite(pval) else None
+        except Exception:
+            metrics["spearman_rho"] = None
+            metrics["spearman_p"] = None
+
+    except Exception:
+        # best-effort only
+        return metrics
+
+    return metrics
 
 
 def regression_analysis(
@@ -1959,6 +2084,61 @@ def regression_analysis(
     diagnostics["isotonic"] = isotonic_diag
     diagnostics["pchip"] = pchip_diag
     diagnostics["robust_linear"] = robust_diag
+
+    # --- Heteroskedasticity diagnostics for all enabled models (best-effort) ---
+    # Compute: bp_stat, bp_pvalue (Breusch–Pagan), het_R2 (auxiliary R² on eps^2),
+    # gamma (power-law slope from log-log regression of eps^2 on sor), and
+    # spearman_rho/spearman_p (Spearman rank corr between |eps| and sor).
+    try:
+        for token in MODEL_PRIORITY:
+            try:
+                # Use generate_model_residuals to obtain per-row residuals and sor values
+                res_df = generate_model_residuals(
+                    df_range.copy(), token, input_data_fort
+                )
+                resid_col = f"residual_{token}"
+                if resid_col not in res_df.columns:
+                    # No residuals produced for this model; skip
+                    continue
+                # Numeric arrays
+                resid = pd.to_numeric(res_df[resid_col], errors="coerce").to_numpy(
+                    dtype=float
+                )
+                sor_vals = pd.to_numeric(res_df["sor#"], errors="coerce").to_numpy(
+                    dtype=float
+                )
+
+                # Build a sensible exog for auxiliary tests (const + sor; include sor2 for quadratic tokens)
+                exog_df = pd.DataFrame({"sor#": sor_vals})
+                if "quad" in token or "quadratic" in token:
+                    exog_df["sor2"] = exog_df["sor#"] ** 2
+                # Add constant if missing
+                try:
+                    exog_with_const = sm.add_constant(exog_df, has_constant="add")
+                except Exception:
+                    exog_with_const = exog_df
+
+                # Compute heteroskedasticity metrics via helper (defined above)
+                hetero_metrics = _compute_hetero_metrics(
+                    resid, sor_vals, exog_with_const
+                )
+
+                # Ensure diagnostics entry exists and merge metrics
+                entry = diagnostics.get(token)
+                if not isinstance(entry, dict):
+                    diagnostics[token] = {}
+                    entry = diagnostics[token]
+                # Merge keys (do not overwrite existing high-value keys)
+                for k, v in hetero_metrics.items():
+                    entry[k] = v
+            except Exception as _e_hetero:
+                # Best-effort: record an excerpt of the exception for diagnostics
+                diagnostics.setdefault(token, {})["hetero_exception"] = str(_e_hetero)[
+                    :200
+                ]
+    except Exception:
+        # Top-level best-effort guard: do not fail the regression_analysis flow
+        pass
 
     # Add model output columns only when a model produced finite predictions on the full grid.
     if isotonic_preds is not None and np.isfinite(isotonic_preds).all():
