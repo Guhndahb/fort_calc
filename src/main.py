@@ -3870,8 +3870,15 @@ def _format_model_formula(reg_diag: dict, token: str) -> Optional[str]:
         # Primary lookup: reg_diag[token]
         entry = reg_diag.get(token)
 
-        # Fallback lookup: split token into variant/family and inspect reg_diag[family][variant]
-        if not isinstance(entry, dict) and isinstance(token, str) and "_" in token:
+        # If the direct entry is missing OR it doesn't include 'Coefficients',
+        # attempt the legacy nested family/variant layout: token like "ols_linear"
+        # -> variant="ols", family="linear" and inspect reg_diag[family][variant].
+        # This handles mixed diagnostic shapes produced elsewhere in the pipeline.
+        if (
+            (not isinstance(entry, dict) or ("Coefficients" not in entry))
+            and isinstance(token, str)
+            and "_" in token
+        ):
             try:
                 variant, family = token.split("_", 1)
                 fam = reg_diag.get(family, {})
@@ -3880,8 +3887,8 @@ def _format_model_formula(reg_diag: dict, token: str) -> Optional[str]:
                     if isinstance(possible, dict):
                         entry = possible
             except Exception:
-                # any unexpected shape -> treat as unavailable
-                entry = entry
+                # any unexpected shape -> leave entry as-is (best-effort)
+                pass
 
         if not isinstance(entry, dict):
             return None
@@ -4111,6 +4118,12 @@ def _format_hetero_table(hetero_map: dict) -> str:
         # Skip heuristic/non-parametric tokens entirely (do not render rows for them)
         heuristic_tokens = {"isotonic", "pchip", "robust_linear"}
 
+        # Collect metric values for later interpretation
+        bp_values: list[float] = []
+        het_values: list[float] = []
+        gamma_values: list[float] = []
+        spearman_pairs: list[tuple[float, float]] = []  # (rho, p)
+
         for token in MODEL_PRIORITY:
             if token in heuristic_tokens:
                 continue
@@ -4137,6 +4150,38 @@ def _format_hetero_table(hetero_map: dict) -> str:
                             cell = "n/a"
                 row_cells.append(cell)
             rows.append(row_cells)
+
+            # Collect numeric metrics defensively
+            try:
+                if isinstance(entry, dict):
+                    bp = entry.get("bp_pvalue")
+                    if bp is not None:
+                        bpf = float(bp)
+                        if np.isfinite(bpf):
+                            bp_values.append(bpf)
+                    het = entry.get("het_R2")
+                    if het is not None:
+                        h = float(het)
+                        if np.isfinite(h):
+                            het_values.append(h)
+                    gamma = entry.get("gamma")
+                    if gamma is not None:
+                        g = float(gamma)
+                        if np.isfinite(g):
+                            gamma_values.append(g)
+                    rho = entry.get("spearman_rho")
+                    p = entry.get("spearman_p")
+                    if (rho is not None) and (p is not None):
+                        try:
+                            rf = float(rho)
+                            pf = float(p)
+                            if np.isfinite(rf) and np.isfinite(pf):
+                                spearman_pairs.append((rf, pf))
+                        except Exception:
+                            pass
+            except Exception:
+                # ignore collection errors per-token
+                pass
 
         # If no rows to display, return a short message
         if not rows:
@@ -4169,7 +4214,146 @@ def _format_hetero_table(hetero_map: dict) -> str:
             )
             lines.append(line)
 
-        return "\n".join(lines) + "\n"
+        # Base table string (preserve previous behavior)
+        table_str = "\n".join(lines) + "\n"
+
+        # Build interpretation lines (append after a blank line)
+        interpretations: list[str] = []
+
+        # 1) Breusch–Pagan
+        try:
+            bp_total = len(bp_values)
+            if bp_total > 0:
+                bp_sig = sum(1 for v in bp_values if v < 0.05)
+                if bp_sig == bp_total:
+                    interpretations.append(
+                        "Breusch–Pagan: Variance differs with sor (heteroskedasticity likely)."
+                    )
+                elif bp_sig == 0:
+                    interpretations.append(
+                        "Breusch–Pagan: No evidence of heteroskedasticity (variance stable)."
+                    )
+                else:
+                    interpretations.append(
+                        f"Breusch–Pagan: Mixed results — {bp_sig}/{bp_total} models indicate heteroskedasticity (bp_pvalue < 0.05)."
+                    )
+        except Exception:
+            # best-effort only
+            pass
+
+        # 2) het_R²
+        try:
+            het_total = len(het_values)
+            if het_total > 0:
+                strong = sum(1 for v in het_values if v > 0.01)
+                weak = sum(1 for v in het_values if (v > 0.001 and v <= 0.01))
+                negligible = sum(1 for v in het_values if v <= 0.001)
+                if strong == het_total:
+                    interpretations.append(
+                        "het_R²: Strong variance trend explains >1% of variance."
+                    )
+                elif weak == het_total:
+                    interpretations.append(
+                        "het_R²: Weak variance trend, effect likely negligible."
+                    )
+                elif negligible == het_total:
+                    interpretations.append(
+                        "het_R²: No evidence of systematic variance change."
+                    )
+                else:
+                    interpretations.append(
+                        f"het_R²: Mixed — {strong} strong, {weak} weak, {negligible} negligible."
+                    )
+        except Exception:
+            pass
+
+        # 3) Gamma
+        try:
+            gamma_total = len(gamma_values)
+            if gamma_total > 0:
+                gamma_moderate = sum(1 for v in gamma_values if abs(v) > 0.2)
+                if gamma_moderate == gamma_total:
+                    interpretations.append(
+                        "Gamma: Moderate variance–fit correlation detected."
+                    )
+                elif gamma_moderate == 0:
+                    interpretations.append(
+                        "Gamma: Little to no variance–fit correlation."
+                    )
+                else:
+                    interpretations.append(
+                        f"Gamma: Mixed — {gamma_moderate}/{gamma_total} models indicate moderate correlation (|gamma| > 0.2)."
+                    )
+        except Exception:
+            pass
+
+        # 4) Spearman rho
+        try:
+            sp_total = len(spearman_pairs)
+            if sp_total > 0:
+                sp_sig = sum(
+                    1 for (rho, p) in spearman_pairs if (abs(rho) > 0.2 and p < 0.05)
+                )
+                if sp_sig == sp_total:
+                    interpretations.append(
+                        "Spearman: Residual spread changes systematically with sor."
+                    )
+                elif sp_sig == 0:
+                    interpretations.append(
+                        "Spearman: No monotone relation between variance and sor."
+                    )
+                else:
+                    interpretations.append(
+                        f"Spearman: Mixed results — {sp_sig}/{sp_total} models show significant monotone relation (|rho| > 0.2 and p < 0.05)."
+                    )
+        except Exception:
+            pass
+
+        # Generalized heteroskedasticity evaluation
+        overall_line = None
+        try:
+            mean_bp = float(np.mean(bp_values)) if bp_values else None
+            mean_het = float(np.mean(het_values)) if het_values else None
+
+            if (mean_bp is None) and (mean_het is None):
+                overall_line = (
+                    "Overall: Insufficient heteroskedasticity data to evaluate."
+                )
+            elif (mean_bp is not None) and (mean_het is not None):
+                # Both available -> evaluate exact conditions in order
+                if (mean_bp < 0.05) and (mean_het > 0.01):
+                    overall_line = "Overall: Strong heteroskedasticity detected: variance grows with sor."
+                elif (mean_bp < 0.05) and (mean_het > 0.001) and (mean_het <= 0.01):
+                    overall_line = "Overall: Weak heteroskedasticity detected: effect size very small."
+                else:
+                    overall_line = "Overall: No meaningful heteroskedasticity detected."
+            elif (mean_bp is not None) and (mean_het is None):
+                # Fallback to BP-only interpretation (conservative)
+                if mean_bp < 0.05:
+                    # BP significant but no het_R2 -> treat as weak detection
+                    overall_line = "Overall: Weak heteroskedasticity detected: effect size very small."
+                else:
+                    overall_line = "Overall: No meaningful heteroskedasticity detected."
+            else:  # mean_bp is None and mean_het is not None
+                # Fallback to het-only interpretation
+                if mean_het > 0.01:
+                    overall_line = "Overall: Strong heteroskedasticity detected: variance grows with sor."
+                elif (mean_het > 0.001) and (mean_het <= 0.01):
+                    overall_line = "Overall: Weak heteroskedasticity detected: effect size very small."
+                else:
+                    overall_line = "Overall: No meaningful heteroskedasticity detected."
+        except Exception:
+            overall_line = "Overall: Insufficient heteroskedasticity data to evaluate."
+
+        # Assemble final string: table, blank line, interpretations (one per metric present), blank line, overall_line
+        if interpretations:
+            interp_block = "\n".join([" - " + interp for interp in interpretations])
+            return table_str + interp_block + "\n" + (overall_line or "")
+        else:
+            # No per-metric interpretations available; still append overall_line if present
+            if overall_line:
+                return table_str + overall_line
+            return table_str
     except Exception:
         # On failure return a short fallback string
         return "Heteroskedasticity diagnostics: (unavailable)\n"
