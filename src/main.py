@@ -3919,6 +3919,196 @@ def infer_input_data_fort(df: pd.DataFrame) -> int | None:
         return None
 
 
+def _collect_hetero_metrics_from_regdiag(reg_diag: dict) -> dict[str, dict]:
+    """
+    Extract heteroskedasticity-related metrics from regression diagnostics.
+
+    Best-effort, defensive:
+    - Supports both flat token -> dict and nested family -> variant -> dict layouts.
+    - For each token in MODEL_PRIORITY, collect keys:
+        "bp_stat", "bp_pvalue", "het_R2", "gamma", "spearman_rho", "spearman_p"
+    - Missing or non-finite values are represented as None.
+    - Adds a boolean "heuristic" flag for non-parametric/heuristic tokens.
+    - Never raises.
+    """
+    try:
+        out: dict[str, dict] = {}
+        heuristic_tokens = {"isotonic", "pchip", "robust_linear"}
+        # Defensive early-return for unexpected shapes
+        if not isinstance(reg_diag, dict):
+            reg_diag = {}  # treat as empty
+        for token in MODEL_PRIORITY:
+            try:
+                entry = None
+                # Prefer flat lookup
+                candidate = reg_diag.get(token)
+                if isinstance(candidate, dict):
+                    entry = candidate
+                else:
+                    # Try nested family/variant layout: token like "ols_linear" -> variant="ols", family="linear"
+                    if isinstance(token, str) and "_" in token:
+                        variant, family = token.split("_", 1)
+                        fam = reg_diag.get(family)
+                        if isinstance(fam, dict):
+                            possible = fam.get(variant)
+                            if isinstance(possible, dict):
+                                entry = possible
+                # Build metric map with defensive conversions
+                metrics = {}
+                for key in (
+                    "bp_stat",
+                    "bp_pvalue",
+                    "het_R2",
+                    "gamma",
+                    "spearman_rho",
+                    "spearman_p",
+                ):
+                    val = None
+                    try:
+                        if isinstance(entry, dict) and key in entry:
+                            raw = entry.get(key)
+                            if raw is None:
+                                val = None
+                            else:
+                                # Try convert to float and ensure finiteness
+                                f = float(raw)
+                                if np.isfinite(f):
+                                    val = float(f)
+                                else:
+                                    val = None
+                    except Exception:
+                        val = None
+                    metrics[key] = val
+                metrics["heuristic"] = token in heuristic_tokens
+                out[token] = metrics
+            except Exception:
+                # isolate per-token failures; never raise
+                out[token] = {
+                    "bp_stat": None,
+                    "bp_pvalue": None,
+                    "het_R2": None,
+                    "gamma": None,
+                    "spearman_rho": None,
+                    "spearman_p": None,
+                    "heuristic": token in {"isotonic", "pchip", "robust_linear"},
+                }
+        return out
+    except Exception:
+        # Top-level guard: return empty mapping if anything unexpected happens
+        try:
+            return {
+                t: {
+                    "bp_stat": None,
+                    "bp_pvalue": None,
+                    "het_R2": None,
+                    "gamma": None,
+                    "spearman_rho": None,
+                    "spearman_p": None,
+                    "heuristic": (t in {"isotonic", "pchip", "robust_linear"}),
+                }
+                for t in MODEL_PRIORITY
+            }
+        except Exception:
+            return {}
+
+
+def _format_hetero_table(hetero_map: dict) -> str:
+    """
+    Format a fixed-width heteroskedasticity diagnostics table from the collector output.
+
+    Columns:
+      Model, bp_stat, bp_pvalue, het_R2, gamma, spearman_rho, spearman_p
+
+    - Missing values (None) render as "n/a".
+    - Floats formatted to 4 decimal places where specified.
+    - If entry is marked heuristic, append "*" to each non-"n/a" cell for that row.
+    - Appends a single footnote line when any heuristic values are present.
+    """
+    try:
+        cols = [
+            ("bp_stat", "{:.4f}"),
+            ("bp_pvalue", "{:.4f}"),
+            ("het_R2", "{:.4f}"),
+            ("gamma", "{:.4f}"),
+            ("spearman_rho", "{:.4f}"),
+            ("spearman_p", "{:.4f}"),
+        ]
+
+        rows: list[list[str]] = []
+        any_heuristic = False
+
+        for token in MODEL_PRIORITY:
+            entry = hetero_map.get(token, {}) if isinstance(hetero_map, dict) else {}
+            label = model_label_map.get(token, token)
+            heuristic = (
+                bool(entry.get("heuristic")) if isinstance(entry, dict) else False
+            )
+            if heuristic:
+                any_heuristic = True
+            row_cells = [label]
+            for key, fmt in cols:
+                v = None
+                try:
+                    v = entry.get(key) if isinstance(entry, dict) else None
+                except Exception:
+                    v = None
+                if v is None:
+                    cell = "n/a"
+                else:
+                    try:
+                        cell = fmt.format(float(v))
+                    except Exception:
+                        # Fallback to generic str
+                        try:
+                            cell = str(float(v))
+                        except Exception:
+                            cell = "n/a"
+                # Append heuristic marker if needed (only to non-"n/a" cells)
+                if heuristic and cell != "n/a":
+                    cell = f"{cell}*"
+                row_cells.append(cell)
+            rows.append(row_cells)
+
+        # Compute column widths
+        headers = [
+            "Model",
+            "bp_stat",
+            "bp_pvalue",
+            "het_R2",
+            "gamma",
+            "spearman_rho",
+            "spearman_p",
+        ]
+        # Start with header widths
+        col_widths = [len(h) for h in headers]
+        for r in rows:
+            for i, cell in enumerate(r):
+                col_widths[i] = max(col_widths[i], len(cell))
+
+        # Build lines
+        header_line = "  ".join(h.ljust(col_widths[i]) for i, h in enumerate(headers))
+        sep_line = "-" * len(header_line)
+        lines = [header_line, sep_line]
+        for r in rows:
+            line = "  ".join(
+                (r[i].ljust(col_widths[i]) if i == 0 else r[i].rjust(col_widths[i]))
+                for i in range(len(headers))
+            )
+            lines.append(line)
+
+        # Add footnote if heuristics present
+        if any_heuristic:
+            lines.append("")  # blank line
+            lines.append(
+                "* values marked with * are heuristic for non-parametric models (isotonic/pchip/robust_linear)."
+            )
+
+        return "\n".join(lines) + "\n"
+    except Exception:
+        # On failure return a short fallback string
+        return "Heteroskedasticity diagnostics: (unavailable)\n"
+
+
 def assemble_text_report(
     input_df: pd.DataFrame,
     transformed: TransformOutputs,
@@ -4256,6 +4446,17 @@ def assemble_text_report(
         parts.append("All optional models produced valid fits.")
     else:
         parts.extend(omitted_lines)
+    parts.append("\n")
+
+    # Insert heteroskedasticity diagnostics table derived from regression_diagnostics.
+    # Best-effort only: collector/formatter will handle missing keys and shapes defensively.
+    try:
+        hetero_map = _collect_hetero_metrics_from_regdiag(reg_diag)
+        table_str = _format_hetero_table(hetero_map)
+        parts.append("Heteroskedasticity diagnostics:")
+        parts.append(table_str)
+    except Exception:
+        parts.append("Heteroskedasticity diagnostics: (unavailable)")
     parts.append("\n")
 
     # Algebraic model formulas: attempt to present simple closed-form coefficients
