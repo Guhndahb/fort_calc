@@ -2090,7 +2090,8 @@ def regression_analysis(
     # gamma (power-law slope from log-log regression of eps^2 on sor), and
     # spearman_rho/spearman_p (Spearman rank corr between |eps| and sor).
     # Avoid calling generate_model_residuals for regression-style tokens to prevent
-    # recursive re-entry into regression_analysis.
+    # recursive re-entry into regression_analysis. Also skip non-parametric (heuristic)
+    # models from heteroskedasticity reporting.
     try:
         regression_tokens = {
             "ols_linear",
@@ -2098,9 +2099,14 @@ def regression_analysis(
             "wls_linear",
             "wls_quadratic",
         }
+        heuristic_tokens = {"isotonic", "pchip", "robust_linear"}
 
         for token in MODEL_PRIORITY:
             try:
+                # Skip non-parametric heuristic models entirely for heteroskedasticity reporting
+                if token in heuristic_tokens:
+                    continue
+
                 # Ensure diagnostics entry exists
                 entry = diagnostics.get(token)
                 if not isinstance(entry, dict):
@@ -2162,7 +2168,7 @@ def regression_analysis(
                         )[:200]
                     continue  # next token
 
-                # Non-regression tokens: compute residuals via the standalone helper (safe)
+                # Non-regression tokens (parametric non-regression) : compute residuals via the standalone helper
                 res_df = generate_model_residuals(
                     df_range.copy(), token, input_data_fort
                 )
@@ -4088,8 +4094,7 @@ def _format_hetero_table(hetero_map: dict) -> str:
 
     - Missing values (None) render as "n/a".
     - Floats formatted to 4 decimal places where specified.
-    - If entry is marked heuristic, append "*" to each non-"n/a" cell for that row.
-    - Appends a single footnote line when any heuristic values are present.
+    - Heuristic (non-parametric) model tokens are omitted entirely.
     """
     try:
         cols = [
@@ -4102,16 +4107,16 @@ def _format_hetero_table(hetero_map: dict) -> str:
         ]
 
         rows: list[list[str]] = []
-        any_heuristic = False
+
+        # Skip heuristic/non-parametric tokens entirely (do not render rows for them)
+        heuristic_tokens = {"isotonic", "pchip", "robust_linear"}
 
         for token in MODEL_PRIORITY:
+            if token in heuristic_tokens:
+                continue
+
             entry = hetero_map.get(token, {}) if isinstance(hetero_map, dict) else {}
             label = model_label_map.get(token, token)
-            heuristic = (
-                bool(entry.get("heuristic")) if isinstance(entry, dict) else False
-            )
-            if heuristic:
-                any_heuristic = True
             row_cells = [label]
             for key, fmt in cols:
                 v = None
@@ -4130,11 +4135,12 @@ def _format_hetero_table(hetero_map: dict) -> str:
                             cell = str(float(v))
                         except Exception:
                             cell = "n/a"
-                # Append heuristic marker if needed (only to non-"n/a" cells)
-                if heuristic and cell != "n/a":
-                    cell = f"{cell}*"
                 row_cells.append(cell)
             rows.append(row_cells)
+
+        # If no rows to display, return a short message
+        if not rows:
+            return "Heteroskedasticity diagnostics: (no parametric models to report)\n"
 
         # Compute column widths
         headers = [
@@ -4162,13 +4168,6 @@ def _format_hetero_table(hetero_map: dict) -> str:
                 for i in range(len(headers))
             )
             lines.append(line)
-
-        # Add footnote if heuristics present
-        if any_heuristic:
-            lines.append("")  # blank line
-            lines.append(
-                "* values marked with * are heuristic for non-parametric models (isotonic/pchip/robust_linear)."
-            )
 
         return "\n".join(lines) + "\n"
     except Exception:
