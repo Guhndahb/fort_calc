@@ -4875,6 +4875,107 @@ def assemble_text_report(
     return "\n".join(parts)
 
 
+def assemble_monte_carlo_report(
+    mc_summary: Any,
+    mc_params: Any,
+    short_hash: str,
+    run_output_dir: Path,
+) -> str:
+    """
+    Build a concise Monte Carlo textual report summarizing aggregate statistics.
+    Returns the report string (UTF-8).
+    """
+    try:
+        lines: list[str] = []
+        lines.append("Monte Carlo Aggregate Report")
+        lines.append("============================")
+        diag = getattr(mc_summary, "diagnostics", {}) if mc_summary is not None else {}
+        # Basic counters
+        req = diag.get("requested") if isinstance(diag, dict) else None
+        coll = diag.get("collected") if isinstance(diag, dict) else None
+        attempts = diag.get("attempts") if isinstance(diag, dict) else None
+        failed = diag.get("failed_attempts") if isinstance(diag, dict) else None
+        lines.append(f"Requested simulations : {req}")
+        lines.append(f"Collected simulations : {coll}")
+        lines.append(f"Total attempts        : {attempts}")
+        lines.append(f"Failed attempts       : {failed}")
+        lines.append("")
+
+        # Core aggregate metrics from mc_summary dataclass-like object
+        try:
+            pmf = getattr(mc_summary, "pmf", {}) or {}
+            mode = getattr(mc_summary, "mode", None)
+            median = getattr(mc_summary, "median", None)
+            central50 = getattr(mc_summary, "central_50_interval", None)
+            entropy_nats = getattr(mc_summary, "entropy_nats", None)
+            iqr = getattr(mc_summary, "iqr", None)
+            eps_freq = getattr(mc_summary, "epsilon_freq", {}) or {}
+            robust_choice = getattr(mc_summary, "robust_choice", None)
+            exp_regret_mean = getattr(mc_summary, "expected_regret_mean", None)
+            exp_regret_p95 = getattr(mc_summary, "expected_regret_p95", None)
+        except Exception:
+            pmf = {}
+            mode = median = central50 = entropy_nats = iqr = robust_choice = None
+            eps_freq = {}
+            exp_regret_mean = exp_regret_p95 = None
+
+        # PMF summary (show top entries)
+        lines.append("PMF (top 10 recommended SORs):")
+        if pmf:
+            # sort by probability desc then sor asc
+            items = sorted(pmf.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+            for sor, p in items:
+                lines.append(f" - SOR {int(sor):>4} : p = {float(p):.4f}")
+        else:
+            lines.append(" - (no recommendations collected)")
+
+        lines.append("")
+        lines.append(f"Mode (most frequent)        : {mode}")
+        lines.append(f"Median recommended SOR      : {median}")
+        lines.append(f"Central contiguous 50% int. : {central50}")
+        lines.append(f"Entropy (nats)              : {entropy_nats}")
+        lines.append(f"IQR of recommendations      : {iqr}")
+        lines.append("")
+        # Epsilon frequencies (top 10)
+        lines.append("Epsilon-optimal frequencies (top 10):")
+        if eps_freq:
+            items = sorted(eps_freq.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+            for sor, f in items:
+                lines.append(f" - SOR {int(sor):>4} : freq = {float(f):.4f}")
+        else:
+            lines.append(" - (no epsilon-optimal frequencies)")
+
+        lines.append("")
+        lines.append(f"Robust choice (ε freq >= 0.70) : {robust_choice}")
+        lines.append("")
+        lines.append("Expected regret (per-sim):")
+        lines.append(f" - mean : {exp_regret_mean}")
+        lines.append(f" - p95  : {exp_regret_p95}")
+        lines.append("")
+
+        # Artifact references (best-effort)
+        try:
+            prefix = getattr(mc_params, "output_prefix", None)
+            prefix_str = f"{prefix}-" if (prefix is not None and prefix != "") else ""
+            sim_csv = run_output_dir / f"{prefix_str}mc-per-sim-{short_hash}.csv"
+            sim_json = run_output_dir / f"{prefix_str}mc-summary-{short_hash}.json"
+            lines.append("Persisted Monte Carlo artifacts:")
+            if sim_csv.exists():
+                lines.append(f" - per-simulation CSV: {str(sim_csv)}")
+            else:
+                lines.append(" - per-simulation CSV: (not found)")
+            if sim_json.exists():
+                lines.append(f" - MC summary JSON   : {str(sim_json)}")
+            else:
+                lines.append(" - MC summary JSON   : (not found)")
+        except Exception:
+            lines.append("Persisted Monte Carlo artifacts: (unavailable)")
+
+        return "\n".join(lines)
+    except Exception:
+        return "Monte Carlo: (failed to build report)\n"
+
+
 def synthesize_enabled(params: TransformParams) -> bool:
     """Return True when synthetic-data generation is requested via params."""
     try:
@@ -4884,10 +4985,18 @@ def synthesize_enabled(params: TransformParams) -> bool:
 
 
 def synthesize_data(
-    summary: SummaryModelOutputs, params: TransformParams, original_df: pd.DataFrame
+    summary: SummaryModelOutputs,
+    params: TransformParams,
+    original_df: pd.DataFrame,
+    random_state: Optional[np.random.Generator] = None,
 ) -> tuple[TransformOutputs, dict]:
     """
     Generate a synthetic TransformOutputs.df_range using model predictions + sampled residuals.
+
+    Parameters:
+      - random_state: Optional numpy Generator. When provided, sampling uses
+        random_state.choice(...) so callers (e.g., Monte Carlo) can inject reproducible RNG.
+        When None, falls back to np.random.choice(...) as historical behaviour.
 
     Returns (TransformOutputs, diagnostics_dict).
     """
@@ -5006,7 +5115,7 @@ def synthesize_data(
     else:
         offline_cost_to_apply = float(offline_cost_for_model)
 
-    print(f"offline_cost_to_apply: {offline_cost_to_apply}")
+    logger.debug("offline_cost_to_apply: %s", offline_cost_to_apply)
 
     # Build synthetic adjusted_run_time by model prediction + sampled residual
     synthetic_adjusted = []
@@ -5028,15 +5137,22 @@ def synthesize_data(
         if int(s) == int(synth_fort):
             pred_val = float(pred_val) + offline_cost_to_apply
 
-        sampled = float(np.random.choice(residuals, size=1)[0])
+        # Sample a residual using injected RNG when provided for reproducibility
+        try:
+            if random_state is not None:
+                sampled = float(random_state.choice(residuals, size=1)[0])
+            else:
+                sampled = float(np.random.choice(residuals, size=1)[0])
+        except Exception:
+            # As a last resort, pick the first residual to avoid raising inside Monte Carlo loops
+            sampled = float(residuals[0]) if len(residuals) > 0 else 0.0
+
         synth_val = pred_val + sampled
 
         # Ensure numeric; if not finite, coerce to NaN (later steps may inspect)
         if not np.isfinite(synth_val):
             synth_val = np.nan
         synthetic_adjusted.append(float(synth_val))
-        # if sampled > 10:
-        #     logger.info(f"s: {s} sampled: {sampled} synth_val: {synth_val}")
 
     synthetic_adjusted = np.asarray(synthetic_adjusted, dtype=float)
 
@@ -5091,6 +5207,7 @@ def _orchestrate(
     params_load: LoadSliceParams,
     params_transform: TransformParams,
     list_plot_params: List[PlotParams],
+    mc_params: Optional[Any] = None,
 ) -> None:
     """
     Orchestrate the full pipeline given explicit parameter objects.
@@ -5108,6 +5225,64 @@ def _orchestrate(
     df_range = load_and_slice_csv(params_load)
     transformed = transform_pipeline(df_range, params_transform)
     summary = summarize_and_model(transformed.df_range, params_transform)
+
+    # Monte Carlo orchestration (best-effort). Run when mc_params provided and requests > 0.
+    mc_summary = None
+    try:
+        if (
+            mc_params is not None
+            and getattr(mc_params, "n_simulations", 0)
+            and int(getattr(mc_params, "n_simulations", 0)) > 0
+        ):
+            import hashlib
+
+            try:
+                from src.monte_carlo import run_monte_carlo
+            except Exception:
+                from monte_carlo import run_monte_carlo
+
+            # Derive deterministic seed from canonical full_hash when user did not provide one
+            seed = getattr(mc_params, "random_seed", None)
+            if seed is None:
+                try:
+                    seed = int.from_bytes(
+                        hashlib.sha256(str(full_hash).encode("utf-8")).digest()[:4],
+                        "big",
+                    )
+                except Exception:
+                    seed = None
+            rng = (
+                np.random.default_rng(int(seed))
+                if seed is not None
+                else np.random.default_rng()
+            )
+
+            mc_summary = run_monte_carlo(
+                original_df=transformed.df_range,
+                summary=summary,
+                transform_params=params_transform,
+                mc_params=mc_params,
+                random_state=rng,
+                run_output_dir=run_output_dir,
+                short_hash=short_hash,
+            )
+
+            # Attach MC artifacts if written
+            try:
+                per_sim_path = run_output_dir / (f"mc-per-sim-{short_hash}.csv")
+                if per_sim_path.exists():
+                    # artifact_paths will be built later; append now for manifest inclusion
+                    pass  # will be appended after render_plots builds artifact_paths
+                summary.regression_diagnostics = (
+                    summary.regression_diagnostics
+                    if isinstance(summary.regression_diagnostics, dict)
+                    else {}
+                )
+                summary.regression_diagnostics["monte_carlo"] = mc_summary.diagnostics
+            except Exception:
+                logger.exception("Failed to attach Monte Carlo diagnostics")
+    except Exception:
+        logger.exception("Monte Carlo run failed (continuing pipeline)")
 
     # Synthetic-data integration: when requested, synthesize and re-run modeling on the synthetic frame.
     if synthesize_enabled(params_transform):
@@ -5160,6 +5335,26 @@ def _orchestrate(
         output_dir=str(run_output_dir),
     )
 
+    # Include Monte Carlo artifacts in the artifact list when present.
+    # The Monte Carlo writer may use an optional output_prefix; check both prefixed and unprefixed names.
+    try:
+        if mc_params is not None:
+            mc_prefix = getattr(mc_params, "output_prefix", None)
+            prefixes = [str(mc_prefix)] if mc_prefix else []
+            prefixes.append(None)  # always check the no-prefix variant as well
+            for p in prefixes:
+                prefix_str = f"{p}-" if (p is not None and p != "") else ""
+                sim_name = f"{prefix_str}mc-per-sim-{short_hash}.csv"
+                summary_name = f"{prefix_str}mc-summary-{short_hash}.json"
+                sim_path = run_output_dir / sim_name
+                summary_path = run_output_dir / summary_name
+                if sim_path.exists():
+                    artifact_paths.append(str(sim_path))
+                if summary_path.exists():
+                    artifact_paths.append(str(summary_path))
+    except Exception:
+        logger.exception("Failed to include Monte Carlo artifacts in manifest")
+
     # Write a simple 2-column range CSV and include it in artifacts so it appears in the manifest.
     range_csv_path = write_range_csv(transformed.df_range, run_output_dir, short_hash)
     artifact_paths.append(str(range_csv_path))
@@ -5193,23 +5388,64 @@ def _orchestrate(
     # Write manifest into the run output directory
     write_manifest(str(run_output_dir / f"manifest-{short_hash}.json"), manifest)
 
-    report = assemble_text_report(
-        df_range,
-        transformed,
-        summary,
-        table_text,
-        best_label,
-        params_transform.verbose_filtering,
-    )
-
-    # Write textual report into the run dir named report-{short_hash}.txt using UTF-8, then print
-    report_path = run_output_dir / f"report-{short_hash}.txt"
+    # When Monte Carlo was requested and produced results, replace the per-run textual
+    # report with an MC-focused aggregate report. Otherwise produce the normal per-run report.
     try:
-        report_path.write_text(report, encoding="utf-8")
+        mc_requested = (
+            mc_params is not None and int(getattr(mc_params, "n_simulations", 0)) > 0
+        )
     except Exception:
-        logger.exception("Failed to write textual report to %s", str(report_path))
+        mc_requested = False
 
-    print(report)
+    if mc_requested and mc_summary is not None:
+        # Build MC-focused report and write it as the primary textual report.
+        try:
+            mc_report = assemble_monte_carlo_report(
+                mc_summary, mc_params, short_hash, run_output_dir
+            )
+            report_path = run_output_dir / f"report-{short_hash}.txt"
+            try:
+                report_path.write_text(mc_report, encoding="utf-8")
+            except Exception:
+                logger.exception(
+                    "Failed to write Monte Carlo textual report to %s", str(report_path)
+                )
+            print(mc_report)
+        except Exception:
+            logger.exception(
+                "Failed to generate Monte Carlo report; falling back to standard report"
+            )
+            report = assemble_text_report(
+                df_range,
+                transformed,
+                summary,
+                table_text,
+                best_label,
+                params_transform.verbose_filtering,
+            )
+            report_path = run_output_dir / f"report-{short_hash}.txt"
+            try:
+                report_path.write_text(report, encoding="utf-8")
+            except Exception:
+                logger.exception(
+                    "Failed to write textual report to %s", str(report_path)
+                )
+            print(report)
+    else:
+        report = assemble_text_report(
+            df_range,
+            transformed,
+            summary,
+            table_text,
+            best_label,
+            params_transform.verbose_filtering,
+        )
+        report_path = run_output_dir / f"report-{short_hash}.txt"
+        try:
+            report_path.write_text(report, encoding="utf-8")
+        except Exception:
+            logger.exception("Failed to write textual report to %s", str(report_path))
+        print(report)
 
 
 def _parse_plot_spec_kv(spec: str, default: PlotParams) -> PlotParams:
@@ -5457,6 +5693,52 @@ def _build_cli_parser():
         help="Plot specification as a JSON object. Repeatable.",
     )
 
+    # Monte Carlo parameters (optional - disabled by default)
+    g_mc = parser.add_argument_group("MonteCarloParams")
+    g_mc.add_argument(
+        "--mc-n-simulations",
+        type=int,
+        dest="mc_n_simulations",
+        help="Number of Monte Carlo simulations to run (0 disables MC).",
+    )
+    g_mc.add_argument(
+        "--mc-epsilon-fraction",
+        type=float,
+        dest="mc_epsilon_fraction",
+        help="Relative epsilon for epsilon-optimal definition (fraction, e.g., 0.005).",
+    )
+    g_mc.add_argument(
+        "--mc-random-seed",
+        type=int,
+        dest="mc_random_seed",
+        help="Optional integer seed for Monte Carlo RNG. When omitted a deterministic seed is derived from canonical run hash.",
+    )
+    g_mc.add_argument(
+        "--mc-max-attempts",
+        type=int,
+        dest="mc_max_attempts",
+        help="Maximum attempts (including retries) to collect the requested number of simulations.",
+    )
+    g_mc.add_argument(
+        "--mc-hetero-resampling",
+        action="store_true",
+        dest="mc_hetero_resampling",
+        help="When set, enable heteroskedastic-aware residual resampling (best-effort).",
+    )
+    g_mc.add_argument(
+        "--mc-selection-policy",
+        type=str,
+        dest="mc_selection_policy",
+        choices=["priority", "synthesize"],
+        help="Selection policy for authoritative model when aggregating simulations ('priority' or 'synthesize').",
+    )
+    g_mc.add_argument(
+        "--mc-output-prefix",
+        type=str,
+        dest="mc_output_prefix",
+        help="Optional prefix for Monte Carlo output directory/artifacts.",
+    )
+
     return parser
 
 
@@ -5667,7 +5949,28 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
             "simulated_fort and synthesize_model/synthesize_fort are mutually exclusive"
         )
 
-    return load, transform, plot_params_list
+    # Build Monte Carlo params from CLI (use defaults from src.monte_carlo when available)
+    try:
+        from src.monte_carlo import MonteCarloParams, get_default_monte_carlo_params
+    except Exception:
+        from monte_carlo import MonteCarloParams, get_default_monte_carlo_params
+
+    d_mc = get_default_monte_carlo_params()
+    mc_params = MonteCarloParams(
+        n_simulations=get_arg_or_default("mc_n_simulations", d_mc.n_simulations),
+        epsilon_fraction=get_arg_or_default(
+            "mc_epsilon_fraction", d_mc.epsilon_fraction
+        ),
+        random_seed=getattr(args, "mc_random_seed", d_mc.random_seed),
+        max_attempts=getattr(args, "mc_max_attempts", d_mc.max_attempts),
+        heteroskedastic_resampling=bool(
+            getattr(args, "mc_hetero_resampling", d_mc.heteroskedastic_resampling)
+        ),
+        selection_policy=getattr(args, "mc_selection_policy", d_mc.selection_policy),
+        output_prefix=getattr(args, "mc_output_prefix", d_mc.output_prefix),
+    )
+
+    return load, transform, plot_params_list, mc_params
 
 
 def _build_cli_parser_with_policy_defaults():
@@ -5793,7 +6096,7 @@ def main() -> None:
     debug_mode = bool(
         getattr(args, "debug", False) or os.getenv("FORT_CALC_DEBUG", "") == "1"
     )
-    params_load, params_transform, plot_params_list = _args_to_params(args)
+    params_load, params_transform, plot_params_list, mc_params = _args_to_params(args)
 
     # If user requested validation tests, run the selected validation suite instead of the normal orchestration.
     validation_choice = getattr(args, "validation_test", None)
@@ -5862,7 +6165,7 @@ def main() -> None:
         logger.setLevel(logging.DEBUG)
 
     try:
-        _orchestrate(params_load, params_transform, plot_params_list)
+        _orchestrate(params_load, params_transform, plot_params_list, mc_params)
     except (FileNotFoundError, ValueError, TypeError) as e:
         # Concise, user-facing errors for common/user-correctable problems.
         logger.info("User-facing error: %s", e)
