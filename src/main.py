@@ -2089,18 +2089,91 @@ def regression_analysis(
     # Compute: bp_stat, bp_pvalue (Breusch–Pagan), het_R2 (auxiliary R² on eps^2),
     # gamma (power-law slope from log-log regression of eps^2 on sor), and
     # spearman_rho/spearman_p (Spearman rank corr between |eps| and sor).
+    # Avoid calling generate_model_residuals for regression-style tokens to prevent
+    # recursive re-entry into regression_analysis.
     try:
+        regression_tokens = {
+            "ols_linear",
+            "ols_quadratic",
+            "wls_linear",
+            "wls_quadratic",
+        }
+
         for token in MODEL_PRIORITY:
             try:
-                # Use generate_model_residuals to obtain per-row residuals and sor values
+                # Ensure diagnostics entry exists
+                entry = diagnostics.get(token)
+                if not isinstance(entry, dict):
+                    diagnostics[token] = {}
+                    entry = diagnostics[token]
+
+                # For regression tokens use fitted result objects available in this scope to avoid recursion.
+                if token in regression_tokens:
+                    try:
+                        if token == "ols_linear" and lin_res is not None:
+                            resid = np.asarray(lin_res.resid, dtype=float)
+                            sor_vals = pd.to_numeric(
+                                df_train["sor#"], errors="coerce"
+                            ).to_numpy(dtype=float)
+                        elif token == "ols_quadratic" and quad_res is not None:
+                            resid = np.asarray(quad_res.resid, dtype=float)
+                            sor_vals = pd.to_numeric(
+                                df_train["sor#"], errors="coerce"
+                            ).to_numpy(dtype=float)
+                        elif token == "wls_linear" and lin_wls_res is not None:
+                            resid = np.asarray(lin_wls_res.resid, dtype=float)
+                            sor_vals = pd.to_numeric(
+                                df_train["sor#"], errors="coerce"
+                            ).to_numpy(dtype=float)
+                        elif token == "wls_quadratic" and quad_wls_res is not None:
+                            resid = np.asarray(quad_wls_res.resid, dtype=float)
+                            sor_vals = pd.to_numeric(
+                                df_train["sor#"], errors="coerce"
+                            ).to_numpy(dtype=float)
+                        else:
+                            # No fitted result available for this regression token; skip computing hetero metrics.
+                            diagnostics.setdefault(token, {})["hetero_skipped"] = (
+                                "no_fitted_result"
+                            )
+                            continue
+
+                        # Build exog from training sor values (const + sor; add sor2 for quadratic)
+                        exog_df = pd.DataFrame({"sor#": sor_vals})
+                        if "quad" in token or "quadratic" in token:
+                            exog_df["sor2"] = exog_df["sor#"] ** 2
+                        try:
+                            exog_with_const = sm.add_constant(
+                                exog_df, has_constant="add"
+                            )
+                        except Exception:
+                            exog_with_const = exog_df
+
+                        hetero_metrics = _compute_hetero_metrics(
+                            resid, sor_vals, exog_with_const
+                        )
+
+                        # Merge metrics defensively
+                        for k, v in hetero_metrics.items():
+                            entry[k] = v
+
+                    except Exception as _e_reg_hetero:
+                        diagnostics.setdefault(token, {})["hetero_exception"] = str(
+                            _e_reg_hetero
+                        )[:200]
+                    continue  # next token
+
+                # Non-regression tokens: compute residuals via the standalone helper (safe)
                 res_df = generate_model_residuals(
                     df_range.copy(), token, input_data_fort
                 )
+
+                # If generator did not produce a residual column, skip
                 resid_col = f"residual_{token}"
                 if resid_col not in res_df.columns:
-                    # No residuals produced for this model; skip
+                    diagnostics.setdefault(token, {})["hetero_skipped"] = "no_residuals"
                     continue
-                # Numeric arrays
+
+                # Build numeric arrays
                 resid = pd.to_numeric(res_df[resid_col], errors="coerce").to_numpy(
                     dtype=float
                 )
@@ -2108,29 +2181,23 @@ def regression_analysis(
                     dtype=float
                 )
 
-                # Build a sensible exog for auxiliary tests (const + sor; include sor2 for quadratic tokens)
+                # Build exog and add constant
                 exog_df = pd.DataFrame({"sor#": sor_vals})
                 if "quad" in token or "quadratic" in token:
                     exog_df["sor2"] = exog_df["sor#"] ** 2
-                # Add constant if missing
                 try:
                     exog_with_const = sm.add_constant(exog_df, has_constant="add")
                 except Exception:
                     exog_with_const = exog_df
 
-                # Compute heteroskedasticity metrics via helper (defined above)
                 hetero_metrics = _compute_hetero_metrics(
                     resid, sor_vals, exog_with_const
                 )
 
-                # Ensure diagnostics entry exists and merge metrics
-                entry = diagnostics.get(token)
-                if not isinstance(entry, dict):
-                    diagnostics[token] = {}
-                    entry = diagnostics[token]
-                # Merge keys (do not overwrite existing high-value keys)
+                # Merge metrics defensively
                 for k, v in hetero_metrics.items():
                     entry[k] = v
+
             except Exception as _e_hetero:
                 # Best-effort: record an excerpt of the exception for diagnostics
                 diagnostics.setdefault(token, {})["hetero_exception"] = str(_e_hetero)[
