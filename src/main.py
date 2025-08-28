@@ -4920,18 +4920,18 @@ def assemble_monte_carlo_report(
             exp_regret_mean = exp_regret_p95 = None
 
         # PMF summary (show top entries)
-        lines.append("PMF (top 10 recommended SORs):")
+        lines.append("PMF (top 10 recommended FORTs):")
         if pmf:
-            # sort by probability desc then sor asc
+            # sort by probability desc then fort asc
             items = sorted(pmf.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
-            for sor, p in items:
-                lines.append(f" - SOR {int(sor):>4} : p = {float(p):.4f}")
+            for fort, p in items:
+                lines.append(f" - FORT {int(fort):>4} : p = {float(p):.4f}")
         else:
             lines.append(" - (no recommendations collected)")
 
         lines.append("")
         lines.append(f"Mode (most frequent)        : {mode}")
-        lines.append(f"Median recommended SOR      : {median}")
+        lines.append(f"Median recommended FORT     : {median}")
         lines.append(f"Central contiguous 50% int. : {central50}")
         lines.append(f"Entropy (nats)              : {entropy_nats}")
         lines.append(f"IQR of recommendations      : {iqr}")
@@ -4941,8 +4941,8 @@ def assemble_monte_carlo_report(
         lines.append("Epsilon-optimal frequencies (top 10):")
         if eps_freq:
             items = sorted(eps_freq.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
-            for sor, f in items:
-                lines.append(f" - SOR {int(sor):>4} : freq = {float(f):.4f}")
+            for fort, f in items:
+                lines.append(f" - FORT {int(fort):>4} : freq = {float(f):.4f}")
         else:
             lines.append(" - (no epsilon-optimal frequencies)")
 
@@ -5381,6 +5381,13 @@ def _orchestrate(
                 logger.exception("Failed to attach Monte Carlo diagnostics")
     except Exception:
         logger.exception("Monte Carlo run failed (continuing pipeline)")
+        # If Monte Carlo was explicitly requested but failed to produce results (mc_summary is None),
+        # do not proceed to generate single-run artifacts or reports.
+        if mc_requested and mc_summary is None:
+            logger.info(
+                "Monte Carlo was requested but failed; no per-run artifacts or report will be produced"
+            )
+            return
 
     # Synthetic-data integration: when requested, synthesize and re-run modeling on the synthetic frame.
     if synthesize_enabled(params_transform):
@@ -5424,76 +5431,76 @@ def _orchestrate(
     best_label, table_text = build_model_comparison(summary.regression_diagnostics)
 
     # Pass the run output dir so plots are written into that directory
-    artifact_paths = render_plots(
-        list_plot_params=list_plot_params,
-        df_included=transformed.df_range,
-        summary=summary,
-        short_hash=short_hash,
-        df_excluded=transformed.df_excluded,
-        output_dir=str(run_output_dir),
-    )
+    if not mc_requested:
+        artifact_paths = render_plots(
+            list_plot_params=list_plot_params,
+            df_included=transformed.df_range,
+            summary=summary,
+            short_hash=short_hash,
+            df_excluded=transformed.df_excluded,
+            output_dir=str(run_output_dir),
+        )
 
-    # Include Monte Carlo artifacts in the artifact list when present.
-    # The Monte Carlo writer may use an optional output_prefix; check both prefixed and unprefixed names.
-    try:
-        if mc_params is not None:
-            mc_prefix = getattr(mc_params, "output_prefix", None)
-            prefixes = [str(mc_prefix)] if mc_prefix else []
-            prefixes.append(None)  # always check the no-prefix variant as well
-            for p in prefixes:
-                prefix_str = f"{p}-" if (p is not None and p != "") else ""
-                sim_name = f"{prefix_str}mc-per-sim-{short_hash}.csv"
-                summary_name = f"{prefix_str}mc-summary-{short_hash}.json"
-                sim_path = run_output_dir / sim_name
-                summary_path = run_output_dir / summary_name
-                if sim_path.exists():
-                    artifact_paths.append(str(sim_path))
-                if summary_path.exists():
-                    artifact_paths.append(str(summary_path))
-    except Exception:
-        logger.exception("Failed to include Monte Carlo artifacts in manifest")
+        # Include Monte Carlo artifacts in the artifact list when present.
+        # The Monte Carlo writer may use an optional output_prefix; check both prefixed and unprefixed names.
+        try:
+            if mc_params is not None:
+                mc_prefix = getattr(mc_params, "output_prefix", None)
+                prefixes = [str(mc_prefix)] if mc_prefix else []
+                prefixes.append(None)  # always check the no-prefix variant as well
+                for p in prefixes:
+                    prefix_str = f"{p}-" if (p is not None and p != "") else ""
+                    sim_name = f"{prefix_str}mc-per-sim-{short_hash}.csv"
+                    summary_name = f"{prefix_str}mc-summary-{short_hash}.json"
+                    sim_path = run_output_dir / sim_name
+                    summary_path = run_output_dir / summary_name
+                    if sim_path.exists():
+                        artifact_paths.append(str(sim_path))
+                    if summary_path.exists():
+                        artifact_paths.append(str(summary_path))
+        except Exception:
+            logger.exception("Failed to include Monte Carlo artifacts in manifest")
 
-    # Write a simple 2-column range CSV and include it in artifacts so it appears in the manifest.
-    range_csv_path = write_range_csv(transformed.df_range, run_output_dir, short_hash)
-    artifact_paths.append(str(range_csv_path))
+        # Write a simple 2-column range CSV and include it in artifacts so it appears in the manifest.
+        range_csv_path = write_range_csv(
+            transformed.df_range, run_output_dir, short_hash
+        )
+        artifact_paths.append(str(range_csv_path))
 
-    # Also write a CSV of the training-only rows (exclude the final fort) and include it as an artifact.
-    training_df = _training_only(transformed.df_range, params_transform.input_data_fort)
-    training_csv_path = write_range_csv(
-        training_df, run_output_dir, f"training-{short_hash}"
-    )
-    artifact_paths.append(str(training_csv_path))
+        # Also write a CSV of the training-only rows (exclude the final fort) and include it as an artifact.
+        training_df = _training_only(
+            transformed.df_range, params_transform.input_data_fort
+        )
+        training_csv_path = write_range_csv(
+            training_df, run_output_dir, f"training-{short_hash}"
+        )
+        artifact_paths.append(str(training_csv_path))
 
-    total_input_rows = int(len(df_range))
-    processed_row_count = int(len(transformed.df_range))
-    excluded_row_count = int(len(transformed.df_excluded))
-    pre_zscore_excluded = max(
-        total_input_rows - processed_row_count - excluded_row_count, 0
-    )
-    counts = {
-        "total_input_rows": total_input_rows,
-        "processed_row_count": processed_row_count,
-        "excluded_row_count": excluded_row_count,
-        "pre_zscore_excluded": pre_zscore_excluded,
-    }
-    manifest = build_manifest_dict(
-        abs_input_posix=abs_input_posix,
-        counts=counts,
-        effective_params=effective_params,
-        hashes=(short_hash, full_hash),
-        artifact_paths=artifact_paths,
-    )
-    # Write manifest into the run output directory
-    write_manifest(str(run_output_dir / f"manifest-{short_hash}.json"), manifest)
+        total_input_rows = int(len(df_range))
+        processed_row_count = int(len(transformed.df_range))
+        excluded_row_count = int(len(transformed.df_excluded))
+        pre_zscore_excluded = max(
+            total_input_rows - processed_row_count - excluded_row_count, 0
+        )
+        counts = {
+            "total_input_rows": total_input_rows,
+            "processed_row_count": processed_row_count,
+            "excluded_row_count": excluded_row_count,
+            "pre_zscore_excluded": pre_zscore_excluded,
+        }
+        manifest = build_manifest_dict(
+            abs_input_posix=abs_input_posix,
+            counts=counts,
+            effective_params=effective_params,
+            hashes=(short_hash, full_hash),
+            artifact_paths=artifact_paths,
+        )
+        # Write manifest into the run output directory
+        write_manifest(str(run_output_dir / f"manifest-{short_hash}.json"), manifest)
 
     # When Monte Carlo was requested and produced results, replace the per-run textual
     # report with an MC-focused aggregate report. Otherwise produce the normal per-run report.
-    try:
-        mc_requested = (
-            mc_params is not None and int(getattr(mc_params, "n_simulations", 0)) > 0
-        )
-    except Exception:
-        mc_requested = False
+    # Reuse mc_requested computed earlier near function start.
 
     if mc_requested and mc_summary is not None:
         # Build MC-focused report and write it as the primary textual report.
