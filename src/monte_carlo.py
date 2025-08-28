@@ -54,7 +54,7 @@ def get_default_monte_carlo_params() -> MonteCarloParams:
         max_attempts=None,
         heteroskedastic_resampling=False,
         selection_policy="priority",
-        output_prefix=None,
+        output_prefix="output_mc",
         # Adaptive epsilon defaults (centralized here)
         epsilon_min=1e-6,
         epsilon_shrink_factor=0.8,
