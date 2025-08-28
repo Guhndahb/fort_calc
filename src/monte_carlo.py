@@ -174,6 +174,7 @@ def run_monte_carlo(
     eps_counts: Dict[int, int] = {}
     recommend_counts: Dict[int, int] = {}
     regrets: List[float] = []
+    debug_rows: List[Dict[str, Any]] = []
 
     # Determine synth target fort used for parameter copying
     synth_fort = (
@@ -412,6 +413,66 @@ def run_monte_carlo(
                 .tolist()
             )
 
+            # Collect debug row for this simulation (sample up to first 10 cost values)
+            try:
+                cost_sample = (
+                    pd.to_numeric(cost_series, errors="coerce")
+                    .dropna()
+                    .to_numpy(dtype=float)[:10]
+                    .tolist()
+                )
+            except Exception:
+                cost_sample = []
+            debug_rows.append(
+                {
+                    "sim_id": int(collected),
+                    "attempt": int(attempts),
+                    "authoritative_token": authoritative_token,
+                    "cost_col": cost_col,
+                    "min_cost_auth": float(min_cost_auth),
+                    "threshold": float(threshold),
+                    "recommended_sor": int(recommended_sor),
+                    "candidate_cost": float(candidate_cost),
+                    "epsilon_optimal_sors": eps_sors,
+                    "cost_sample": cost_sample,
+                }
+            )
+
+            # Diagnostic persistence: if the epsilon-optimal set is large, persist the full
+            # df_results for offline inspection so we can validate sor#/cost alignment,
+            # duplicated sor entries, and exact per-row cost values.
+            try:
+                if (
+                    run_output_dir is not None
+                    and isinstance(eps_sors, (list, tuple))
+                    and len(eps_sors) > 20
+                ):
+                    run_output_dir.mkdir(parents=True, exist_ok=True)
+                    sim_id_for_dump = int(collected)
+                    dump_name = (
+                        f"df-results-sim-{sim_id_for_dump}-{short_hash}.csv"
+                        if short_hash
+                        else f"df-results-sim-{sim_id_for_dump}.csv"
+                    )
+                    dump_path = run_output_dir / dump_name
+                    try:
+                        # sim_summary.df_results is expected to be a DataFrame-like object
+                        pd.DataFrame(sim_summary.df_results).to_csv(
+                            dump_path, index=False
+                        )
+                    except Exception:
+                        # best-effort fallback: coerce to strings and write
+                        try:
+                            pd.DataFrame(sim_summary.df_results).astype(str).to_csv(
+                                dump_path, index=False
+                            )
+                        except Exception:
+                            # swallow errors — diagnostics must not break MC loop
+                            pass
+            except Exception:
+                # Never allow diagnostic persistence to break the main simulation loop
+                pass
+
             # Record counts
             recommend_counts[recommended_sor] = (
                 recommend_counts.get(recommended_sor, 0) + 1
@@ -480,15 +541,33 @@ def run_monte_carlo(
         k: v / max(collected, 1) for k, v in eps_counts.items()
     }
 
-    # Robust choice: smallest sor# with epsilon frequency >= 0.70
+    # Robust choice: pick a single robust SOR based on epsilon-frequency statistics.
+    # Previous behavior selected the smallest SOR with freq >= threshold (which often
+    # returned a low boundary when epsilon-optimal sets were contiguous upward).
+    # New heuristic:
+    #  1. Prefer SORs with epsilon frequency >= threshold_freq.
+    #  2. If none meet the threshold, pick the SOR(s) with the maximum epsilon frequency.
+    #  3. If multiple candidates remain, choose the one closest to the PMF mode (if known),
+    #     otherwise choose the smallest (deterministic) SOR among candidates.
     robust_choice = None
     threshold_freq = 0.70
     if eps_freq_map:
-        candidates_sorted = sorted(eps_freq_map.items(), key=lambda kv: kv[0])
-        for sor, freq in candidates_sorted:
-            if freq >= threshold_freq:
-                robust_choice = int(sor)
-                break
+        # Normalize items to (int_sor, freq)
+        candidates = [(int(k), float(v)) for k, v in eps_freq_map.items()]
+        # Prefer those meeting the frequency threshold
+        above_thresh = [s for s, f in candidates if f >= threshold_freq]
+        if len(above_thresh) > 0:
+            filtered = above_thresh
+        else:
+            # Fall back to SOR(s) with maximum frequency
+            max_freq = max(f for _, f in candidates)
+            filtered = [s for s, f in candidates if f == max_freq]
+        # Tie-breaker: choose candidate closest to the PMF mode if available
+        if mode_val is not None:
+            robust_choice = int(min(filtered, key=lambda s: abs(s - mode_val)))
+        else:
+            # deterministic fallback
+            robust_choice = int(min(filtered))
 
     # Expected regret stats
     regrets_arr = (
@@ -523,6 +602,16 @@ def run_monte_carlo(
                     f"mc-per-sim-{short_hash}.csv" if short_hash else "mc-per-sim.csv"
                 )
                 per_sim_df.to_csv(csv_path, index=False)
+            # debug per-sim sampled numeric diagnostics
+            try:
+                if debug_rows:
+                    dbg_path = run_output_dir / (
+                        f"debug-mc-{short_hash}.csv" if short_hash else "debug-mc.csv"
+                    )
+                    pd.DataFrame(debug_rows).to_csv(dbg_path, index=False)
+            except Exception:
+                # do not fail persistence for debug CSV
+                pass
             # JSON summary
             import json
 

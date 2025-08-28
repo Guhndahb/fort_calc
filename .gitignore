@@ -159,3 +159,6 @@ compare_filters/**
 
 # Validation tests
 output_validation/**
+
+# Monte carlo debug
+tests/mc_debug_output.txt
