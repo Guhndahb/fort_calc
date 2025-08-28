@@ -4936,6 +4936,7 @@ def assemble_monte_carlo_report(
         lines.append(f"Entropy (nats)              : {entropy_nats}")
         lines.append(f"IQR of recommendations      : {iqr}")
         lines.append("")
+
         # Epsilon frequencies (top 10)
         lines.append("Epsilon-optimal frequencies (top 10):")
         if eps_freq:
@@ -4953,11 +4954,91 @@ def assemble_monte_carlo_report(
         lines.append(f" - p95  : {exp_regret_p95}")
         lines.append("")
 
-        # Artifact references (best-effort)
+        # Per-simulation diagnostics summary (fallback counts, epsilon_used summary)
         try:
             prefix = getattr(mc_params, "output_prefix", None)
             prefix_str = f"{prefix}-" if (prefix is not None and prefix != "") else ""
             sim_csv = run_output_dir / f"{prefix_str}mc-per-sim-{short_hash}.csv"
+            if sim_csv.exists():
+                try:
+                    per_sim_df = pd.read_csv(sim_csv)
+                    # Count fallback-to-argmin occurrences (preferred column name when present)
+                    fallback_count = None
+                    if "epsilon_fallback_to_argmin" in per_sim_df.columns:
+                        fallback_count = int(
+                            per_sim_df["epsilon_fallback_to_argmin"].astype(bool).sum()
+                        )
+                    elif "epsilon_fallback_reason" in per_sim_df.columns:
+                        fallback_count = int(
+                            per_sim_df["epsilon_fallback_reason"].notna().sum()
+                        )
+                    if fallback_count is not None:
+                        lines.append(
+                            f"Simulations that fell back to argmin : {fallback_count}"
+                        )
+                        # provide breakdown of reasons when available
+                        if "epsilon_fallback_reason" in per_sim_df.columns:
+                            reason_counts = (
+                                per_sim_df["epsilon_fallback_reason"]
+                                .fillna("(none)")
+                                .value_counts()
+                                .to_dict()
+                            )
+                            lines.append("Fallback reasons (counts):")
+                            for r, c in sorted(
+                                reason_counts.items(),
+                                key=lambda kv: (-kv[1], str(kv[0])),
+                            ):
+                                lines.append(f" - {r}: {int(c)}")
+                    # Epsilon-used summary if available
+                    if "epsilon_used" in per_sim_df.columns:
+                        eps_series = pd.to_numeric(
+                            per_sim_df["epsilon_used"], errors="coerce"
+                        ).dropna()
+                        if len(eps_series) > 0:
+                            eps_mean = float(np.mean(eps_series))
+                            eps_median = float(np.median(eps_series))
+                            eps_min = float(np.min(eps_series))
+                            eps_max = float(np.max(eps_series))
+                            lines.append("Epsilon-used (per-sim) summary:")
+                            lines.append(f" - mean   : {eps_mean:.6g}")
+                            lines.append(f" - median : {eps_median:.6g}")
+                            lines.append(f" - min    : {eps_min:.6g}")
+                            lines.append(f" - max    : {eps_max:.6g}")
+                except Exception:
+                    # best-effort: do not fail report generation if CSV parsing fails
+                    lines.append(
+                        "Per-simulation diagnostics: (failed to read mc-per-sim CSV)"
+                    )
+            else:
+                lines.append("Per-simulation diagnostics: (mc-per-sim CSV not found)")
+        except Exception:
+            lines.append("Per-simulation diagnostics: (unavailable)")
+
+        lines.append("")
+
+        # Representative plot artifacts (search run output dir for plot-sim-* files)
+        try:
+            rep_svgs = sorted(
+                str(p.name) for p in run_output_dir.glob("plot-sim-*.svg")
+            )
+            rep_pngs = sorted(
+                str(p.name) for p in run_output_dir.glob("plot-sim-*.png")
+            )
+            rep_artifacts = rep_svgs + rep_pngs
+            lines.append("Representative sim plots (artifacts):")
+            if rep_artifacts:
+                for a in rep_artifacts:
+                    lines.append(f" - {a}")
+            else:
+                lines.append(" - (no representative sim plots found)")
+        except Exception:
+            lines.append("Representative sim plots: (unavailable)")
+
+        lines.append("")
+
+        # Artifact references (best-effort)
+        try:
             sim_json = run_output_dir / f"{prefix_str}mc-summary-{short_hash}.json"
             lines.append("Persisted Monte Carlo artifacts:")
             if sim_csv.exists():

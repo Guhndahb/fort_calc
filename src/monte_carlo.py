@@ -14,11 +14,13 @@ class MonteCarloParams:
     max_attempts: Optional[int] = None
     heteroskedastic_resampling: bool = False
     selection_policy: str = "priority"  # "priority" or "synthesize"
-    output_prefix: Optional[str] = "output_mc"
+    output_prefix: Optional[str] = None
     # Adaptive epsilon tuning parameters (per-simulation)
+    # Note: defaults are chosen to balance reducing large ε-optimal sets while avoiding
+    # excessive fallbacks to argmin. Keep these synchronized with get_default_monte_carlo_params().
     epsilon_min: float = 1e-6
-    epsilon_shrink_factor: float = 0.5
-    epsilon_target_size: int = 5
+    epsilon_shrink_factor: float = 0.8
+    epsilon_target_size: int = 3
     epsilon_max_iterations: int = 10
 
 
@@ -54,7 +56,7 @@ def get_default_monte_carlo_params() -> MonteCarloParams:
         max_attempts=None,
         heteroskedastic_resampling=False,
         selection_policy="priority",
-        output_prefix="output_mc",
+        output_prefix=None,
         # Adaptive epsilon defaults (centralized here)
         epsilon_min=1e-6,
         epsilon_shrink_factor=0.8,
@@ -530,10 +532,16 @@ def run_monte_carlo(
                 ):
                     run_output_dir.mkdir(parents=True, exist_ok=True)
                     sim_id_for_dump = int(collected)
+                    # Honor optional output_prefix when persisting large debug df-results dumps
+                    prefix_str = (
+                        f"{mc_params.output_prefix}-"
+                        if getattr(mc_params, "output_prefix", None)
+                        else ""
+                    )
                     dump_name = (
-                        f"df-results-sim-{sim_id_for_dump}-{short_hash}.csv"
+                        f"{prefix_str}df-results-sim-{sim_id_for_dump}-{short_hash}.csv"
                         if short_hash
-                        else f"df-results-sim-{sim_id_for_dump}.csv"
+                        else f"{prefix_str}df-results-sim-{sim_id_for_dump}.csv"
                     )
                     dump_path = run_output_dir / dump_name
                     try:
@@ -685,17 +693,27 @@ def run_monte_carlo(
     try:
         if run_output_dir is not None:
             run_output_dir.mkdir(parents=True, exist_ok=True)
+            # honor optional output_prefix for all Monte Carlo artifacts
+            prefix_str = (
+                f"{mc_params.output_prefix}-"
+                if getattr(mc_params, "output_prefix", None)
+                else ""
+            )
             # per-sim CSV
             if per_sim_df is not None and not per_sim_df.empty:
                 csv_path = run_output_dir / (
-                    f"mc-per-sim-{short_hash}.csv" if short_hash else "mc-per-sim.csv"
+                    f"{prefix_str}mc-per-sim-{short_hash}.csv"
+                    if short_hash
+                    else f"{prefix_str}mc-per-sim.csv"
                 )
                 per_sim_df.to_csv(csv_path, index=False)
             # debug per-sim sampled numeric diagnostics
             try:
                 if debug_rows:
                     dbg_path = run_output_dir / (
-                        f"debug-mc-{short_hash}.csv" if short_hash else "debug-mc.csv"
+                        f"{prefix_str}debug-mc-{short_hash}.csv"
+                        if short_hash
+                        else f"{prefix_str}debug-mc.csv"
                     )
                     pd.DataFrame(debug_rows).to_csv(dbg_path, index=False)
             except Exception:
@@ -718,7 +736,9 @@ def run_monte_carlo(
                 "diagnostics": diagnostics,
             }
             json_path = run_output_dir / (
-                f"mc-summary-{short_hash}.json" if short_hash else "mc-summary.json"
+                f"{prefix_str}mc-summary-{short_hash}.json"
+                if short_hash
+                else f"{prefix_str}mc-summary.json"
             )
             json_path.write_text(json.dumps(summary_obj, indent=2), encoding="utf-8")
     except Exception:
