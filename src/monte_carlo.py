@@ -9,7 +9,7 @@ import pandas as pd
 @dataclass
 class MonteCarloParams:
     n_simulations: int = 1000
-    epsilon_fraction: float = 0.005
+    epsilon_start: float = 0.005
     random_seed: Optional[int] = None
     max_attempts: Optional[int] = None
     heteroskedastic_resampling: bool = False
@@ -51,7 +51,7 @@ def get_default_monte_carlo_params() -> MonteCarloParams:
     # Keep lightweight here to avoid importing src.main at module import time.
     return MonteCarloParams(
         n_simulations=1000,
-        epsilon_fraction=0.005,
+        epsilon_start=0.005,
         random_seed=None,
         max_attempts=None,
         heteroskedastic_resampling=False,
@@ -416,9 +416,9 @@ def run_monte_carlo(
             regrets.append(regret)
 
             # Adaptive epsilon-optimal set for this simulation.
-            # Start from mc_params.epsilon_fraction and shrink multiplicatively until we
-            # hit a target number of SORs (or a minimum epsilon floor).
-            eps = float(mc_params.epsilon_fraction)
+            # Start from mc_params.epsilon_start and shrink multiplicatively until we
+            # hit a target number of FORTs (or a minimum epsilon floor).
+            eps = float(mc_params.epsilon_start)
             min_cost_auth = float(np.nanmin(cost_series.dropna().to_numpy()))
             # Adaptive parameters (with safe fallbacks)
             eps_min = float(getattr(mc_params, "epsilon_min", 1e-6))

@@ -4920,18 +4920,18 @@ def assemble_monte_carlo_report(
             exp_regret_mean = exp_regret_p95 = None
 
         # PMF summary (show top entries)
-        lines.append("PMF (top 10 recommended FORTs):")
+        lines.append("PMF (top 10 recommended SORs):")
         if pmf:
-            # sort by probability desc then fort asc
+            # sort by probability desc then sor asc
             items = sorted(pmf.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
-            for fort, p in items:
-                lines.append(f" - FORT {int(fort):>4} : p = {float(p):.4f}")
+            for sor, p in items:
+                lines.append(f" - SOR {int(sor):>4} : p = {float(p):.4f}")
         else:
             lines.append(" - (no recommendations collected)")
 
         lines.append("")
         lines.append(f"Mode (most frequent)        : {mode}")
-        lines.append(f"Median recommended FORT     : {median}")
+        lines.append(f"Median recommended SOR      : {median}")
         lines.append(f"Central contiguous 50% int. : {central50}")
         lines.append(f"Entropy (nats)              : {entropy_nats}")
         lines.append(f"IQR of recommendations      : {iqr}")
@@ -4941,8 +4941,8 @@ def assemble_monte_carlo_report(
         lines.append("Epsilon-optimal frequencies (top 10):")
         if eps_freq:
             items = sorted(eps_freq.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
-            for fort, f in items:
-                lines.append(f" - FORT {int(fort):>4} : freq = {float(f):.4f}")
+            for sor, f in items:
+                lines.append(f" - SOR {int(sor):>4} : freq = {float(f):.4f}")
         else:
             lines.append(" - (no epsilon-optimal frequencies)")
 
@@ -5807,10 +5807,16 @@ def _build_cli_parser():
         help="Number of Monte Carlo simulations to run (0 disables MC).",
     )
     g_mc.add_argument(
-        "--mc-epsilon-fraction",
+        "--mc-epsilon-start",
         type=float,
-        dest="mc_epsilon_fraction",
-        help="Relative epsilon for epsilon-optimal definition (fraction, e.g., 0.005).",
+        dest="mc_epsilon_start",
+        help="Starting relative epsilon for epsilon-optimal definition (fraction, e.g., 0.005).",
+    )
+    g_mc.add_argument(
+        "--mc-epsilon-min",
+        type=float,
+        dest="mc_epsilon_min",
+        help="Minimum epsilon floor for adaptive shrinking (e.g., 1e-6).",
     )
     g_mc.add_argument(
         "--mc-random-seed",
@@ -5854,7 +5860,7 @@ def _build_cli_parser():
         "--mc-epsilon-target-size",
         type=int,
         dest="mc_epsilon_target_size",
-        help="Target number of SORs desired per-simulation for epsilon-optimal set.",
+        help="Target number of FORTs desired per-simulation for epsilon-optimal set.",
     )
     g_mc.add_argument(
         "--mc-epsilon-max-iterations",
@@ -6082,9 +6088,8 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
     d_mc = get_default_monte_carlo_params()
     mc_params = MonteCarloParams(
         n_simulations=get_arg_or_default("mc_n_simulations", d_mc.n_simulations),
-        epsilon_fraction=get_arg_or_default(
-            "mc_epsilon_fraction", d_mc.epsilon_fraction
-        ),
+        epsilon_start=get_arg_or_default("mc_epsilon_start", d_mc.epsilon_start),
+        epsilon_min=get_arg_or_default("mc_epsilon_min", d_mc.epsilon_min),
         random_seed=getattr(args, "mc_random_seed", d_mc.random_seed),
         max_attempts=getattr(args, "mc_max_attempts", d_mc.max_attempts),
         heteroskedastic_resampling=bool(
