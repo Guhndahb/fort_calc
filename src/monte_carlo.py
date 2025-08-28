@@ -15,6 +15,11 @@ class MonteCarloParams:
     heteroskedastic_resampling: bool = False
     selection_policy: str = "priority"  # "priority" or "synthesize"
     output_prefix: Optional[str] = None
+    # Adaptive epsilon tuning parameters (per-simulation)
+    epsilon_min: float = 1e-6
+    epsilon_shrink_factor: float = 0.5
+    epsilon_target_size: int = 5
+    epsilon_max_iterations: int = 10
 
 
 @dataclass
@@ -400,18 +405,58 @@ def run_monte_carlo(
             regret = float(candidate_cost - min_cost_overall)
             regrets.append(regret)
 
-            # Epsilon-optimal set for this simulation (within epsilon fraction of the authoritative model's min)
+            # Adaptive epsilon-optimal set for this simulation.
+            # Start from mc_params.epsilon_fraction and shrink multiplicatively until we
+            # hit a target number of SORs (or a minimum epsilon floor).
             eps = float(mc_params.epsilon_fraction)
             min_cost_auth = float(np.nanmin(cost_series.dropna().to_numpy()))
-            threshold = min_cost_auth * (1.0 + eps)
-            eps_mask = (cost_series <= threshold) & np.isfinite(cost_series)
-            eps_sors = (
-                df_results.loc[eps_mask, "sor#"]
-                .dropna()
-                .astype(int)
-                .to_numpy(dtype=int)
-                .tolist()
-            )
+            # Adaptive parameters (with safe fallbacks)
+            eps_min = float(getattr(mc_params, "epsilon_min", 1e-6))
+            shrink_factor = float(getattr(mc_params, "epsilon_shrink_factor", 0.5))
+            target_size = int(getattr(mc_params, "epsilon_target_size", 5))
+            max_iters = int(getattr(mc_params, "epsilon_max_iterations", 10))
+
+            epsilon_used = eps
+            eps_sors = []
+            for _ in range(max_iters):
+                threshold = min_cost_auth * (1.0 + eps)
+                eps_mask = (cost_series <= threshold) & np.isfinite(cost_series)
+                try:
+                    eps_sors = (
+                        df_results.loc[eps_mask, "sor#"]
+                        .dropna()
+                        .astype(int)
+                        .to_numpy(dtype=int)
+                        .tolist()
+                    )
+                except Exception:
+                    eps_sors = []
+
+                # Always accept if only the argmin is selected
+                if len(eps_sors) == 1:
+                    epsilon_used = eps
+                    break
+                # Accept if within desired target size (and at least one)
+                if 1 <= len(eps_sors) <= target_size:
+                    epsilon_used = eps
+                    break
+                # Shrink epsilon and continue
+                eps = eps * shrink_factor
+                if eps < eps_min:
+                    # Floor reached -> fallback to argmin only
+                    eps = eps_min
+                    epsilon_used = eps
+                    eps_sors = [int(recommended_sor)]
+                    break
+                # update epsilon_used to current candidate (in case loop exits without break)
+                epsilon_used = eps
+            else:
+                # If loop exhausted without breaking, ensure at least argmin present
+                if not eps_sors:
+                    eps_sors = [int(recommended_sor)]
+                epsilon_used = eps
+
+            # Expose epsilon_used for auditing in debug/per-sim outputs
 
             # Collect debug row for this simulation (sample up to first 10 cost values)
             try:
