@@ -5294,9 +5294,19 @@ def _orchestrate(
     Orchestrate the full pipeline given explicit parameter objects.
     Split from main() so the CLI can remain thin and tests can call this directly.
     """
-    # Compute a single global run timestamp at function start and create run dir
+    # Compute a single global run timestamp at function start and create run dir.
+    # Choose a separate output tree for Monte Carlo runs so single-run artifacts do not
+    # accidentally land in the ordinary "output" directory when MC is requested.
     global_run_timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-    run_output_dir = Path("output") / global_run_timestamp
+    mc_requested = (
+        mc_params is not None and int(getattr(mc_params, "n_simulations", 0)) > 0
+    )
+    run_output_dir = (
+        Path("output_mc") / global_run_timestamp
+        if mc_requested
+        else Path("output") / global_run_timestamp
+    )
+    # Create the selected run output directory (same behavior as before)
     run_output_dir.mkdir(parents=True, exist_ok=True)
 
     abs_input_posix, short_hash, full_hash, effective_params = build_run_identity(
@@ -5316,6 +5326,13 @@ def _orchestrate(
             and int(getattr(mc_params, "n_simulations", 0)) > 0
         ):
             import hashlib
+
+            # Require an explicit synthesize_model to be set when Monte Carlo is requested.
+            # Fail fast rather than attempting to auto-select or default a model.
+            if not getattr(params_transform, "synthesize_model", None):
+                raise ValueError(
+                    "Monte Carlo requires params_transform.synthesize_model to be set"
+                )
 
             try:
                 from src.monte_carlo import run_monte_carlo
