@@ -5738,6 +5738,25 @@ def _build_cli_parser():
         dest="mc_output_prefix",
         help="Optional prefix for Monte Carlo output directory/artifacts.",
     )
+    # Adaptive-epsilon tuning CLI knobs (wire through to MonteCarloParams)
+    g_mc.add_argument(
+        "--mc-epsilon-shrink-factor",
+        type=float,
+        dest="mc_epsilon_shrink_factor",
+        help="Multiplicative shrink factor for adaptive epsilon (0 < factor < 1).",
+    )
+    g_mc.add_argument(
+        "--mc-epsilon-target-size",
+        type=int,
+        dest="mc_epsilon_target_size",
+        help="Target number of SORs desired per-simulation for epsilon-optimal set.",
+    )
+    g_mc.add_argument(
+        "--mc-epsilon-max-iterations",
+        type=int,
+        dest="mc_epsilon_max_iterations",
+        help="Maximum iterations to attempt shrinking epsilon per simulation.",
+    )
 
     return parser
 

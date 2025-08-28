@@ -14,7 +14,7 @@ class MonteCarloParams:
     max_attempts: Optional[int] = None
     heteroskedastic_resampling: bool = False
     selection_policy: str = "priority"  # "priority" or "synthesize"
-    output_prefix: Optional[str] = None
+    output_prefix: Optional[str] = "output_mc"
     # Adaptive epsilon tuning parameters (per-simulation)
     epsilon_min: float = 1e-6
     epsilon_shrink_factor: float = 0.5
@@ -42,6 +42,9 @@ def get_default_monte_carlo_params() -> MonteCarloParams:
     """
     Derive Monte Carlo defaults. Keep conservative defaults independent of pipeline
     defaults while allowing deterministic behavior via seed when needed.
+
+    NOTE: This function is the single point of authority for CLI-visible Monte Carlo
+    defaults (so CLI help / _args_to_params can read them and keep behavior consistent).
     """
     # Keep lightweight here to avoid importing src.main at module import time.
     return MonteCarloParams(
@@ -52,6 +55,11 @@ def get_default_monte_carlo_params() -> MonteCarloParams:
         heteroskedastic_resampling=False,
         selection_policy="priority",
         output_prefix=None,
+        # Adaptive epsilon defaults (centralized here)
+        epsilon_min=1e-6,
+        epsilon_shrink_factor=0.8,
+        epsilon_target_size=3,
+        epsilon_max_iterations=10,
     )
 
 
@@ -419,6 +427,9 @@ def run_monte_carlo(
             epsilon_used = eps
             eps_sors = []
             epsilon_iterations = 0
+            # Fallback trackers for diagnostic persistence
+            epsilon_fallback_to_argmin = False
+            epsilon_fallback_reason = None
             for _ in range(max_iters):
                 epsilon_iterations += 1
                 threshold = min_cost_auth * (1.0 + eps)
@@ -449,13 +460,25 @@ def run_monte_carlo(
                     eps = eps_min
                     epsilon_used = eps
                     eps_sors = [int(recommended_sor)]
+                    epsilon_fallback_to_argmin = True
+                    epsilon_fallback_reason = "epsilon_floor_reached"
                     break
                 # update epsilon_used to current candidate (in case loop exits without break)
                 epsilon_used = eps
 
-            # If loop exhausted without breaking, ensure at least argmin present
+            # If loop exhausted without breaking, enforce deterministic fallback when appropriate
             if epsilon_iterations == 0:
                 epsilon_iterations = 0
+            # If we reached max iterations but still have too many epsilon members, fallback to argmin
+            if (
+                (epsilon_iterations >= max_iters)
+                and isinstance(eps_sors, (list, tuple))
+                and len(eps_sors) > target_size
+            ):
+                epsilon_fallback_to_argmin = True
+                epsilon_fallback_reason = "max_iterations_exceeded"
+                eps_sors = [int(recommended_sor)]
+                epsilon_used = float(eps if eps >= eps_min else eps_min)
             if not eps_sors:
                 eps_sors = [int(recommended_sor)]
                 # ensure epsilon_used was set sensibly
@@ -487,6 +510,12 @@ def run_monte_carlo(
                     "cost_sample": cost_sample,
                     "epsilon_used": float(epsilon_used),
                     "epsilon_iterations": int(epsilon_iterations),
+                    "epsilon_fallback_to_argmin": bool(epsilon_fallback_to_argmin),
+                    "epsilon_fallback_reason": (
+                        str(epsilon_fallback_reason)
+                        if epsilon_fallback_reason is not None
+                        else None
+                    ),
                 }
             )
 
@@ -545,6 +574,12 @@ def run_monte_carlo(
                     "synth_diag": synth_diag,
                     "epsilon_used": float(epsilon_used),
                     "epsilon_iterations": int(epsilon_iterations),
+                    "epsilon_fallback_to_argmin": bool(epsilon_fallback_to_argmin),
+                    "epsilon_fallback_reason": (
+                        str(epsilon_fallback_reason)
+                        if epsilon_fallback_reason is not None
+                        else None
+                    ),
                 }
             )
 
