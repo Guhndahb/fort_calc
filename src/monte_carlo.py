@@ -429,6 +429,9 @@ def run_monte_carlo(
             epsilon_used = eps
             eps_sors = []
             epsilon_iterations = 0
+            # Track the last non-empty epsilon-optimal set (and the epsilon that produced it)
+            last_non_empty_eps_sors: Optional[List[int]] = None
+            last_non_empty_epsilon: Optional[float] = None
             # Fallback trackers for diagnostic persistence
             epsilon_fallback_to_argmin = False
             epsilon_fallback_reason = None
@@ -447,6 +450,11 @@ def run_monte_carlo(
                 except Exception:
                     eps_sors = []
 
+                # Record last non-empty set for potential fallback
+                if isinstance(eps_sors, (list, tuple)) and len(eps_sors) > 0:
+                    last_non_empty_eps_sors = list(eps_sors)
+                    last_non_empty_epsilon = float(eps)
+
                 # Always accept if only the argmin is selected
                 if len(eps_sors) == 1:
                     epsilon_used = eps
@@ -458,12 +466,24 @@ def run_monte_carlo(
                 # Shrink epsilon and continue
                 eps = eps * shrink_factor
                 if eps < eps_min:
-                    # Floor reached -> fallback to argmin only
+                    # Floor reached -> try to use last non-empty epsilon set if available,
+                    # otherwise fall back to argmin.
                     eps = eps_min
-                    epsilon_used = eps
-                    eps_sors = [int(recommended_sor)]
-                    epsilon_fallback_to_argmin = True
-                    epsilon_fallback_reason = "epsilon_floor_reached"
+                    if last_non_empty_eps_sors is not None:
+                        # Use the most recent non-empty epsilon set we observed
+                        eps_sors = list(last_non_empty_eps_sors)
+                        epsilon_used = float(last_non_empty_epsilon)
+                        # Do not mark this as fallback-to-argmin since we selected an epsilon-set
+                        epsilon_fallback_to_argmin = False
+                        epsilon_fallback_reason = (
+                            "epsilon_floor_reached_used_last_nonempty"
+                        )
+                    else:
+                        # No epsilon set ever found -> deterministic fallback to argmin
+                        epsilon_used = float(eps)
+                        eps_sors = [int(recommended_sor)]
+                        epsilon_fallback_to_argmin = True
+                        epsilon_fallback_reason = "epsilon_floor_reached_no_nonempty"
                     break
                 # update epsilon_used to current candidate (in case loop exits without break)
                 epsilon_used = eps
@@ -471,20 +491,36 @@ def run_monte_carlo(
             # If loop exhausted without breaking, enforce deterministic fallback when appropriate
             if epsilon_iterations == 0:
                 epsilon_iterations = 0
-            # If we reached max iterations but still have too many epsilon members, fallback to argmin
+            # If we reached max iterations but still have too many epsilon members, prefer
+            # the last non-empty epsilon set instead of immediately falling back to argmin.
             if (
                 (epsilon_iterations >= max_iters)
                 and isinstance(eps_sors, (list, tuple))
                 and len(eps_sors) > target_size
             ):
-                epsilon_fallback_to_argmin = True
-                epsilon_fallback_reason = "max_iterations_exceeded"
-                eps_sors = [int(recommended_sor)]
-                epsilon_used = float(eps if eps >= eps_min else eps_min)
+                if last_non_empty_eps_sors is not None:
+                    # Use the last non-empty epsilon set we observed
+                    eps_sors = list(last_non_empty_eps_sors)
+                    epsilon_used = float(last_non_empty_epsilon)
+                    epsilon_fallback_to_argmin = False
+                    epsilon_fallback_reason = (
+                        "max_iterations_exceeded_used_last_nonempty"
+                    )
+                else:
+                    # No epsilon set observed at all -> fallback to argmin
+                    epsilon_fallback_to_argmin = True
+                    epsilon_fallback_reason = "max_iterations_exceeded_no_nonempty"
+                    eps_sors = [int(recommended_sor)]
+                    epsilon_used = float(eps if eps >= eps_min else eps_min)
+            # If nothing selected at all, try last_non_empty, else argmin as absolute fallback
             if not eps_sors:
-                eps_sors = [int(recommended_sor)]
-                # ensure epsilon_used was set sensibly
-                epsilon_used = float(eps if eps >= eps_min else eps_min)
+                if last_non_empty_eps_sors is not None:
+                    eps_sors = list(last_non_empty_eps_sors)
+                    epsilon_used = float(last_non_empty_epsilon)
+                else:
+                    eps_sors = [int(recommended_sor)]
+                    # ensure epsilon_used was set sensibly
+                    epsilon_used = float(eps if eps >= eps_min else eps_min)
 
             # Expose epsilon_used for auditing in debug/per-sim outputs
 
