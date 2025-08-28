@@ -418,7 +418,9 @@ def run_monte_carlo(
 
             epsilon_used = eps
             eps_sors = []
+            epsilon_iterations = 0
             for _ in range(max_iters):
+                epsilon_iterations += 1
                 threshold = min_cost_auth * (1.0 + eps)
                 eps_mask = (cost_series <= threshold) & np.isfinite(cost_series)
                 try:
@@ -450,11 +452,14 @@ def run_monte_carlo(
                     break
                 # update epsilon_used to current candidate (in case loop exits without break)
                 epsilon_used = eps
-            else:
-                # If loop exhausted without breaking, ensure at least argmin present
-                if not eps_sors:
-                    eps_sors = [int(recommended_sor)]
-                epsilon_used = eps
+
+            # If loop exhausted without breaking, ensure at least argmin present
+            if epsilon_iterations == 0:
+                epsilon_iterations = 0
+            if not eps_sors:
+                eps_sors = [int(recommended_sor)]
+                # ensure epsilon_used was set sensibly
+                epsilon_used = float(eps if eps >= eps_min else eps_min)
 
             # Expose epsilon_used for auditing in debug/per-sim outputs
 
@@ -480,6 +485,8 @@ def run_monte_carlo(
                     "candidate_cost": float(candidate_cost),
                     "epsilon_optimal_sors": eps_sors,
                     "cost_sample": cost_sample,
+                    "epsilon_used": float(epsilon_used),
+                    "epsilon_iterations": int(epsilon_iterations),
                 }
             )
 
@@ -536,6 +543,8 @@ def run_monte_carlo(
                     "regret": float(regret),
                     "epsilon_optimal_sors": eps_sors,
                     "synth_diag": synth_diag,
+                    "epsilon_used": float(epsilon_used),
+                    "epsilon_iterations": int(epsilon_iterations),
                 }
             )
 
