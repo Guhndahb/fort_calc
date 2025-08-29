@@ -5546,6 +5546,10 @@ def _orchestrate(
     # Choose a separate output tree for Monte Carlo runs so single-run artifacts do not
     # accidentally land in the ordinary "output" directory when MC is requested.
     global_run_timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    # Monte Carlo is considered requested only when mc_params.n_simulations > 0.
+    # With the new explicit opt-in flag (--monte-carlo) the n_simulations value will be
+    # set to 0 unless the user explicitly opts in; this prevents accidental MC runs
+    # inferred from other default MC knobs.
     mc_requested = (
         mc_params is not None and int(getattr(mc_params, "n_simulations", 0)) > 0
     )
@@ -6048,6 +6052,24 @@ def _build_cli_parser():
 
     # Monte Carlo parameters (optional - disabled by default)
     g_mc = parser.add_argument_group("MonteCarloParams")
+    # Explicit opt-in flag for Monte Carlo runs. Use --monte-carlo to enable MC behavior;
+    # leaving this unset (None) or passing --no-monte-carlo keeps runtime MC disabled even
+    # when other MC-related numeric flags are provided. Default is None here so that
+    # _args_to_params can decide final runtime semantics.
+    g_mc.add_argument(
+        "--monte-carlo",
+        dest="monte_carlo",
+        action="store_true",
+        default=None,
+        help="Enable Monte Carlo runs (opt-in).",
+    )
+    # Hidden/no-op explicit disable counterpart to allow scripts to force-disable MC.
+    g_mc.add_argument(
+        "--no-monte-carlo",
+        dest="monte_carlo",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
     g_mc.add_argument(
         "--mc-n-simulations",
         type=int,
@@ -6350,8 +6372,23 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
         from monte_carlo import MonteCarloParams, get_default_monte_carlo_params
 
     d_mc = get_default_monte_carlo_params()
+    # Determine explicit user intent for Monte Carlo via the new --monte-carlo / --no-monte-carlo flags.
+    # args.monte_carlo may be True (opt-in), False (explicit opt-out), or None (unspecified).
+    mc_opt_in = getattr(args, "monte_carlo", None)
+    user_mc_n = getattr(args, "mc_n_simulations", None)
+    if mc_opt_in is True:
+        # User explicitly opted in: respect provided mc_n_simulations when present,
+        # otherwise fall back to policy default d_mc.n_simulations.
+        computed_n_simulations = (
+            user_mc_n if user_mc_n is not None else d_mc.n_simulations
+        )
+    else:
+        # User did not opt in (False or None): do NOT infer Monte Carlo even if the user
+        # provided --mc-n-simulations. In these cases runtime Monte Carlo stays disabled.
+        # This prevents accidental MC runs when defaults for other MC params are non-zero.
+        computed_n_simulations = 0
     mc_params = MonteCarloParams(
-        n_simulations=get_arg_or_default("mc_n_simulations", d_mc.n_simulations),
+        n_simulations=computed_n_simulations,
         epsilon_start=get_arg_or_default("mc_epsilon_start", d_mc.epsilon_start),
         epsilon_min=get_arg_or_default("mc_epsilon_min", d_mc.epsilon_min),
         random_seed=getattr(args, "mc_random_seed", d_mc.random_seed),
