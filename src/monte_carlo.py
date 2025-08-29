@@ -391,7 +391,7 @@ def run_monte_carlo(
                 failures.append({"attempt": attempts, "reason": "idxmin_failed"})
                 continue
             try:
-                recommended_sor = int(df_results.loc[idx_min, "sor#"])
+                recommended_fort = int(df_results.loc[idx_min, "sor#"])
                 candidate_cost = float(cost_series.loc[idx_min])
             except Exception:
                 failures.append(
@@ -472,7 +472,7 @@ def run_monte_carlo(
 
                 # If no finite costs, deterministic fallback to argmin
                 if cost_df.empty:
-                    eps_sors = [int(recommended_sor)]
+                    eps_sors = [int(recommended_fort)]
                     epsilon_used = 0.0
                     epsilon_iterations = len(eps_sors)
                     epsilon_fallback_reason = "auto_mode"
@@ -484,7 +484,7 @@ def run_monte_carlo(
                         try:
                             argmin_sor = int(cost_df.iloc[0]["sor#"])
                         except Exception:
-                            argmin_sor = int(recommended_sor)
+                            argmin_sor = int(recommended_fort)
                         eps_sors = [argmin_sor]
                         epsilon_used = 0.0
                         epsilon_iterations = 1
@@ -503,7 +503,7 @@ def run_monte_carlo(
                                 .tolist()
                             )
                         except Exception:
-                            eps_sors = [int(recommended_sor)]
+                            eps_sors = [int(recommended_fort)]
                         # Compute epsilon_used as relative gap of worst included element
                         try:
                             best_val = float(selected["__cost"].iloc[0])
@@ -586,7 +586,7 @@ def run_monte_carlo(
                         else:
                             # No epsilon set ever found -> deterministic fallback to argmin
                             epsilon_used = float(eps)
-                            eps_sors = [int(recommended_sor)]
+                            eps_sors = [int(recommended_fort)]
                             epsilon_fallback_to_argmin = True
                             epsilon_fallback_reason = (
                                 "epsilon_floor_reached_no_nonempty"
@@ -617,7 +617,7 @@ def run_monte_carlo(
                     # No epsilon set observed at all -> fallback to argmin
                     epsilon_fallback_to_argmin = True
                     epsilon_fallback_reason = "max_iterations_exceeded_no_nonempty"
-                    eps_sors = [int(recommended_sor)]
+                    eps_sors = [int(recommended_fort)]
                     epsilon_used = float(eps if eps >= eps_min else eps_min)
             # If nothing selected at all, try last_non_empty, else argmin as absolute fallback
             if not eps_sors:
@@ -625,7 +625,7 @@ def run_monte_carlo(
                     eps_sors = list(last_non_empty_eps_sors)
                     epsilon_used = float(last_non_empty_epsilon)
                 else:
-                    eps_sors = [int(recommended_sor)]
+                    eps_sors = [int(recommended_fort)]
                     # ensure epsilon_used was set sensibly
                     epsilon_used = float(eps if eps >= eps_min else eps_min)
 
@@ -660,7 +660,7 @@ def run_monte_carlo(
                     "cost_col": cost_col,
                     "min_cost_auth": float(min_cost_auth),
                     "threshold": float(threshold) if np.isfinite(threshold) else None,
-                    "recommended_sor": int(recommended_sor),
+                    "recommended_fort": int(recommended_fort),
                     "candidate_cost": float(candidate_cost),
                     "epsilon_optimal_sors": eps_sors,
                     "cost_sample": cost_sample,
@@ -717,8 +717,8 @@ def run_monte_carlo(
                 pass
 
             # Record counts
-            recommend_counts[recommended_sor] = (
-                recommend_counts.get(recommended_sor, 0) + 1
+            recommend_counts[recommended_fort] = (
+                recommend_counts.get(recommended_fort, 0) + 1
             )
             for s in eps_sors:
                 eps_counts[s] = eps_counts.get(s, 0) + 1
@@ -727,7 +727,7 @@ def run_monte_carlo(
                 {
                     "sim_id": collected,
                     "attempt": attempts,
-                    "recommended_sor": int(recommended_sor),
+                    "recommended_fort": int(recommended_fort),
                     "candidate_cost": float(candidate_cost),
                     "min_cost_auth": float(min_cost_auth),
                     "min_cost_overall": float(min_cost_overall),
@@ -768,7 +768,7 @@ def run_monte_carlo(
 
     # Median & IQR of recommended integers
     recommendations = (
-        np.array(sorted([int(r) for r in per_sim_df["recommended_sor"].to_numpy()]))
+        np.array(sorted([int(r) for r in per_sim_df["recommended_fort"].to_numpy()]))
         if not per_sim_df.empty
         else np.array([], dtype=int)
     )

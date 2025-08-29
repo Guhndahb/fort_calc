@@ -5052,6 +5052,254 @@ def assemble_monte_carlo_report(
         except Exception:
             lines.append("Persisted Monte Carlo artifacts: (unavailable)")
 
+        # Monte Carlo FORT Recommendation
+        try:
+            lines.append("")
+            lines.append("Monte Carlo FORT Recommendation")
+            lines.append("==========================")
+
+            # Determine best choice (robust_choice > mode > highest PMF key)
+            best_choice = None
+            try:
+                if (
+                    hasattr(mc_summary, "robust_choice")
+                    and getattr(mc_summary, "robust_choice", None) is not None
+                ):
+                    best_choice = int(getattr(mc_summary, "robust_choice"))
+                elif getattr(mc_summary, "mode", None) is not None:
+                    best_choice = int(getattr(mc_summary, "mode"))
+                else:
+                    # pmf keys might be strings or ints
+                    try:
+                        pmf_items = list(pmf.items()) if isinstance(pmf, dict) else []
+                        if pmf_items:
+                            best_choice = int(
+                                sorted(pmf_items, key=lambda kv: (-kv[1], kv[0]))[0][0]
+                            )
+                    except Exception:
+                        best_choice = None
+            except Exception:
+                best_choice = None
+
+            # Other strong candidates: PMF >= 0.25 excluding best
+            other_candidates: list[str] = []
+            try:
+                if isinstance(pmf, dict):
+                    for k, v in pmf.items():
+                        try:
+                            ki = int(k)
+                        except Exception:
+                            # skip keys we cannot interpret as integers
+                            continue
+                        try:
+                            pv = float(v)
+                        except Exception:
+                            continue
+                        if best_choice is not None and ki == int(best_choice):
+                            continue
+                        if pv >= 0.25:
+                            other_candidates.append(str(ki))
+            except Exception:
+                other_candidates = []
+            others_str = ", ".join(other_candidates) if other_candidates else "(none)"
+
+            # Confidence: percentage selected and closeness to optimal cost
+            selected_pct_str = "-"
+            closeness_str = "-"
+            try:
+                p_val = None
+                if isinstance(pmf, dict):
+                    # attempt multiple key forms
+                    for key_form in (
+                        best_choice,
+                        str(best_choice),
+                        int(best_choice) if best_choice is not None else None,
+                    ):
+                        try:
+                            if key_form is None:
+                                continue
+                            raw = pmf.get(key_form)
+                            if raw is None and isinstance(key_form, int):
+                                raw = pmf.get(str(key_form))
+                            if raw is None:
+                                continue
+                            p_val = float(raw)
+                            break
+                        except Exception:
+                            p_val = None
+                if p_val is not None and np.isfinite(float(p_val)):
+                    pct = float(p_val) * 100.0
+                    selected_pct_str = f"{pct:.3g}%"
+                else:
+                    selected_pct_str = "-"
+            except Exception:
+                selected_pct_str = "-"
+
+            # Closeness: prefer per-simulation CSV median relative regret for sims where recommended_fort == best
+            try:
+                pref_closeness = None
+                per_sim_path = (
+                    run_output_dir / f"{prefix_str}mc-per-sim-{short_hash}.csv"
+                )
+                if per_sim_path.exists():
+                    try:
+                        df_sim = pd.read_csv(per_sim_path)
+                        if (
+                            best_choice is not None
+                            and "recommended_fort" in df_sim.columns
+                        ):
+                            mask = df_sim["recommended_fort"].astype(str) == str(
+                                int(best_choice)
+                            )
+                            subset = df_sim.loc[mask]
+                            if (
+                                not subset.empty
+                                and "candidate_cost" in subset.columns
+                                and "min_cost_overall" in subset.columns
+                            ):
+                                # compute relative regret per row and median
+                                c = pd.to_numeric(
+                                    subset["candidate_cost"], errors="coerce"
+                                )
+                                mco = pd.to_numeric(
+                                    subset["min_cost_overall"], errors="coerce"
+                                )
+                                with np.errstate(invalid="ignore", divide="ignore"):
+                                    rel = (c - mco) / mco
+                                rel = rel.replace([np.inf, -np.inf], np.nan).dropna()
+                                if not rel.empty:
+                                    pref_closeness = float(np.median(rel)) * 100.0
+                        # Fallback: use mean epsilon_used across subset or global per-sim if subset empty
+                        if pref_closeness is None:
+                            if "epsilon_used" in df_sim.columns:
+                                eps_series = pd.to_numeric(
+                                    df_sim["epsilon_used"], errors="coerce"
+                                ).dropna()
+                                if not eps_series.empty:
+                                    pref_closeness = (
+                                        float(np.nanmean(eps_series)) * 100.0
+                                    )
+                    except Exception:
+                        pref_closeness = None
+                else:
+                    # Try mc_summary.per_simulation_df if present
+                    try:
+                        per_sim_df = getattr(mc_summary, "per_simulation_df", None)
+                        if (
+                            per_sim_df is not None
+                            and getattr(per_sim_df, "empty", True) is False
+                        ):
+                            if (
+                                best_choice is not None
+                                and "recommended_fort" in per_sim_df.columns
+                            ):
+                                subset = per_sim_df.loc[
+                                    per_sim_df["recommended_fort"].astype(str)
+                                    == str(int(best_choice))
+                                ]
+                                if (
+                                    not subset.empty
+                                    and "candidate_cost" in subset.columns
+                                    and "min_cost_overall" in subset.columns
+                                ):
+                                    c = pd.to_numeric(
+                                        subset["candidate_cost"], errors="coerce"
+                                    )
+                                    mco = pd.to_numeric(
+                                        subset["min_cost_overall"], errors="coerce"
+                                    )
+                                    with np.errstate(invalid="ignore", divide="ignore"):
+                                        rel = (c - mco) / mco
+                                    rel = rel.replace(
+                                        [np.inf, -np.inf], np.nan
+                                    ).dropna()
+                                    if not rel.empty:
+                                        pref_closeness = float(np.median(rel)) * 100.0
+                            if (
+                                pref_closeness is None
+                                and "epsilon_used" in per_sim_df.columns
+                            ):
+                                eps_series = pd.to_numeric(
+                                    per_sim_df["epsilon_used"], errors="coerce"
+                                ).dropna()
+                                if not eps_series.empty:
+                                    pref_closeness = (
+                                        float(np.nanmean(eps_series)) * 100.0
+                                    )
+                    except Exception:
+                        pref_closeness = None
+                if pref_closeness is not None and np.isfinite(pref_closeness):
+                    # format with 3 significant digits (e.g., 0.002%)
+                    closeness_str = f"{pref_closeness:.3g}%"
+                else:
+                    closeness_str = "-"
+            except Exception:
+                closeness_str = "-"
+
+            # Expected regret per run: compute percent from per-sim CSV if possible, else fallback to mc_summary.expected_regret_mean (raw units)
+            expected_regret_str = "-"
+            try:
+                per_sim_path = (
+                    run_output_dir / f"{prefix_str}mc-per-sim-{short_hash}.csv"
+                )
+                if per_sim_path.exists():
+                    try:
+                        df_sim_all = pd.read_csv(per_sim_path)
+                        if (
+                            "candidate_cost" in df_sim_all.columns
+                            and "min_cost_overall" in df_sim_all.columns
+                        ):
+                            c_all = pd.to_numeric(
+                                df_sim_all["candidate_cost"], errors="coerce"
+                            )
+                            mco_all = pd.to_numeric(
+                                df_sim_all["min_cost_overall"], errors="coerce"
+                            )
+                            with np.errstate(invalid="ignore", divide="ignore"):
+                                rel_all = (c_all - mco_all) / mco_all
+                            rel_all = rel_all.replace(
+                                [np.inf, -np.inf], np.nan
+                            ).dropna()
+                            if not rel_all.empty:
+                                mean_rel = float(np.nanmean(rel_all)) * 100.0
+                                expected_regret_str = f"~{mean_rel:.3g}%"
+                            else:
+                                expected_regret_str = "-"
+                        else:
+                            expected_regret_str = "-"
+                    except Exception:
+                        expected_regret_str = "-"
+                else:
+                    # fallback to mc_summary.expected_regret_mean
+                    exp_raw = getattr(mc_summary, "expected_regret_mean", None)
+                    if exp_raw is not None:
+                        try:
+                            # Report as raw units (since percent could not be computed)
+                            expected_regret_str = f"~{float(exp_raw):.3g} (raw units)"
+                        except Exception:
+                            expected_regret_str = "-"
+                    else:
+                        expected_regret_str = "-"
+            except Exception:
+                expected_regret_str = "-"
+
+            # Render lines
+            best_display = (
+                str(int(best_choice)) if best_choice is not None else "(unknown)"
+            )
+            lines.append(f"Best choice (robust): {best_display}")
+            lines.append(f"Other strong candidates: {others_str}")
+            lines.append(
+                f"Confidence: {best_display} was selected in {selected_pct_str} of simulations and is within {closeness_str} of optimal cost."
+            )
+            lines.append(f"Expected regret per run: {expected_regret_str}")
+        except Exception:
+            # Best-effort only; never raise from report assembly
+            lines.append("")
+            lines.append("Monte Carlo FORT Recommendation")
+            lines.append("==========================")
+            lines.append(" (unavailable)")
+
         return "\n".join(lines)
     except Exception:
         return "Monte Carlo: (failed to build report)\n"

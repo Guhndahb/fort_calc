@@ -11,7 +11,7 @@ The script:
  - Re-synthesizes each selected simulation deterministically via synthesize_data(...)
  - Re-runs summarize_and_model(...) on the synthesized frame to obtain full per-SOR cost curves
  - Plots cost/run vs SOR for each representative sim with:
-     * vertical line at recommended_sor
+     * vertical line at recommended_fort
      * horizontal threshold (final epsilon_used at min cost)
      * marker if epsilon_fallback_to_argmin was applied
  - Writes SVG and PNG outputs into the same run folder:
@@ -96,7 +96,7 @@ def plot_sim(sim_id: int, sim_summary, cost_col: str, debug_row: dict, out_dir: 
     sor = pd.to_numeric(df["sor#"], errors="coerce").to_numpy(dtype=float)
     costs = pd.to_numeric(df[cost_col], errors="coerce").to_numpy(dtype=float)
 
-    recommended = int(debug_row.get("recommended_sor", int(sor[np.nanargmin(costs)])))
+    recommended = int(debug_row.get("recommended_fort", int(sor[np.nanargmin(costs)])))
     epsilon_used = float(debug_row.get("epsilon_used", np.nan))
     min_cost_auth = float(debug_row.get("min_cost_auth", np.nan))
     threshold = float(debug_row.get("threshold", np.nan))
