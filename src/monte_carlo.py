@@ -22,6 +22,10 @@ class MonteCarloParams:
     epsilon_shrink_factor: float = 0.8
     epsilon_target_size: int = 3
     epsilon_max_iterations: int = 10
+    # Automated epsilon selection mode: when True, ignore epsilon_min / epsilon_shrink_factor /
+    # epsilon_max_iterations and deterministically select at most epsilon_target_size items
+    # based only on the relative-cost ranking. Default True for automated behavior.
+    epsilon_auto: bool = True
 
 
 @dataclass
@@ -62,6 +66,8 @@ def get_default_monte_carlo_params() -> MonteCarloParams:
         epsilon_shrink_factor=0.8,
         epsilon_target_size=3,
         epsilon_max_iterations=10,
+        # Automated epsilon selection enabled by default (see MonteCarloParams.epsilon_auto)
+        epsilon_auto=True,
     )
 
 
@@ -415,78 +421,179 @@ def run_monte_carlo(
             regret = float(candidate_cost - min_cost_overall)
             regrets.append(regret)
 
-            # Adaptive epsilon-optimal set for this simulation.
-            # Start from mc_params.epsilon_start and shrink multiplicatively until we
-            # hit a target number of FORTs (or a minimum epsilon floor).
-            eps = float(mc_params.epsilon_start)
-            min_cost_auth = float(np.nanmin(cost_series.dropna().to_numpy()))
-            # Adaptive parameters (with safe fallbacks)
-            eps_min = float(getattr(mc_params, "epsilon_min", 1e-6))
-            shrink_factor = float(getattr(mc_params, "epsilon_shrink_factor", 0.5))
+            # Adaptive / automatic epsilon-optimal set selection per simulation.
+            # Two modes:
+            #  - epsilon_auto == False: preserve existing adaptive multiplicative shrink loop
+            #    exactly as before (uses epsilon_start, epsilon_min, epsilon_shrink_factor, epsilon_max_iterations).
+            #  - epsilon_auto == True: deterministic selection based solely on ranking of costs.
+            #    Ignore epsilon_min / epsilon_shrink_factor / epsilon_max_iterations in this mode.
+            #
+            # Deterministic algorithm (auto mode):
+            #  1) Sort SORs by their authoritative cost ascending.
+            #  2) Let best_val = cost of the best SOR.
+            #  3) Compute relative gap delta = (cost - best_val) / best_val for each SOR.
+            #  4) Select the smallest prefix (best-to-worst) of sorted SORs whose size is <= epsilon_target_size.
+            #     This guarantees the selected set size is never larger than epsilon_target_size and is deterministic.
+            #  5) epsilon_used is the delta of the worst element included (0.0 when only argmin is included).
+            #
+            # Note: epsilon_min / epsilon_shrink_factor / epsilon_max_iterations are intentionally ignored in auto mode.
             target_size = int(getattr(mc_params, "epsilon_target_size", 5))
+            min_cost_auth = float(np.nanmin(cost_series.dropna().to_numpy()))
+            # Ensure max_iters is defined for downstream fallback checks and diagnostic logging.
             max_iters = int(getattr(mc_params, "epsilon_max_iterations", 10))
 
-            epsilon_used = eps
+            epsilon_used = float(getattr(mc_params, "epsilon_start", 0.0))
             eps_sors = []
             epsilon_iterations = 0
-            # Track the last non-empty epsilon-optimal set (and the epsilon that produced it)
-            last_non_empty_eps_sors: Optional[List[int]] = None
-            last_non_empty_epsilon: Optional[float] = None
             # Fallback trackers for diagnostic persistence
             epsilon_fallback_to_argmin = False
             epsilon_fallback_reason = None
-            for _ in range(max_iters):
-                epsilon_iterations += 1
-                threshold = min_cost_auth * (1.0 + eps)
-                eps_mask = (cost_series <= threshold) & np.isfinite(cost_series)
-                try:
-                    eps_sors = (
-                        df_results.loc[eps_mask, "sor#"]
-                        .dropna()
-                        .astype(int)
-                        .to_numpy(dtype=int)
-                        .tolist()
-                    )
-                except Exception:
-                    eps_sors = []
+            last_non_empty_eps_sors: Optional[List[int]] = None
+            last_non_empty_epsilon: Optional[float] = None
 
-                # Record last non-empty set for potential fallback
+            if bool(getattr(mc_params, "epsilon_auto", True)):
+                # AUTO MODE: deterministic selection based on cost ranking.
+                # Build (sor, cost) pairs for finite costs only.
+                try:
+                    cost_df = pd.DataFrame(
+                        {
+                            "sor#": df_results["sor#"],
+                            "__cost": pd.to_numeric(cost_series, errors="coerce"),
+                        }
+                    )
+                    # Keep only finite cost rows
+                    cost_df = cost_df.loc[np.isfinite(cost_df["__cost"])].copy()
+                    # Sort ascending by cost
+                    cost_df = cost_df.sort_values(
+                        by="__cost", ascending=True
+                    ).reset_index(drop=True)
+                except Exception:
+                    cost_df = pd.DataFrame(columns=["sor#", "__cost"])
+
+                # If no finite costs, deterministic fallback to argmin
+                if cost_df.empty:
+                    eps_sors = [int(recommended_sor)]
+                    epsilon_used = 0.0
+                    epsilon_iterations = len(eps_sors)
+                    epsilon_fallback_reason = "auto_mode"
+                    epsilon_fallback_to_argmin = True
+                else:
+                    # If target size == 1, return just the argmin deterministically
+                    if int(target_size) <= 1:
+                        # argmin is the first row in sorted cost_df
+                        try:
+                            argmin_sor = int(cost_df.iloc[0]["sor#"])
+                        except Exception:
+                            argmin_sor = int(recommended_sor)
+                        eps_sors = [argmin_sor]
+                        epsilon_used = 0.0
+                        epsilon_iterations = 1
+                        epsilon_fallback_reason = "auto_mode"
+                        epsilon_fallback_to_argmin = False
+                    else:
+                        # Select up to target_size best items (prefix)
+                        take_n = min(int(target_size), int(len(cost_df)))
+                        selected = cost_df.iloc[0:take_n]
+                        try:
+                            eps_sors = (
+                                selected["sor#"]
+                                .dropna()
+                                .astype(int)
+                                .to_numpy()
+                                .tolist()
+                            )
+                        except Exception:
+                            eps_sors = [int(recommended_sor)]
+                        # Compute epsilon_used as relative gap of worst included element
+                        try:
+                            best_val = float(selected["__cost"].iloc[0])
+                            worst_val = float(selected["__cost"].iloc[-1])
+                            if best_val == 0.0:
+                                # Avoid division by zero: if both zero then gap is 0.0, else use inf
+                                epsilon_used = 0.0 if worst_val == 0.0 else float("inf")
+                            else:
+                                epsilon_used = float((worst_val - best_val) / best_val)
+                        except Exception:
+                            epsilon_used = float(
+                                getattr(mc_params, "epsilon_start", 0.0)
+                            )
+                        epsilon_iterations = len(eps_sors)
+                        epsilon_fallback_reason = "auto_mode"
+                        epsilon_fallback_to_argmin = False
+                # Record last_non_empty for parity with legacy diagnostics (best-effort)
                 if isinstance(eps_sors, (list, tuple)) and len(eps_sors) > 0:
                     last_non_empty_eps_sors = list(eps_sors)
-                    last_non_empty_epsilon = float(eps)
+                    last_non_empty_epsilon = float(epsilon_used)
+            else:
+                # LEGACY ADAPTIVE MODE: preserve original multiplicative shrinking behavior exactly.
+                eps = float(getattr(mc_params, "epsilon_start", 0.005))
+                # Adaptive parameters (with safe fallbacks)
+                eps_min = float(getattr(mc_params, "epsilon_min", 1e-6))
+                shrink_factor = float(getattr(mc_params, "epsilon_shrink_factor", 0.5))
 
-                # Always accept if only the argmin is selected
-                if len(eps_sors) == 1:
-                    epsilon_used = eps
-                    break
-                # Accept if within desired target size (and at least one)
-                if 1 <= len(eps_sors) <= target_size:
-                    epsilon_used = eps
-                    break
-                # Shrink epsilon and continue
-                eps = eps * shrink_factor
-                if eps < eps_min:
-                    # Floor reached -> try to use last non-empty epsilon set if available,
-                    # otherwise fall back to argmin.
-                    eps = eps_min
-                    if last_non_empty_eps_sors is not None:
-                        # Use the most recent non-empty epsilon set we observed
-                        eps_sors = list(last_non_empty_eps_sors)
-                        epsilon_used = float(last_non_empty_epsilon)
-                        # Do not mark this as fallback-to-argmin since we selected an epsilon-set
-                        epsilon_fallback_to_argmin = False
-                        epsilon_fallback_reason = (
-                            "epsilon_floor_reached_used_last_nonempty"
-                        )
-                    else:
-                        # No epsilon set ever found -> deterministic fallback to argmin
-                        epsilon_used = float(eps)
-                        eps_sors = [int(recommended_sor)]
-                        epsilon_fallback_to_argmin = True
-                        epsilon_fallback_reason = "epsilon_floor_reached_no_nonempty"
-                    break
-                # update epsilon_used to current candidate (in case loop exits without break)
                 epsilon_used = eps
+                eps_sors = []
+                epsilon_iterations = 0
+                # Track the last non-empty epsilon-optimal set (and the epsilon that produced it)
+                last_non_empty_eps_sors = None
+                last_non_empty_epsilon = None
+                # Fallback trackers for diagnostic persistence
+                epsilon_fallback_to_argmin = False
+                epsilon_fallback_reason = None
+                for _ in range(max_iters):
+                    epsilon_iterations += 1
+                    threshold = min_cost_auth * (1.0 + eps)
+                    eps_mask = (cost_series <= threshold) & np.isfinite(cost_series)
+                    try:
+                        eps_sors = (
+                            df_results.loc[eps_mask, "sor#"]
+                            .dropna()
+                            .astype(int)
+                            .to_numpy(dtype=int)
+                            .tolist()
+                        )
+                    except Exception:
+                        eps_sors = []
+
+                    # Record last non-empty set for potential fallback
+                    if isinstance(eps_sors, (list, tuple)) and len(eps_sors) > 0:
+                        last_non_empty_eps_sors = list(eps_sors)
+                        last_non_empty_epsilon = float(eps)
+
+                    # Always accept if only the argmin is selected
+                    if len(eps_sors) == 1:
+                        epsilon_used = eps
+                        break
+                    # Accept if within desired target size (and at least one)
+                    if 1 <= len(eps_sors) <= target_size:
+                        epsilon_used = eps
+                        break
+                    # Shrink epsilon and continue
+                    eps = eps * shrink_factor
+                    if eps < eps_min:
+                        # Floor reached -> try to use last non-empty epsilon set if available,
+                        # otherwise fall back to argmin.
+                        eps = eps_min
+                        if last_non_empty_eps_sors is not None:
+                            # Use the most recent non-empty epsilon set we observed
+                            eps_sors = list(last_non_empty_eps_sors)
+                            epsilon_used = float(last_non_empty_epsilon)
+                            # Do not mark this as fallback-to-argmin since we selected an epsilon-set
+                            epsilon_fallback_to_argmin = False
+                            epsilon_fallback_reason = (
+                                "epsilon_floor_reached_used_last_nonempty"
+                            )
+                        else:
+                            # No epsilon set ever found -> deterministic fallback to argmin
+                            epsilon_used = float(eps)
+                            eps_sors = [int(recommended_sor)]
+                            epsilon_fallback_to_argmin = True
+                            epsilon_fallback_reason = (
+                                "epsilon_floor_reached_no_nonempty"
+                            )
+                        break
+                    # update epsilon_used to current candidate (in case loop exits without break)
+                    epsilon_used = eps
 
             # If loop exhausted without breaking, enforce deterministic fallback when appropriate
             if epsilon_iterations == 0:
@@ -523,6 +630,17 @@ def run_monte_carlo(
                     epsilon_used = float(eps if eps >= eps_min else eps_min)
 
             # Expose epsilon_used for auditing in debug/per-sim outputs
+            # Ensure threshold and max_iters exist so debug logging and later fallback checks
+            # remain stable regardless of mode (auto vs legacy). For auto-mode threshold is
+            # derived from the chosen epsilon_used for diagnostics (min_cost_auth*(1+epsilon_used)).
+            # max_iters is defined above; no need to lazily rebind here.
+            try:
+                threshold  # type: ignore[name-defined]
+            except Exception:
+                try:
+                    threshold = float(min_cost_auth * (1.0 + float(epsilon_used)))
+                except Exception:
+                    threshold = float("nan")
 
             # Collect debug row for this simulation (sample up to first 10 cost values)
             try:
@@ -541,7 +659,7 @@ def run_monte_carlo(
                     "authoritative_token": authoritative_token,
                     "cost_col": cost_col,
                     "min_cost_auth": float(min_cost_auth),
-                    "threshold": float(threshold),
+                    "threshold": float(threshold) if np.isfinite(threshold) else None,
                     "recommended_sor": int(recommended_sor),
                     "candidate_cost": float(candidate_cost),
                     "epsilon_optimal_sors": eps_sors,

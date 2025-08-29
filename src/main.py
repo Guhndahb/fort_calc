@@ -5868,6 +5868,22 @@ def _build_cli_parser():
         dest="mc_epsilon_max_iterations",
         help="Maximum iterations to attempt shrinking epsilon per simulation.",
     )
+    # New: automated epsilon mode flag (supports --mc-epsilon-auto and --no-mc-epsilon-auto)
+    g_mc.add_argument(
+        "--mc-epsilon-auto",
+        dest="mc_epsilon_auto",
+        action="store_true",
+        default=None,
+        help="Use automated epsilon mode (ignores shrink/min/max parameters, only uses target size). Default: True.",
+    )
+    g_mc.add_argument(
+        "--no-mc-epsilon-auto",
+        dest="mc_epsilon_auto",
+        action="store_false",
+        help=argparse.SUPPRESS
+        if False
+        else "Use automated epsilon mode (ignores shrink/min/max parameters, only uses target size). Default: True.",
+    )
 
     return parser
 
@@ -6097,6 +6113,8 @@ def _args_to_params(args) -> tuple[LoadSliceParams, TransformParams, List[PlotPa
         ),
         selection_policy=getattr(args, "mc_selection_policy", d_mc.selection_policy),
         output_prefix=getattr(args, "mc_output_prefix", d_mc.output_prefix),
+        # Wire through automated epsilon mode flag; default comes from get_default_monte_carlo_params()
+        epsilon_auto=getattr(args, "mc_epsilon_auto", d_mc.epsilon_auto),
     )
 
     return load, transform, plot_params_list, mc_params
